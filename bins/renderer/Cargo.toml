@@ -1,0 +1,19 @@
+[package]
+name = "renderer"
+version = "0.0.1"
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+fortrust-core = { path = "../../crates/fortrust-core" }
+fortrust-dom = { path = "../../crates/fortrust-dom" }
+fortrust-js = { path = "../../crates/fortrust-js" }
+fortrust-ipc = { path = "../../crates/fortrust-ipc" }
+fortrust-layout = { path = "../../crates/fortrust-layout" }
+fortrust-net = { path = "../../crates/fortrust-net" }
+fortrust-paint = { path = "../../crates/fortrust-paint" }
+fortrust-renderer = { path = "../../crates/fortrust-renderer" }
+fortrust-style = { path = "../../crates/fortrust-style" }
+tokio.workspace = true
+tracing.workspace = true
+tracing-subscriber.workspace = true

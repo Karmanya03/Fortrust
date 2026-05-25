@@ -1,0 +1,25 @@
+[privacy]
+block_ads = true
+block_trackers = true
+block_third_party_cookies = true
+strip_tracking_query_params = true
+https_only_mode = true
+global_privacy_control = true
+do_not_track = true
+fingerprint_noise = true
+per_profile_fingerprint_salt = 5065500367976850260
+
+[performance]
+max_active_renderer_mb = 96
+max_warm_renderer_mb = 48
+max_total_tab_ram_mb = 384
+warm_tab_limit = 2
+suspend_background_after_ticks = 4
+suspended_snapshot_kb = 384
+lazy_renderer_start = true
+
+[ui]
+theme = "dark"
+compact_density = true
+show_privacy_panel = true
+show_memory_meter = true

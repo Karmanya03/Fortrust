@@ -1,0 +1,11 @@
+[package]
+name = "fortrust-style"
+version = "0.0.1"
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+compact_str.workspace = true
+cssparser.workspace = true
+fortrust-dom = { path = "../fortrust-dom" }
+smallvec.workspace = true

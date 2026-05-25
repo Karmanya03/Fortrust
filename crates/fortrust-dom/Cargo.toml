@@ -1,0 +1,11 @@
+[package]
+name = "fortrust-dom"
+version = "0.0.1"
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+bumpalo.workspace = true
+compact_str.workspace = true
+html5ever.workspace = true
+smallvec.workspace = true

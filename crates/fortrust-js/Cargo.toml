@@ -1,0 +1,19 @@
+[package]
+name = "fortrust-js"
+version = "0.0.1"
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+boa_engine = "0.20"
+boa_gc = "0.20"
+chrono.workspace = true
+fortrust-dom = { path = "../fortrust-dom" }
+fortrust-net = { path = "../fortrust-net" }
+fortrust-core = { path = "../fortrust-core" }
+serde.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true
+tokio.workspace = true
+tracing.workspace = true
+url.workspace = true
