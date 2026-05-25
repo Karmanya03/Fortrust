@@ -1,9 +1,9 @@
-mod runtime;
-mod event_loop;
 pub mod bindings;
+mod event_loop;
+mod runtime;
 
-pub use runtime::{JsRuntime, JsError, JsValue, WebApiRegistry};
 pub use event_loop::{EventLoop, TaskQueue, TimerHandle, TimerKind};
+pub use runtime::{JsError, JsRuntime, JsValue, WebApiRegistry};
 
 use std::cell::RefCell;
 use std::rc::Rc;

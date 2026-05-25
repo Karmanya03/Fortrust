@@ -22,8 +22,7 @@ impl CookiePolicy {
             Self::AcceptAll => true,
             Self::BlockAll => false,
             Self::BlockThirdParty => {
-                domain == top_level_domain
-                    || domain.ends_with(&format!(".{top_level_domain}"))
+                domain == top_level_domain || domain.ends_with(&format!(".{top_level_domain}"))
             }
             Self::RejectTrackers => {
                 let is_tracker = [

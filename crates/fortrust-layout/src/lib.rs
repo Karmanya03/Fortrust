@@ -18,8 +18,7 @@ impl Rect {
     }
 
     pub fn contains_point(&self, px: f32, py: f32) -> bool {
-        px >= self.x && px <= self.x + self.width
-            && py >= self.y && py <= self.y + self.height
+        px >= self.x && px <= self.x + self.width && py >= self.y && py <= self.y + self.height
     }
 
     pub fn expand_by(&self, amount: f32) -> Rect {
@@ -140,9 +139,20 @@ impl LayoutEngine {
         let mut root_box = self.build_box(root, None, &style)?;
         let width = constraints.viewport_width.max(0.0);
         let mut positioned = Vec::new();
-        let _ = layout_block_box(&mut root_box, &mut positioned, 0.0, 0.0, width, None, self.line_height_px);
+        let _ = layout_block_box(
+            &mut root_box,
+            &mut positioned,
+            0.0,
+            0.0,
+            width,
+            None,
+            self.line_height_px,
+        );
         positioned.sort_by_key(|box_: &LayoutBox| box_.z_index);
-        Some(LayoutTree { root: root_box, positioned_children: positioned })
+        Some(LayoutTree {
+            root: root_box,
+            positioned_children: positioned,
+        })
     }
 
     fn build_box<'arena>(
@@ -176,14 +186,15 @@ impl LayoutEngine {
             }
             _ => {
                 let style = self.style.compute_style(node, parent_style);
-                if style.display == Display::None || style.visibility == fortrust_style::Visibility::Hidden {
+                if style.display == Display::None
+                    || style.visibility == fortrust_style::Visibility::Hidden
+                {
                     return None;
                 }
 
                 let element = node.as_element();
-                let is_replaced = element.is_some_and(|element| {
-                    element.local_name().eq_ignore_ascii_case("img")
-                });
+                let is_replaced =
+                    element.is_some_and(|element| element.local_name().eq_ignore_ascii_case("img"));
 
                 let is_positioned = style.is_absolutely_positioned();
                 let kind = if is_positioned {
@@ -223,8 +234,7 @@ impl LayoutEngine {
                 let children = if is_positioned {
                     Vec::new()
                 } else {
-                    node
-                        .children()
+                    node.children()
                         .into_iter()
                         .filter_map(|child| self.build_box(child, Some(&style), &style))
                         .collect()
@@ -275,7 +285,12 @@ fn layout_block_box(
     let has_computed_width = computed_width.is_some();
     let box_width = computed_width
         .unwrap_or(available_width)
-        .max(layout_box.style.min_width.to_px(line_height_px, pb_width, 16.0))
+        .max(
+            layout_box
+                .style
+                .min_width
+                .to_px(line_height_px, pb_width, 16.0),
+        )
         .min(match layout_box.style.max_width {
             Length::None => f32::MAX,
             l => l.to_px(line_height_px, pb_width, 16.0),
@@ -295,23 +310,39 @@ fn layout_block_box(
                 (cb.x + left, cb.y + top)
             })
             .unwrap_or((used_x, y));
-        layout_box.rect = Rect { x: offset.0, y: offset.1, width: box_width, height: 0.0 };
+        layout_box.rect = Rect {
+            x: offset.0,
+            y: offset.1,
+            width: box_width,
+            height: 0.0,
+        };
         layout_box.positioned_offset = Some(offset);
         positioned.push(layout_box.clone());
         return 0.0;
     }
 
-    let content_width = box_width - layout_box.padding.horizontal() - layout_box.border.horizontal();
+    let content_width =
+        box_width - layout_box.padding.horizontal() - layout_box.border.horizontal();
 
     let child_y = y + layout_box.margin.top + layout_box.border.top + layout_box.padding.top;
 
-    if layout_box.style.overflow_x != Overflow::Visible || layout_box.style.overflow_y != Overflow::Visible {
-        let clip_w = if has_computed_width { box_width } else { available_width };
+    if layout_box.style.overflow_x != Overflow::Visible
+        || layout_box.style.overflow_y != Overflow::Visible
+    {
+        let clip_w = if has_computed_width {
+            box_width
+        } else {
+            available_width
+        };
         layout_box.overflow_clip = Some(Rect {
             x: used_x,
             y: child_y,
             width: clip_w.max(0.0),
-            height: layout_box.style.height.to_px(line_height_px, pb_width, 16.0).max(0.0),
+            height: layout_box
+                .style
+                .height
+                .to_px(line_height_px, pb_width, 16.0)
+                .max(0.0),
         });
     }
 
@@ -321,42 +352,108 @@ fn layout_block_box(
             .height
             .to_px(line_height_px, pb_width, 16.0)
             .max(line_height_px_if_leaf(layout_box, line_height_px));
-        layout_box.rect = Rect { x: used_x, y, width: box_width, height };
-        return height + layout_box.margin.top + layout_box.margin.bottom
+        layout_box.rect = Rect {
+            x: used_x,
+            y,
+            width: box_width,
+            height,
+        };
+        return height
+            + layout_box.margin.top
+            + layout_box.margin.bottom
             + layout_box.border.vertical()
             + layout_box.padding.vertical();
     }
 
     if layout_box.kind == BoxKind::Flex {
-        let h = layout_flex_children(layout_box, positioned, child_x(layout_box, used_x), child_y, content_width, containing_block, line_height_px);
-        layout_box.rect = Rect { x: used_x, y, width: box_width, height: h };
-        return h + layout_box.margin.top + layout_box.margin.bottom + layout_box.border.vertical() + layout_box.padding.vertical();
+        let h = layout_flex_children(
+            layout_box,
+            positioned,
+            child_x(layout_box, used_x),
+            child_y,
+            content_width,
+            containing_block,
+            line_height_px,
+        );
+        layout_box.rect = Rect {
+            x: used_x,
+            y,
+            width: box_width,
+            height: h,
+        };
+        return h
+            + layout_box.margin.top
+            + layout_box.margin.bottom
+            + layout_box.border.vertical()
+            + layout_box.padding.vertical();
     }
 
     if layout_box.kind == BoxKind::Inline {
         layout_inline_children(layout_box, child_x(layout_box, x), child_y, line_height_px);
-        layout_box.rect = Rect { x: used_x, y, width: box_width, height: line_height_px };
+        layout_box.rect = Rect {
+            x: used_x,
+            y,
+            width: box_width,
+            height: line_height_px,
+        };
         return line_height_px + layout_box.margin.top + layout_box.margin.bottom;
     }
 
     if layout_box.kind == BoxKind::Replaced {
         let (rw, rh) = layout_box.replaced_size.unwrap_or((300.0, 150.0));
-        layout_box.rect = Rect { x: used_x, y, width: rw, height: rh };
-        return rh + layout_box.margin.vertical() + layout_box.border.vertical() + layout_box.padding.vertical();
+        layout_box.rect = Rect {
+            x: used_x,
+            y,
+            width: rw,
+            height: rh,
+        };
+        return rh
+            + layout_box.margin.vertical()
+            + layout_box.border.vertical()
+            + layout_box.padding.vertical();
     }
 
     let mut cursor_y = child_y;
     for child in &mut layout_box.children {
-        let child_containing = Rect { x: used_x, y: child_y, width: content_width.max(0.0), height: f32::MAX };
-        let ch = layout_block_box(child, positioned, child_x(child, used_x), cursor_y, content_width, Some(&child_containing), line_height_px);
+        let child_containing = Rect {
+            x: used_x,
+            y: child_y,
+            width: content_width.max(0.0),
+            height: f32::MAX,
+        };
+        let ch = layout_block_box(
+            child,
+            positioned,
+            child_x(child, used_x),
+            cursor_y,
+            content_width,
+            Some(&child_containing),
+            line_height_px,
+        );
         cursor_y += ch;
     }
 
     let total_content_h = cursor_y - child_y;
-    let explicit_h = layout_box.style.height.to_px(line_height_px, pb_width, 16.0);
-    let final_h = if explicit_h > 0.0 { explicit_h } else { total_content_h };
-    layout_box.rect = Rect { x: used_x, y, width: box_width, height: final_h };
-    final_h + layout_box.margin.top + layout_box.margin.bottom + layout_box.border.vertical() + layout_box.padding.vertical()
+    let explicit_h = layout_box
+        .style
+        .height
+        .to_px(line_height_px, pb_width, 16.0);
+    let final_h = if explicit_h > 0.0 {
+        explicit_h
+    } else {
+        total_content_h
+    };
+    layout_box.rect = Rect {
+        x: used_x,
+        y,
+        width: box_width,
+        height: final_h,
+    };
+    final_h
+        + layout_box.margin.top
+        + layout_box.margin.bottom
+        + layout_box.border.vertical()
+        + layout_box.padding.vertical()
 }
 
 fn child_x(layout_box: &LayoutBox, used_x: f32) -> f32 {
@@ -387,7 +484,15 @@ fn layout_flex_children(
             row_height = 0.0;
         }
 
-        let child_height = layout_block_box(child, positioned, cursor_x, cursor_y, child_width, containing_block, line_height_px);
+        let child_height = layout_block_box(
+            child,
+            positioned,
+            cursor_x,
+            cursor_y,
+            child_width,
+            containing_block,
+            line_height_px,
+        );
         cursor_x += child.rect.width + child.margin.horizontal();
         row_height = row_height.max(child_height);
         max_y = max_y.max(cursor_y + child_height);

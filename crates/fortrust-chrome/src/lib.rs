@@ -1,4 +1,10 @@
+mod animation;
 mod app;
+mod omnibox;
+mod shield;
+mod sidebar;
+mod speed_dial;
+mod theme;
 
 pub use app::FortrustApp;
 
@@ -14,6 +20,9 @@ pub fn run() -> eframe::Result<()> {
     eframe::run_native(
         "Fortrust",
         options,
-        Box::new(|creation_context| Ok(Box::new(FortrustApp::new(creation_context)))),
+        Box::new(|creation_context| {
+            let app = FortrustApp::new(creation_context);
+            Ok(Box::new(app))
+        }),
     )
 }

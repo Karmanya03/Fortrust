@@ -168,7 +168,17 @@ impl TrustEngine {
         viewport: Viewport,
     ) -> Result<EnginePage, EngineError> {
         let url = url.into();
-        self.build_page(url, html, author_css, viewport, PageSource::Offline, 0, 0, 0, 0)
+        self.build_page(
+            url,
+            html,
+            author_css,
+            viewport,
+            PageSource::Offline,
+            0,
+            0,
+            0,
+            0,
+        )
     }
 
     pub fn internal_page(
@@ -291,7 +301,9 @@ fn render_with_javascript(
     _viewport: Viewport,
     _url: &str,
 ) -> Result<fortrust_renderer::RenderedPage, EngineError> {
-    Err(EngineError::Render(fortrust_renderer::RenderError::EmptyDocument))
+    Err(EngineError::Render(
+        fortrust_renderer::RenderError::EmptyDocument,
+    ))
 }
 
 fn extract_inline_scripts(html: &str) -> Vec<String> {
@@ -305,7 +317,9 @@ fn extract_inline_scripts(html: &str) -> Vec<String> {
         let tag_end_abs = start_abs + tag_end + 1;
 
         let tag_content = &html[start_abs..tag_end_abs];
-        if tag_content.to_ascii_lowercase().contains("src=\"") || tag_content.to_ascii_lowercase().contains("src='") {
+        if tag_content.to_ascii_lowercase().contains("src=\"")
+            || tag_content.to_ascii_lowercase().contains("src='")
+        {
             pos = tag_end_abs;
             continue;
         }
@@ -436,7 +450,10 @@ async fn load_external_images(
 
                 let limit = remaining_budget.min(MAX_EXTERNAL_IMAGE_BYTES_PER_DOCUMENT);
                 match drain_stream_limited(&mut response.body, limit).await {
-                    Ok(consumed_bytes) if consume_document_budget(&mut remaining_budget, consumed_bytes).is_ok() => {
+                    Ok(consumed_bytes)
+                        if consume_document_budget(&mut remaining_budget, consumed_bytes)
+                            .is_ok() =>
+                    {
                         loaded += 1;
                     }
                     _ => blocked_or_failed += 1,
@@ -574,7 +591,10 @@ fn is_allowed_stylesheet_content_type(value: Option<&http::HeaderValue>) -> bool
         return false;
     };
 
-    matches!(normalized_content_type(value).as_str(), "text/css" | "application/css")
+    matches!(
+        normalized_content_type(value).as_str(),
+        "text/css" | "application/css"
+    )
 }
 
 fn is_allowed_image_content_type(value: Option<&http::HeaderValue>) -> bool {
@@ -755,10 +775,13 @@ mod tests {
             "#,
         );
 
-        assert_eq!(hrefs, vec![
-            "https://example.com/logo.png".to_owned(),
-            "https://example.com/app/images/photo.jpg".to_owned(),
-        ]);
+        assert_eq!(
+            hrefs,
+            vec![
+                "https://example.com/logo.png".to_owned(),
+                "https://example.com/app/images/photo.jpg".to_owned(),
+            ]
+        );
     }
 
     #[test]
@@ -783,7 +806,8 @@ mod tests {
             Ok::<Bytes, fortrust_net::TransportError>(Bytes::from_static(&[2u8; 1024])),
         ]));
 
-        let error = futures_executor::block_on(drain_stream_limited(&mut stream, 2048)).unwrap_err();
+        let error =
+            futures_executor::block_on(drain_stream_limited(&mut stream, 2048)).unwrap_err();
         assert_eq!(error, NetworkError::BodyTooLarge { limit_bytes: 2048 });
     }
 
@@ -791,12 +815,12 @@ mod tests {
     fn stylesheet_content_type_validation_is_fail_closed() {
         use http::HeaderValue;
 
-        assert!(is_allowed_stylesheet_content_type(Some(&HeaderValue::from_static(
-            "text/css; charset=utf-8"
-        ))));
-        assert!(!is_allowed_stylesheet_content_type(Some(&HeaderValue::from_static(
-            "text/html"
-        ))));
+        assert!(is_allowed_stylesheet_content_type(Some(
+            &HeaderValue::from_static("text/css; charset=utf-8")
+        )));
+        assert!(!is_allowed_stylesheet_content_type(Some(
+            &HeaderValue::from_static("text/html")
+        )));
         assert!(!is_allowed_stylesheet_content_type(None));
     }
 
@@ -806,9 +830,12 @@ mod tests {
 
         let body = Bytes::from(vec![b'a'; MAX_EXTERNAL_STYLESHEET_BYTES_PER_DOCUMENT + 1]);
         let error = futures_executor::block_on(stylesheet_text_from_response(body)).unwrap_err();
-        assert_eq!(error, NetworkError::BodyTooLarge {
-            limit_bytes: MAX_EXTERNAL_STYLESHEET_BYTES_PER_DOCUMENT,
-        });
+        assert_eq!(
+            error,
+            NetworkError::BodyTooLarge {
+                limit_bytes: MAX_EXTERNAL_STYLESHEET_BYTES_PER_DOCUMENT,
+            }
+        );
     }
 
     #[test]
@@ -826,15 +853,15 @@ mod tests {
     fn image_content_type_validation_is_fail_closed() {
         use http::HeaderValue;
 
-        assert!(is_allowed_image_content_type(Some(&HeaderValue::from_static(
-            "image/png"
-        ))));
-        assert!(is_allowed_image_content_type(Some(&HeaderValue::from_static(
-            "image/jpeg; charset=binary"
-        ))));
-        assert!(!is_allowed_image_content_type(Some(&HeaderValue::from_static(
-            "application/octet-stream"
-        ))));
+        assert!(is_allowed_image_content_type(Some(
+            &HeaderValue::from_static("image/png")
+        )));
+        assert!(is_allowed_image_content_type(Some(
+            &HeaderValue::from_static("image/jpeg; charset=binary")
+        )));
+        assert!(!is_allowed_image_content_type(Some(
+            &HeaderValue::from_static("application/octet-stream")
+        )));
         assert!(!is_allowed_image_content_type(None));
     }
 }

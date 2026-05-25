@@ -1,9 +1,8 @@
-use std::sync::Arc;
-
 use chrono::{DateTime, Utc};
 use dashmap::DashMap;
 use redb::{Database, TableDefinition};
 use serde::{Deserialize, Serialize};
+use std::sync::Arc;
 use tracing::debug;
 
 use crate::StorageError;
@@ -129,12 +128,8 @@ impl CookieJar {
         match self.policy {
             CookiePolicy::AcceptAll => true,
             CookiePolicy::BlockAll => false,
-            CookiePolicy::BlockThirdParty => {
-                !value.host_only || is_third_party(&key.domain)
-            }
-            CookiePolicy::RejectTrackers => {
-                !looks_like_tracker(&key.domain, &key.name)
-            }
+            CookiePolicy::BlockThirdParty => !value.host_only || is_third_party(&key.domain),
+            CookiePolicy::RejectTrackers => !looks_like_tracker(&key.domain, &key.name),
         }
     }
 
@@ -160,21 +155,21 @@ pub struct CookieDatabase {
 }
 
 impl CookieDatabase {
-    pub fn new(db: &Database) -> Result<Self, StorageError> {
+    pub fn new(db: Arc<Database>) -> Result<Self, StorageError> {
         let write_txn = db.begin_write()?;
         write_txn.open_table(COOKIES_TABLE)?;
         write_txn.commit()?;
         Ok(Self {
-            db: Some(Arc::new(
-                Database::create("")
-                    .map_err(|e| StorageError::Database(e.to_string()))?,
-            )),
+            db: Some(db),
             jar: CookieJar::new(),
         })
     }
 
     pub fn empty() -> Self {
-        Self { db: None, jar: CookieJar::new() }
+        Self {
+            db: None,
+            jar: CookieJar::new(),
+        }
     }
 
     pub fn jar(&self) -> &CookieJar {
@@ -195,8 +190,7 @@ impl CookieDatabase {
 }
 
 fn domain_matches(cookie_domain: &str, request_domain: &str) -> bool {
-    cookie_domain == request_domain
-        || request_domain.ends_with(&format!(".{cookie_domain}"))
+    cookie_domain == request_domain || request_domain.ends_with(&format!(".{cookie_domain}"))
 }
 
 fn path_matches(cookie_path: &str, request_path: &str) -> bool {
@@ -205,18 +199,31 @@ fn path_matches(cookie_path: &str, request_path: &str) -> bool {
 
 fn is_third_party(domain: &str) -> bool {
     let known_first_parties = [
-        "google.com", "facebook.com", "youtube.com", "twitter.com",
-        "instagram.com", "linkedin.com", "reddit.com", "amazon.com",
-        "netflix.com", "github.com", "stackoverflow.com",
+        "google.com",
+        "facebook.com",
+        "youtube.com",
+        "twitter.com",
+        "instagram.com",
+        "linkedin.com",
+        "reddit.com",
+        "amazon.com",
+        "netflix.com",
+        "github.com",
+        "stackoverflow.com",
     ];
     !known_first_parties.iter().any(|&d| domain.ends_with(d))
 }
 
 fn looks_like_tracker(domain: &str, name: &str) -> bool {
     let tracker_domains = [
-        "doubleclick.net", "google-analytics.com", "googletagmanager.com",
-        "facebook.net", "scorecardresearch.com", "hotjar.com",
-        "adsystem.com", "adservice.google.com",
+        "doubleclick.net",
+        "google-analytics.com",
+        "googletagmanager.com",
+        "facebook.net",
+        "scorecardresearch.com",
+        "hotjar.com",
+        "adsystem.com",
+        "adservice.google.com",
     ];
     let tracker_names = ["_ga", "_gid", "_fbp", "_gclid", " IDE"];
 

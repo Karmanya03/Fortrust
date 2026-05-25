@@ -101,22 +101,27 @@ pub enum Length {
 }
 
 impl Length {
-        pub fn to_px(&self, parent_px: f32, viewport_px: f32, font_size_px: f32) -> f32 {
-            match self {
-                Self::Px(v) => *v,
-                Self::Em(v) => v * font_size_px,
-                Self::Rem(v) => v * 16.0,
-                Self::Percent(v) => parent_px * v / 100.0,
-                Self::Vw(v) => viewport_px * v / 100.0,
-                Self::Vh(v) => viewport_px * v / 100.0,
-                Self::Auto | Self::Zero | Self::MaxContent | Self::MinContent | Self::FitContent | Self::None => 0.0,
-            }
-        }
-
-        pub fn is_auto(&self) -> bool {
-            matches!(self, Self::Auto)
+    pub fn to_px(&self, parent_px: f32, viewport_px: f32, font_size_px: f32) -> f32 {
+        match self {
+            Self::Px(v) => *v,
+            Self::Em(v) => v * font_size_px,
+            Self::Rem(v) => v * 16.0,
+            Self::Percent(v) => parent_px * v / 100.0,
+            Self::Vw(v) => viewport_px * v / 100.0,
+            Self::Vh(v) => viewport_px * v / 100.0,
+            Self::Auto
+            | Self::Zero
+            | Self::MaxContent
+            | Self::MinContent
+            | Self::FitContent
+            | Self::None => 0.0,
         }
     }
+
+    pub fn is_auto(&self) -> bool {
+        matches!(self, Self::Auto)
+    }
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Color {
@@ -314,8 +319,13 @@ impl ComputedStyle {
     }
 
     pub fn is_overflow_hidden(&self) -> bool {
-        matches!(self.overflow_x, Overflow::Hidden | Overflow::Scroll | Overflow::Auto)
-            || matches!(self.overflow_y, Overflow::Hidden | Overflow::Scroll | Overflow::Auto)
+        matches!(
+            self.overflow_x,
+            Overflow::Hidden | Overflow::Scroll | Overflow::Auto
+        ) || matches!(
+            self.overflow_y,
+            Overflow::Hidden | Overflow::Scroll | Overflow::Auto
+        )
     }
 }
 
@@ -328,34 +338,52 @@ pub struct EdgeSizes {
 }
 
 impl EdgeSizes {
-     pub fn zero() -> Self {
-         Self {
-             top: Length::Px(0.0),
-             right: Length::Px(0.0),
-             bottom: Length::Px(0.0),
-             left: Length::Px(0.0),
-         }
-     }
+    pub fn zero() -> Self {
+        Self {
+            top: Length::Px(0.0),
+            right: Length::Px(0.0),
+            bottom: Length::Px(0.0),
+            left: Length::Px(0.0),
+        }
+    }
 
-     pub fn horizontal(&self) -> Length {
-         Length::Px(0.0)
-     }
+    pub fn horizontal(&self, parent_px: f32, viewport_px: f32, font_size_px: f32) -> f32 {
+        self.left.to_px(parent_px, viewport_px, font_size_px)
+            + self.right.to_px(parent_px, viewport_px, font_size_px)
+    }
 
-     pub fn vertical(&self) -> Length {
-         Length::Px(0.0)
-     }
- }
+    pub fn vertical(&self, parent_px: f32, viewport_px: f32, font_size_px: f32) -> f32 {
+        self.top.to_px(parent_px, viewport_px, font_size_px)
+            + self.bottom.to_px(parent_px, viewport_px, font_size_px)
+    }
+}
 
 impl From<BorderSizes> for EdgeSizes {
-     fn from(borders: BorderSizes) -> Self {
-         Self {
-             top: if borders.top.style == BorderStyle::None { Length::Px(0.0) } else { Length::Px(borders.top.width) },
-             right: if borders.right.style == BorderStyle::None { Length::Px(0.0) } else { Length::Px(borders.right.width) },
-             bottom: if borders.bottom.style == BorderStyle::None { Length::Px(0.0) } else { Length::Px(borders.bottom.width) },
-             left: if borders.left.style == BorderStyle::None { Length::Px(0.0) } else { Length::Px(borders.left.width) },
-         }
-     }
- }
+    fn from(borders: BorderSizes) -> Self {
+        Self {
+            top: if borders.top.style == BorderStyle::None {
+                Length::Px(0.0)
+            } else {
+                Length::Px(borders.top.width)
+            },
+            right: if borders.right.style == BorderStyle::None {
+                Length::Px(0.0)
+            } else {
+                Length::Px(borders.right.width)
+            },
+            bottom: if borders.bottom.style == BorderStyle::None {
+                Length::Px(0.0)
+            } else {
+                Length::Px(borders.bottom.width)
+            },
+            left: if borders.left.style == BorderStyle::None {
+                Length::Px(0.0)
+            } else {
+                Length::Px(borders.left.width)
+            },
+        }
+    }
+}
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct Declaration {
@@ -621,7 +649,12 @@ impl SimpleSelector {
             }
         }
 
-        Some(Self { tag, id, classes, pseudo_class })
+        Some(Self {
+            tag,
+            id,
+            classes,
+            pseudo_class,
+        })
     }
 
     fn specificity(&self) -> u32 {
@@ -755,20 +788,22 @@ fn parse_property_value(property: &str, value: &str) -> Option<PropertyValue> {
         "color" | "background-color" | "border-color" | "outline-color" => {
             parse_color(value).map(PropertyValue::Color)
         }
-        "font-size" | "width" | "height" | "min-width" | "max-width" | "min-height" | "max-height"
-        | "margin-top" | "margin-right" | "margin-bottom" | "margin-left"
-        | "padding-top" | "padding-right" | "padding-bottom" | "padding-left"
-        | "left" | "right" | "top" | "bottom"
-        | "line-height" | "letter-spacing" | "word-spacing" | "text-indent" => {
-            parse_length(value).map(PropertyValue::Length)
-        }
+        "font-size" | "width" | "height" | "min-width" | "max-width" | "min-height"
+        | "max-height" | "margin-top" | "margin-right" | "margin-bottom" | "margin-left"
+        | "padding-top" | "padding-right" | "padding-bottom" | "padding-left" | "left"
+        | "right" | "top" | "bottom" | "line-height" | "letter-spacing" | "word-spacing"
+        | "text-indent" => parse_length(value).map(PropertyValue::Length),
         "margin" | "padding" => parse_edge_sizes(value).map(PropertyValue::Edges),
         "font-weight" => match lowered.as_str() {
             "bold" | "700" => Some(PropertyValue::FontWeight(FontWeight::Bold)),
             "normal" | "400" => Some(PropertyValue::FontWeight(FontWeight::Normal)),
             "bolder" => Some(PropertyValue::FontWeight(FontWeight::Bolder)),
             "lighter" => Some(PropertyValue::FontWeight(FontWeight::Lighter)),
-            _ => value.parse::<u16>().ok().map(FontWeight::Number).map(PropertyValue::FontWeight),
+            _ => value
+                .parse::<u16>()
+                .ok()
+                .map(FontWeight::Number)
+                .map(PropertyValue::FontWeight),
         },
         "font-style" => match lowered.as_str() {
             "normal" => Some(PropertyValue::FontStyle(FontStyle::Normal)),
@@ -820,17 +855,21 @@ fn parse_property_value(property: &str, value: &str) -> Option<PropertyValue> {
             _ => None,
         },
         "z-index" => value.parse::<i32>().ok().map(PropertyValue::ZIndex),
-        "opacity" => value.parse::<f32>().ok().map(|v| PropertyValue::Opacity(v.clamp(0.0, 1.0))),
+        "opacity" => value
+            .parse::<f32>()
+            .ok()
+            .map(|v| PropertyValue::Opacity(v.clamp(0.0, 1.0))),
         "flex-grow" => value.parse::<f32>().ok().map(PropertyValue::FlexGrow),
         "flex-shrink" => value.parse::<f32>().ok().map(PropertyValue::FlexShrink),
         "order" => value.parse::<i32>().ok().map(PropertyValue::Order),
         "border" | "border-top" | "border-right" | "border-bottom" | "border-left" => {
             parse_border_shorthand(value)
         }
-        "border-width" | "border-top-width" | "border-right-width"
-        | "border-bottom-width" | "border-left-width" => {
-            parse_length(value).map(PropertyValue::Length)
-        }
+        "border-width"
+        | "border-top-width"
+        | "border-right-width"
+        | "border-bottom-width"
+        | "border-left-width" => parse_length(value).map(PropertyValue::Length),
         _ => None,
     }
 }
@@ -913,7 +952,11 @@ fn parse_border_shorthand(value: &str) -> Option<PropertyValue> {
     }
 
     let w = width.to_px(16.0, 1280.0, 16.0);
-    let border = Border { width: w, style, color };
+    let border = Border {
+        width: w,
+        style,
+        color,
+    };
     let mut borders = BorderSizes::none();
     borders.top = border;
     borders.right = border;

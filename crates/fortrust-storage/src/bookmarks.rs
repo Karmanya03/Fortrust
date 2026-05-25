@@ -1,9 +1,8 @@
-use std::sync::Arc;
-
 use chrono::{DateTime, Utc};
 use dashmap::DashMap;
 use redb::{Database, ReadableTable, TableDefinition};
 use serde::{Deserialize, Serialize};
+use std::sync::Arc;
 use tracing::debug;
 
 use crate::StorageError;
@@ -97,16 +96,14 @@ pub struct BookmarkDatabase {
 }
 
 impl BookmarkDatabase {
-    pub fn new(db: &Database) -> Result<Self, StorageError> {
+    pub fn new(db: Arc<Database>) -> Result<Self, StorageError> {
         let write_txn = db.begin_write()?;
         write_txn.open_table(BOOKMARKS_TABLE)?;
         write_txn.commit()?;
 
-        let arc_db = Arc::new(Database::create("")
-            .map_err(|e| StorageError::Database(e.to_string()))?);
         let cache = DashMap::new();
 
-        if let Ok(read_txn) = arc_db.begin_read()
+        if let Ok(read_txn) = db.begin_read()
             && let Ok(table) = read_txn.open_table(BOOKMARKS_TABLE)
         {
             for result in table.iter()? {
@@ -123,7 +120,7 @@ impl BookmarkDatabase {
         }
 
         Ok(Self {
-            db: Some(arc_db),
+            db: Some(db),
             cache,
         })
     }

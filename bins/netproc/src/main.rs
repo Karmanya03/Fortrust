@@ -2,17 +2,17 @@ use std::sync::Arc;
 
 use fortrust_core::{PrivacyConfig, PrivacyEngine, RequestContext, ResourceType};
 use fortrust_ipc::{BincodeCodec, NetProcessCommand, NetProcessEvent};
-use fortrust_net::{NetworkClient};
-use tokio::sync::Mutex;
+use fortrust_net::NetworkClient;
 use tokio::io::{AsyncReadExt, BufReader};
+use tokio::sync::Mutex;
 use tracing::{debug, error, info, warn};
 use tracing_subscriber::EnvFilter;
 
 #[tokio::main]
 async fn main() {
-     tracing_subscriber::fmt()
-         .with_env_filter(EnvFilter::from_default_env())
-         .init();
+    tracing_subscriber::fmt()
+        .with_env_filter(EnvFilter::from_default_env())
+        .init();
 
     info!("NetProc: Network process starting");
 
@@ -50,10 +50,7 @@ async fn main() {
     }
 }
 
-async fn handle_connection(
-    stream: tokio::net::TcpStream,
-    network: Arc<Mutex<NetworkClient>>,
-) {
+async fn handle_connection(stream: tokio::net::TcpStream, network: Arc<Mutex<NetworkClient>>) {
     use tokio::io::AsyncWriteExt;
 
     let (reader, mut writer) = stream.into_split();
@@ -62,14 +59,14 @@ async fn handle_connection(
 
     loop {
         buf.clear();
-          match reader.read(&mut buf).await {
-              Ok(0) => break,
-              Ok(_) => {}
-              Err(error) => {
-                  warn!("Read error: {error}");
-                  break;
-              }
-          }
+        match reader.read(&mut buf).await {
+            Ok(0) => break,
+            Ok(_) => {}
+            Err(error) => {
+                warn!("Read error: {error}");
+                break;
+            }
+        }
 
         if buf.is_empty() {
             continue;
@@ -144,7 +141,9 @@ async fn handle_connection(
             NetProcessCommand::Shutdown => {
                 info!("NetProc shutdown requested");
                 let _ = writer
-                    .write_all(&BincodeCodec::encode(&NetProcessEvent::ShutdownAck).unwrap_or_default())
+                    .write_all(
+                        &BincodeCodec::encode(&NetProcessEvent::ShutdownAck).unwrap_or_default(),
+                    )
                     .await;
                 break;
             }

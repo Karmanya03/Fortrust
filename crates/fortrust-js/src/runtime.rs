@@ -4,14 +4,13 @@ use std::sync::atomic::{AtomicU64, Ordering};
 
 use boa_engine::{
     Context, JsError as BoaError, JsValue as BoaValue, Source, js_string,
-    native_function::NativeFunction,
-    object::FunctionObjectBuilder,
+    native_function::NativeFunction, object::FunctionObjectBuilder,
 };
 use thiserror::Error;
 use tracing::{debug, warn};
 
-use crate::event_loop::{EventLoop, TimerHandle};
 use crate::bindings;
+use crate::event_loop::{EventLoop, TimerHandle};
 use fortrust_dom::Document;
 
 pub type JsValue = BoaValue;
@@ -162,7 +161,12 @@ impl JsRuntime {
         }
 
         if registry.fetch_enabled {
-            bindings::fetch::register(&mut self.context, origin.clone(), event_loop, self.network.clone())?;
+            bindings::fetch::register(
+                &mut self.context,
+                origin.clone(),
+                event_loop,
+                self.network.clone(),
+            )?;
         }
 
         bindings::navigator::register(&mut self.context)?;
@@ -224,11 +228,7 @@ impl JsRuntime {
             .map_err(JsError::from)
     }
 
-    pub fn register_global_property(
-        &mut self,
-        name: &str,
-        value: JsValue,
-    ) -> Result<(), JsError> {
+    pub fn register_global_property(&mut self, name: &str, value: JsValue) -> Result<(), JsError> {
         let global = self.context.global_object();
         global
             .set(js_string!(name), value, false, &mut self.context)
@@ -243,11 +243,14 @@ impl JsRuntime {
         function: NativeFunction,
     ) -> Result<(), JsError> {
         let global = self.context.global_object();
-        let js_fn: BoaValue =
-            FunctionObjectBuilder::new(self.context.realm(), function).build().into();
+        let js_fn: BoaValue = FunctionObjectBuilder::new(self.context.realm(), function)
+            .build()
+            .into();
         global
             .set(js_string!(name), js_fn, false, &mut self.context)
-            .map_err(|e| JsError::Internal(format!("Failed to register global function {name}: {e}")))
+            .map_err(|e| {
+                JsError::Internal(format!("Failed to register global function {name}: {e}"))
+            })
             .map(|_| ())
     }
 

@@ -5,6 +5,7 @@ edition.workspace = true
 license.workspace = true
 
 [dependencies]
+adblock.workspace = true
 ahash.workspace = true
 compact_str.workspace = true
 dashmap.workspace = true

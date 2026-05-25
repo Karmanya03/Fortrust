@@ -1,17 +1,16 @@
-mod messages;
-mod codec;
 mod channel;
+mod codec;
+mod messages;
 
-pub use messages::{
-    BrowserToRenderer, RendererToBrowser, NetProcessCommand, NetProcessEvent,
-    KeyEvent, MouseEvent, Modifiers, PrivacyEvent, LoadState,
-};
-pub use codec::{BincodeCodec, FramedMessage, CodecError};
 pub use channel::{IpcChannel, IpcError, MessageReceiver, MessageSender};
+pub use codec::{BincodeCodec, CodecError, FramedMessage};
+pub use messages::{
+    BrowserToRenderer, KeyEvent, LoadState, Modifiers, MouseEvent, NetProcessCommand,
+    NetProcessEvent, PrivacyEvent, RendererToBrowser,
+};
 
 use std::sync::Arc;
 use tokio::sync::Mutex;
-
 
 pub type SharedIpcChannel = Arc<Mutex<IpcChannel>>;
 

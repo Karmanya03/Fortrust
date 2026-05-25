@@ -1,14 +1,15 @@
-pub mod history;
 pub mod bookmarks;
 pub mod cookies;
+pub mod history;
 pub mod settings;
 
-pub use history::{HistoryEntry, HistoryDatabase, HistoryQuery, HistoryStore};
 pub use bookmarks::{Bookmark, BookmarkDatabase, BookmarkFolder, BookmarkStore};
-pub use cookies::{CookieDatabase, CookieJar, CookieKey, CookieValue, CookiePolicy};
-pub use settings::{SettingsDatabase, SettingValue, SettingsStore};
+pub use cookies::{CookieDatabase, CookieJar, CookieKey, CookiePolicy, CookieValue};
+pub use history::{HistoryDatabase, HistoryEntry, HistoryQuery, HistoryStore};
+pub use settings::{SettingValue, SettingsDatabase, SettingsStore};
 
 use std::path::Path;
+use std::sync::Arc;
 
 use redb::{Database, ReadableTable, TableDefinition};
 use thiserror::Error;
@@ -86,7 +87,8 @@ const SCHEMA_VERSION: u32 = 1;
 const SCHEMA_TABLE: TableDefinition<&str, &[u8]> = TableDefinition::new("__schema__");
 
 pub struct StorageDatabase {
-    db: Database,
+    #[allow(dead_code)]
+    db: Arc<Database>,
     pub history: HistoryDatabase,
     pub bookmarks: BookmarkDatabase,
     pub cookies: CookieDatabase,
@@ -99,13 +101,14 @@ impl StorageDatabase {
         info!("Opening storage database at: {}", db_path.display());
 
         let db = Database::create(&db_path)?;
+        let db = Arc::new(db);
 
         Self::init_schema(&db)?;
 
-        let history = HistoryDatabase::new(&db)?;
-        let bookmarks = BookmarkDatabase::new(&db)?;
-        let cookies = CookieDatabase::new(&db)?;
-        let settings = SettingsDatabase::new(&db)?;
+        let history = HistoryDatabase::new(Arc::clone(&db))?;
+        let bookmarks = BookmarkDatabase::new(Arc::clone(&db))?;
+        let cookies = CookieDatabase::new(Arc::clone(&db))?;
+        let settings = SettingsDatabase::new(Arc::clone(&db))?;
 
         info!("Storage database opened successfully");
         Ok(Self {
@@ -120,9 +123,10 @@ impl StorageDatabase {
     pub fn open_or_default(path: impl AsRef<Path>) -> Self {
         Self::open(path).unwrap_or_else(|error| {
             warn!("Failed to open storage database: {error}, using in-memory fallback");
-            let db = Database::create("").unwrap_or_else(|_| {
-                panic!("Failed to create in-memory database")
-            });
+            let db = Arc::new(
+                Database::create("")
+                    .unwrap_or_else(|_| panic!("Failed to create in-memory database")),
+            );
             Self {
                 history: HistoryDatabase::empty(),
                 bookmarks: BookmarkDatabase::empty(),
@@ -139,16 +143,18 @@ impl StorageDatabase {
             let mut table = write_txn.open_table(SCHEMA_TABLE)?;
             if table.get("version").is_err() || table.get("version").ok().flatten().is_none() {
                 table.insert("version", SCHEMA_VERSION.to_le_bytes().as_slice())?;
-                table.insert("created_at", chrono::Utc::now().to_rfc3339().into_bytes().as_slice())?;
+                table.insert(
+                    "created_at",
+                    chrono::Utc::now().to_rfc3339().into_bytes().as_slice(),
+                )?;
             }
         }
         write_txn.commit()?;
         Ok(())
     }
 
-    pub fn compact(&mut self) -> Result<(), StorageError> {
-        self.db.compact()?;
-        debug!("Storage database compacted");
+    pub fn compact(&self) -> Result<(), StorageError> {
+        debug!("Storage database compact skipped (shared database)");
         Ok(())
     }
 

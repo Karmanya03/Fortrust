@@ -1,6 +1,5 @@
 use boa_engine::{
-    Context, JsResult, JsValue, NativeFunction, js_string,
-    object::ObjectInitializer,
+    Context, JsResult, JsValue, NativeFunction, js_string, object::ObjectInitializer,
 };
 use tracing::info;
 
@@ -26,7 +25,11 @@ pub fn register(context: &mut Context) -> JsResult<()> {
 
 fn format_args(args: &[JsValue], context: &mut Context) -> String {
     args.iter()
-        .map(|arg| arg.to_string(context).map(|s| s.to_std_string_escaped()).unwrap_or_else(|_| "[unprintable]".to_owned()))
+        .map(|arg| {
+            arg.to_string(context)
+                .map(|s| s.to_std_string_escaped())
+                .unwrap_or_else(|_| "[unprintable]".to_owned())
+        })
         .collect::<Vec<_>>()
         .join(" ")
 }

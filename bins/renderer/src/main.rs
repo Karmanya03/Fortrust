@@ -65,10 +65,14 @@ impl RendererInstance {
                     return RendererToBrowser::TitleChanged { title };
                 }
 
-                match self.renderer.render(&html_source, &[], fortrust_renderer::Viewport {
-                    width: self.width as f32,
-                    height: self.height as f32,
-                }) {
+                match self.renderer.render(
+                    &html_source,
+                    &[],
+                    fortrust_renderer::Viewport {
+                        width: self.width as f32,
+                        height: self.height as f32,
+                    },
+                ) {
                     Ok(page) => {
                         let title = if page.text_content.len() > 80 {
                             page.text_content[..80].to_owned()
@@ -77,12 +81,10 @@ impl RendererInstance {
                         };
                         RendererToBrowser::TitleChanged { title }
                     }
-                    Err(error) => {
-                        RendererToBrowser::NavigationError {
-                            url: url.to_owned(),
-                            error: format!("Render failed: {error:?}"),
-                        }
-                    }
+                    Err(error) => RendererToBrowser::NavigationError {
+                        url: url.to_owned(),
+                        error: format!("Render failed: {error:?}"),
+                    },
                 }
             }
             Err(error) => RendererToBrowser::NavigationError {
@@ -104,9 +106,7 @@ async fn handle_renderer_commands() {
 
 #[tokio::main]
 async fn main() {
-    tracing_subscriber::fmt()
-        .with_env_filter("info")
-        .init();
+    tracing_subscriber::fmt().with_env_filter("info").init();
 
     let args: Vec<String> = std::env::args().collect();
     let tab_id = args
@@ -135,7 +135,11 @@ async fn main() {
 
     let _renderer = RendererInstance::new(tab_id, width, height);
 
-    if let Some(url) = args.iter().position(|a| a == "--url").and_then(|i| args.get(i + 1)) {
+    if let Some(url) = args
+        .iter()
+        .position(|a| a == "--url")
+        .and_then(|i| args.get(i + 1))
+    {
         info!("Renderer[{tab_id:?}]: Initial URL: {url}");
     }
 

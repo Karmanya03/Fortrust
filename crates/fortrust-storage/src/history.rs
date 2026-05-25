@@ -1,8 +1,7 @@
-use std::sync::Arc;
-
 use chrono::{DateTime, Utc};
 use redb::{Database, ReadableTable, TableDefinition};
 use serde::{Deserialize, Serialize};
+use std::sync::Arc;
 use tracing::debug;
 
 use crate::StorageError;
@@ -66,11 +65,7 @@ impl HistoryStore {
 
     pub fn add_visit(&mut self, url: String, title: String) {
         let now = Utc::now();
-        if let Some(existing) = self
-            .entries
-            .iter_mut()
-            .find(|entry| entry.url == url)
-        {
+        if let Some(existing) = self.entries.iter_mut().find(|entry| entry.url == url) {
             existing.visit_count = existing.visit_count.saturating_add(1);
             existing.visit_time = now;
             if !title.is_empty() {
@@ -135,17 +130,12 @@ pub struct HistoryDatabase {
 }
 
 impl HistoryDatabase {
-    pub fn new(db: &Database) -> Result<Self, StorageError> {
+    pub fn new(db: Arc<Database>) -> Result<Self, StorageError> {
         let write_txn = db.begin_write()?;
         write_txn.open_table(HISTORY_TABLE)?;
         write_txn.open_table(HISTORY_INDEX_TABLE)?;
         write_txn.commit()?;
-        Ok(Self {
-            db: Some(Arc::new(
-                Database::create("")
-                    .map_err(|e| StorageError::Database(e.to_string()))?,
-            )),
-        })
+        Ok(Self { db: Some(db) })
     }
 
     pub fn empty() -> Self {
@@ -190,17 +180,14 @@ impl HistoryDatabase {
             };
             let url = String::from_utf8_lossy(key.value()).to_string();
 
-            if !query_lower.is_empty()
-                && !url.to_ascii_lowercase().contains(&query_lower)
-            {
+            if !query_lower.is_empty() && !url.to_ascii_lowercase().contains(&query_lower) {
                 continue;
             }
 
             if let Ok((entry, _)) = bincode::serde::decode_from_slice::<HistoryEntry, _>(
                 value.value(),
                 bincode::config::standard(),
-            )
-                && query.from_date.is_none_or(|d| entry.visit_time >= d)
+            ) && query.from_date.is_none_or(|d| entry.visit_time >= d)
                 && query.to_date.is_none_or(|d| entry.visit_time <= d)
             {
                 results.push(entry);

@@ -1,4 +1,4 @@
-use bincode::{config, Decode, Encode};
+use bincode::{Decode, Encode, config};
 use bytes::{Buf, BufMut, BytesMut};
 use thiserror::Error;
 use tracing::{debug, warn};
@@ -66,14 +66,15 @@ impl BincodeCodec {
         }
     }
 
-    pub fn decode_message<T: Decode<()>>(buffer: &mut BytesMut) -> Result<Option<(T, usize)>, CodecError> {
+    pub fn decode_message<T: Decode<()>>(
+        buffer: &mut BytesMut,
+    ) -> Result<Option<(T, usize)>, CodecError> {
         if buffer.len() < HEADER_SIZE {
             return Ok(None);
         }
 
         let payload_len = u64::from_be_bytes([
-            buffer[0], buffer[1], buffer[2], buffer[3],
-            buffer[4], buffer[5], buffer[6], buffer[7],
+            buffer[0], buffer[1], buffer[2], buffer[3], buffer[4], buffer[5], buffer[6], buffer[7],
         ]) as usize;
 
         if payload_len > MAX_MESSAGE_SIZE {

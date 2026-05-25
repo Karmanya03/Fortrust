@@ -1,5 +1,5 @@
-use rand::{Rng, SeedableRng};
 use rand::rngs::StdRng;
+use rand::{Rng, SeedableRng};
 use tracing::debug;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -43,9 +43,7 @@ impl CanvasNoise {
                     let n: u8 = rng.gen_range(0..=self.noise_level);
                     *pixel ^ n
                 }
-                NoiseStrategy::Rounding => {
-                    *pixel & 0b1111_1100
-                }
+                NoiseStrategy::Rounding => *pixel & 0b1111_1100,
             };
             *pixel = noise;
         }

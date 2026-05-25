@@ -1,0 +1,3 @@
+! Brave Unbreak — placeholder
+! Download the current version from: https://raw.githubusercontent.com/brave/adblock-lists/master/brave-unbreak.txt
+! Fortrust will use this at compile-time via include_str!

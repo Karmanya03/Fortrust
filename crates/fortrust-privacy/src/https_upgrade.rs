@@ -92,20 +92,62 @@ impl HttpsUpgrader {
 
     fn built_in_rules() -> Vec<UpgradeRule> {
         vec![
-            UpgradeRule { domain: "google.com".to_owned(), include_subdomains: true },
-            UpgradeRule { domain: "youtube.com".to_owned(), include_subdomains: true },
-            UpgradeRule { domain: "facebook.com".to_owned(), include_subdomains: true },
-            UpgradeRule { domain: "twitter.com".to_owned(), include_subdomains: true },
-            UpgradeRule { domain: "instagram.com".to_owned(), include_subdomains: true },
-            UpgradeRule { domain: "linkedin.com".to_owned(), include_subdomains: true },
-            UpgradeRule { domain: "reddit.com".to_owned(), include_subdomains: true },
-            UpgradeRule { domain: "amazon.com".to_owned(), include_subdomains: true },
-            UpgradeRule { domain: "github.com".to_owned(), include_subdomains: true },
-            UpgradeRule { domain: "stackoverflow.com".to_owned(), include_subdomains: true },
-            UpgradeRule { domain: "wikipedia.org".to_owned(), include_subdomains: true },
-            UpgradeRule { domain: "mozilla.org".to_owned(), include_subdomains: true },
-            UpgradeRule { domain: "duckduckgo.com".to_owned(), include_subdomains: true },
-            UpgradeRule { domain: "brave.com".to_owned(), include_subdomains: true },
+            UpgradeRule {
+                domain: "google.com".to_owned(),
+                include_subdomains: true,
+            },
+            UpgradeRule {
+                domain: "youtube.com".to_owned(),
+                include_subdomains: true,
+            },
+            UpgradeRule {
+                domain: "facebook.com".to_owned(),
+                include_subdomains: true,
+            },
+            UpgradeRule {
+                domain: "twitter.com".to_owned(),
+                include_subdomains: true,
+            },
+            UpgradeRule {
+                domain: "instagram.com".to_owned(),
+                include_subdomains: true,
+            },
+            UpgradeRule {
+                domain: "linkedin.com".to_owned(),
+                include_subdomains: true,
+            },
+            UpgradeRule {
+                domain: "reddit.com".to_owned(),
+                include_subdomains: true,
+            },
+            UpgradeRule {
+                domain: "amazon.com".to_owned(),
+                include_subdomains: true,
+            },
+            UpgradeRule {
+                domain: "github.com".to_owned(),
+                include_subdomains: true,
+            },
+            UpgradeRule {
+                domain: "stackoverflow.com".to_owned(),
+                include_subdomains: true,
+            },
+            UpgradeRule {
+                domain: "wikipedia.org".to_owned(),
+                include_subdomains: true,
+            },
+            UpgradeRule {
+                domain: "mozilla.org".to_owned(),
+                include_subdomains: true,
+            },
+            UpgradeRule {
+                domain: "duckduckgo.com".to_owned(),
+                include_subdomains: true,
+            },
+            UpgradeRule {
+                domain: "brave.com".to_owned(),
+                include_subdomains: true,
+            },
         ]
     }
 }

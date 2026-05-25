@@ -1,0 +1,3 @@
+! EasyPrivacy — placeholder
+! Download the current version from: https://easylist.to/easylist/easyprivacy.txt
+! Fortrust will use this at compile-time via include_str!

@@ -164,68 +164,133 @@ pub struct RequestClassifier;
 impl RequestClassifier {
     pub fn classify(url: &str, content_type: Option<&str>) -> &'static str {
         if let Some(ct) = content_type {
-            if ct.starts_with("text/html") { return "document"; }
-            if ct.starts_with("text/css") { return "stylesheet"; }
+            if ct.starts_with("text/html") {
+                return "document";
+            }
+            if ct.starts_with("text/css") {
+                return "stylesheet";
+            }
             if ct.starts_with("application/javascript")
                 || ct.starts_with("text/javascript")
-                || ct.starts_with("application/x-javascript") { return "script"; }
-            if ct.starts_with("image/") { return "image"; }
-            if ct.starts_with("font/")
-                || ct.contains("font")
-                || url.contains(".woff") { return "font"; }
-            if ct.starts_with("audio/") || ct.starts_with("video/") { return "media"; }
+                || ct.starts_with("application/x-javascript")
+            {
+                return "script";
+            }
+            if ct.starts_with("image/") {
+                return "image";
+            }
+            if ct.starts_with("font/") || ct.contains("font") || url.contains(".woff") {
+                return "font";
+            }
+            if ct.starts_with("audio/") || ct.starts_with("video/") {
+                return "media";
+            }
         }
 
         let lower = url.to_ascii_lowercase();
-        if lower.ends_with(".js") { return "script"; }
-        if lower.ends_with(".css") { return "stylesheet"; }
-        if lower.ends_with(".png") || lower.ends_with(".jpg")
-            || lower.ends_with(".jpeg") || lower.ends_with(".gif")
-            || lower.ends_with(".webp") || lower.ends_with(".svg")
-            || lower.ends_with(".ico") { return "image"; }
-        if lower.ends_with(".woff") || lower.ends_with(".woff2")
-            || lower.ends_with(".ttf") || lower.ends_with(".otf") { return "font"; }
-        if lower.ends_with(".mp4") || lower.ends_with(".webm")
-            || lower.ends_with(".mp3") || lower.ends_with(".wav") { return "media"; }
-        if lower.ends_with(".html") || lower.ends_with(".htm") { return "document"; }
-        if lower.ends_with(".json") || lower.ends_with(".xml") { return "xhr"; }
+        if lower.ends_with(".js") {
+            return "script";
+        }
+        if lower.ends_with(".css") {
+            return "stylesheet";
+        }
+        if lower.ends_with(".png")
+            || lower.ends_with(".jpg")
+            || lower.ends_with(".jpeg")
+            || lower.ends_with(".gif")
+            || lower.ends_with(".webp")
+            || lower.ends_with(".svg")
+            || lower.ends_with(".ico")
+        {
+            return "image";
+        }
+        if lower.ends_with(".woff")
+            || lower.ends_with(".woff2")
+            || lower.ends_with(".ttf")
+            || lower.ends_with(".otf")
+        {
+            return "font";
+        }
+        if lower.ends_with(".mp4")
+            || lower.ends_with(".webm")
+            || lower.ends_with(".mp3")
+            || lower.ends_with(".wav")
+        {
+            return "media";
+        }
+        if lower.ends_with(".html") || lower.ends_with(".htm") {
+            return "document";
+        }
+        if lower.ends_with(".json") || lower.ends_with(".xml") {
+            return "xhr";
+        }
 
         "other"
     }
 }
 
 fn extract_host(url: &str) -> Option<String> {
-    url::Url::parse(url).ok()
+    url::Url::parse(url)
+        .ok()
         .or_else(|| url::Url::parse(&format!("https://{url}")).ok())
         .and_then(|parsed| parsed.host_str().map(str::to_ascii_lowercase))
 }
 
 fn built_in_tracker_hosts() -> AHashSet<CompactString> {
     [
-        "doubleclick.net", "google-analytics.com", "googletagmanager.com",
-        "googleadservices.com", "googleads.g.doubleclick.net", "pagead2.googlesyndication.com",
-        "facebook.net", "facebook.com/tr", "connect.facebook.net",
-        "scorecardresearch.com", "hotjar.com", "static.hotjar.com",
-        "segment.io", "segment.com", "cdn.segment.com",
-        "mixpanel.com", "api.mixpanel.com",
-        "amplitude.com", "api.amplitude.com",
-        "fullstory.com", "rs.fullstory.com",
-        "crazyegg.com", "dnn506yrbagrg.cloudfront.net",
-        "optimizely.com", "cdn.optimizely.com",
-        "mouseflow.com", "cdn.mouseflow.com",
-        "clarity.ms", "c.clarity.ms",
-        "hubspot.com", "track.hubspot.com",
-        "linkedin.com/px", "ads.linkedin.com",
-        "twitter.com/i/jot", "analytics.twitter.com",
-        "pixel.quantserve.com", "secure.quantserve.com",
-        "browser.sentry-cdn.com", "o73581.ingest.sentry.io",
-        "cdn.braze.com", "appboy.com",
-        "tealiumiq.com", "tags.tiqcdn.com",
-        "bluekai.com", "tags.bluekai.com",
-        "exelator.com", "sync.exelator.com",
-        "demdex.net", "dpm.demdex.net",
-        "adsafeprotected.com", "static.adsafeprotected.com",
-        "moatads.com", "js.moatads.com",
+        "doubleclick.net",
+        "google-analytics.com",
+        "googletagmanager.com",
+        "googleadservices.com",
+        "googleads.g.doubleclick.net",
+        "pagead2.googlesyndication.com",
+        "facebook.net",
+        "facebook.com/tr",
+        "connect.facebook.net",
+        "scorecardresearch.com",
+        "hotjar.com",
+        "static.hotjar.com",
+        "segment.io",
+        "segment.com",
+        "cdn.segment.com",
+        "mixpanel.com",
+        "api.mixpanel.com",
+        "amplitude.com",
+        "api.amplitude.com",
+        "fullstory.com",
+        "rs.fullstory.com",
+        "crazyegg.com",
+        "dnn506yrbagrg.cloudfront.net",
+        "optimizely.com",
+        "cdn.optimizely.com",
+        "mouseflow.com",
+        "cdn.mouseflow.com",
+        "clarity.ms",
+        "c.clarity.ms",
+        "hubspot.com",
+        "track.hubspot.com",
+        "linkedin.com/px",
+        "ads.linkedin.com",
+        "twitter.com/i/jot",
+        "analytics.twitter.com",
+        "pixel.quantserve.com",
+        "secure.quantserve.com",
+        "browser.sentry-cdn.com",
+        "o73581.ingest.sentry.io",
+        "cdn.braze.com",
+        "appboy.com",
+        "tealiumiq.com",
+        "tags.tiqcdn.com",
+        "bluekai.com",
+        "tags.bluekai.com",
+        "exelator.com",
+        "sync.exelator.com",
+        "demdex.net",
+        "dpm.demdex.net",
+        "adsafeprotected.com",
+        "static.adsafeprotected.com",
+        "moatads.com",
+        "js.moatads.com",
     ]
     .into_iter()
     .map(CompactString::from)

@@ -3,5 +3,10 @@
 *.pdb
 /.vscode/
 /docs/
-/.vscode/*.md
-/docs/*.md
+.opencode/
+Thumbs.db
+.DS_Store
+*~
+*.swp
+*.swo
+/.plans/

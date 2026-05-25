@@ -4,11 +4,8 @@ use std::rc::Rc;
 use std::borrow::Cow;
 
 use boa_engine::{
-    Context, JsError as BoaError, JsNativeError, JsResult, JsValue, JsString, NativeFunction,
-    js_string,
-    object::FunctionObjectBuilder,
-    object::ObjectInitializer,
-    property::Attribute,
+    Context, JsError as BoaError, JsNativeError, JsResult, JsString, JsValue, NativeFunction,
+    js_string, object::FunctionObjectBuilder, object::ObjectInitializer, property::Attribute,
     property::PropertyKey,
 };
 use fortrust_core::{RequestContext, ResourceType};
@@ -35,12 +32,14 @@ pub fn register(
     }
 
     let origin_clone = origin.clone();
-    let fetch_fn = unsafe { NativeFunction::from_closure(move |_this, args, ctx| {
-        do_fetch(args, ctx, &origin_clone)
-    }) };
+    let fetch_fn = unsafe {
+        NativeFunction::from_closure(move |_this, args, ctx| do_fetch(args, ctx, &origin_clone))
+    };
 
     let global = context.global_object();
-    let fetch_val: JsValue = FunctionObjectBuilder::new(context.realm(), fetch_fn).build().into();
+    let fetch_val: JsValue = FunctionObjectBuilder::new(context.realm(), fetch_fn)
+        .build()
+        .into();
     global.set(js_string!("fetch"), fetch_val, false, context)?;
 
     let resp_ctor = build_response_constructor(context)?;
@@ -64,15 +63,12 @@ fn do_fetch(args: &[JsValue], ctx: &mut Context, base_origin: &str) -> JsResult<
         input.to_string(ctx)?.to_std_string_escaped()
     };
 
-    let resolved = resolve_url(&url_str, base_origin).map_err(|e| {
-        BoaError::from(JsNativeError::typ().with_message(Cow::Owned(e)))
-    })?;
-    let _method = parse_method(args.get(1)).map_err(|e| {
-        BoaError::from(JsNativeError::typ().with_message(Cow::Owned(e)))
-    })?;
-    let (_req_headers, _body) = parse_options(args.get(1), ctx).map_err(|e| {
-        BoaError::from(JsNativeError::typ().with_message(Cow::Owned(e)))
-    })?;
+    let resolved = resolve_url(&url_str, base_origin)
+        .map_err(|e| BoaError::from(JsNativeError::typ().with_message(Cow::Owned(e))))?;
+    let _method = parse_method(args.get(1))
+        .map_err(|e| BoaError::from(JsNativeError::typ().with_message(Cow::Owned(e))))?;
+    let (_req_headers, _body) = parse_options(args.get(1), ctx)
+        .map_err(|e| BoaError::from(JsNativeError::typ().with_message(Cow::Owned(e))))?;
 
     let response = FETCH_CLIENT.with(|fc| {
         let mut guard = fc.borrow_mut();
@@ -102,48 +98,60 @@ fn resolve_url(input: &str, base: &str) -> Result<String, String> {
     if let Ok(parsed) = Url::parse(input) {
         Ok(parsed.to_string())
     } else if let Ok(base_url) = Url::parse(base) {
-        base_url.join(input).map(|u| u.to_string()).map_err(|e| e.to_string())
+        base_url
+            .join(input)
+            .map(|u| u.to_string())
+            .map_err(|e| e.to_string())
     } else {
         Err(format!("Cannot resolve URL: {input}"))
     }
 }
 
 fn parse_method(options: Option<&JsValue>) -> Result<String, String> {
-    let Some(opts) = options else { return Ok("GET".into()) };
+    let Some(opts) = options else {
+        return Ok("GET".into());
+    };
     let obj = opts.as_object().ok_or("options must be an object")?;
     let mut ctx = Context::default();
-    let method_val = obj.get(js_string!("method"), &mut ctx)
+    let method_val = obj
+        .get(js_string!("method"), &mut ctx)
         .map_err(|_| "cannot read method".to_string())?;
     if method_val.is_undefined() || method_val.is_null() {
         return Ok("GET".into());
     }
-    let s = method_val.to_string(&mut ctx).map_err(|_| "method must be a string".to_string())?;
+    let s = method_val
+        .to_string(&mut ctx)
+        .map_err(|_| "method must be a string".to_string())?;
     Ok(s.to_std_string_escaped().to_uppercase())
 }
 
-fn parse_options(options: Option<&JsValue>, ctx: &mut Context)
-    -> Result<(Vec<(String, String)>, Option<String>), String>
-{
-    let Some(opts) = options else { return Ok((Vec::new(), None)) };
+type FetchOptions = (Vec<(String, String)>, Option<String>);
+
+fn parse_options(options: Option<&JsValue>, ctx: &mut Context) -> Result<FetchOptions, String> {
+    let Some(opts) = options else {
+        return Ok((Vec::new(), None));
+    };
     let obj = opts.as_object().ok_or("options must be an object")?;
 
     let mut headers = Vec::new();
-    if let Ok(headers_val) = obj.get(js_string!("headers"), ctx) {
-        if let Some(hdr_obj) = headers_val.as_object() {
-            let keys = hdr_obj.own_property_keys(ctx)
-                .map_err(|_| "cannot enumerate headers".to_string())?;
-            for key in keys {
-                let key_str = match &key {
-                    PropertyKey::String(s) => s.to_std_string_escaped(),
-                    PropertyKey::Index(i) => i.get().to_string(),
-                    PropertyKey::Symbol(_) => continue,
-                };
-                let val = hdr_obj.get(key, ctx)
-                    .ok()
-                    .and_then(|v| v.as_string().map(|s| s.to_std_string_escaped()))
-                    .unwrap_or_default();
-                headers.push((key_str, val));
-            }
+    if let Ok(headers_val) = obj.get(js_string!("headers"), ctx)
+        && let Some(hdr_obj) = headers_val.as_object()
+    {
+        let keys = hdr_obj
+            .own_property_keys(ctx)
+            .map_err(|_| "cannot enumerate headers".to_string())?;
+        for key in keys {
+            let key_str = match &key {
+                PropertyKey::String(s) => s.to_std_string_escaped(),
+                PropertyKey::Index(i) => i.get().to_string(),
+                PropertyKey::Symbol(_) => continue,
+            };
+            let val = hdr_obj
+                .get(key, ctx)
+                .ok()
+                .and_then(|v| v.as_string().map(|s| s.to_std_string_escaped()))
+                .unwrap_or_default();
+            headers.push((key_str, val));
         }
     }
 
@@ -151,9 +159,12 @@ fn parse_options(options: Option<&JsValue>, ctx: &mut Context)
         if body_val.is_undefined() || body_val.is_null() {
             None
         } else {
-            Some(body_val.to_string(ctx)
-                .map_err(|_| "body must be stringable".to_string())?
-                .to_std_string_escaped())
+            Some(
+                body_val
+                    .to_string(ctx)
+                    .map_err(|_| "body must be stringable".to_string())?
+                    .to_std_string_escaped(),
+            )
         }
     } else {
         None
@@ -173,9 +184,7 @@ fn perform_fetch(
     };
 
     let handle = tokio::runtime::Handle::current();
-    handle.block_on(async move {
-        client.fetch(request).await.map_err(|e| format!("{e:?}"))
-    })
+    handle.block_on(async move { client.fetch(request).await.map_err(|e| format!("{e:?}")) })
 }
 
 fn build_response_object(
@@ -183,12 +192,14 @@ fn build_response_object(
     net_resp: &fortrust_net::NetworkResponse,
 ) -> JsResult<JsValue> {
     let status = net_resp.status;
-    let ok = status >= 200 && status < 300;
+    let ok = (200..300).contains(&status);
     let status_text = if ok { "OK" } else { "Error" };
     let url_str = net_resp.url.to_string();
     let body_bytes = net_resp.body.clone();
     let body_string = String::from_utf8_lossy(&body_bytes).to_string();
-    let headers_list: Vec<(String, String)> = net_resp.headers.iter()
+    let headers_list: Vec<(String, String)> = net_resp
+        .headers
+        .iter()
         .map(|(name, val)| (name.to_string(), val.to_str().unwrap_or("").to_string()))
         .collect();
 
@@ -196,25 +207,39 @@ fn build_response_object(
     let headers_val = JsValue::from(headers_obj);
 
     let body_string_clone = body_string.clone();
-    let text_fn = unsafe { NativeFunction::from_closure(move |_this, _args, ctx| {
-        let s = JsString::from(body_string_clone.as_str());
-        wrap_in_promise(ctx, JsValue::from(s))
-    }) };
+    let text_fn = unsafe {
+        NativeFunction::from_closure(move |_this, _args, ctx| {
+            let s = JsString::from(body_string_clone.as_str());
+            wrap_in_promise(ctx, JsValue::from(s))
+        })
+    };
 
     let body_string_for_json = body_string.clone();
-    let json_fn = unsafe { NativeFunction::from_closure(move |_this, _args, ctx| {
-        let code = format!("try {{ JSON.parse({s}) }} catch(e) {{ null }}",
-            s = serde_json::to_string(&body_string_for_json).unwrap_or_default());
-        let source = boa_engine::Source::from_bytes(code.as_bytes());
-        let result = ctx.eval(source).unwrap_or(JsValue::null());
-        wrap_in_promise(ctx, result)
-    }) };
+    let json_fn = unsafe {
+        NativeFunction::from_closure(move |_this, _args, ctx| {
+            let code = format!(
+                "try {{ JSON.parse({s}) }} catch(e) {{ null }}",
+                s = serde_json::to_string(&body_string_for_json).unwrap_or_default()
+            );
+            let source = boa_engine::Source::from_bytes(code.as_bytes());
+            let result = ctx.eval(source).unwrap_or(JsValue::null());
+            wrap_in_promise(ctx, result)
+        })
+    };
 
     let obj = ObjectInitializer::new(ctx)
         .property(js_string!("status"), status as i32, Attribute::all())
         .property(js_string!("ok"), ok, Attribute::all())
-        .property(js_string!("statusText"), js_string!(status_text), Attribute::all())
-        .property(js_string!("url"), js_string!(url_str.as_str()), Attribute::all())
+        .property(
+            js_string!("statusText"),
+            js_string!(status_text),
+            Attribute::all(),
+        )
+        .property(
+            js_string!("url"),
+            js_string!(url_str.as_str()),
+            Attribute::all(),
+        )
         .property(js_string!("headers"), headers_val, Attribute::all())
         .property(js_string!("bodyUsed"), false, Attribute::all())
         .property(js_string!("redirected"), false, Attribute::all())
@@ -227,17 +252,19 @@ fn build_response_object(
 }
 
 fn build_response_constructor(ctx: &mut Context) -> JsResult<JsValue> {
-    let ctor_fn = unsafe { NativeFunction::from_closure(|_this, _args, _ctx| {
-        Ok(JsValue::undefined())
-    }) };
-    Ok(FunctionObjectBuilder::new(ctx.realm(), ctor_fn).build().into())
+    let ctor_fn =
+        unsafe { NativeFunction::from_closure(|_this, _args, _ctx| Ok(JsValue::undefined())) };
+    Ok(FunctionObjectBuilder::new(ctx.realm(), ctor_fn)
+        .build()
+        .into())
 }
 
 fn build_headers_constructor(ctx: &mut Context) -> JsResult<JsValue> {
-    let ctor_fn = unsafe { NativeFunction::from_closure(|_this, _args, _ctx| {
-        Ok(JsValue::undefined())
-    }) };
-    Ok(FunctionObjectBuilder::new(ctx.realm(), ctor_fn).build().into())
+    let ctor_fn =
+        unsafe { NativeFunction::from_closure(|_this, _args, _ctx| Ok(JsValue::undefined())) };
+    Ok(FunctionObjectBuilder::new(ctx.realm(), ctor_fn)
+        .build()
+        .into())
 }
 
 fn build_headers_object(
@@ -246,37 +273,56 @@ fn build_headers_object(
 ) -> JsResult<boa_engine::object::JsObject> {
     let entries_clone = entries.to_vec();
 
-    let get_fn = unsafe { NativeFunction::from_closure(move |_this, args, _ctx| {
-        let key = args.first()
-            .map(|v| v.to_string(&mut Context::default()).map(|s| s.to_std_string_escaped().to_lowercase()))
-            .unwrap_or(Ok(String::new()))?;
-        let val = entries_clone.iter()
-            .find(|(k, _)| k.to_lowercase() == key)
-            .map(|(_, v)| JsValue::from(JsString::from(v.as_str())))
-            .unwrap_or(JsValue::null());
-        Ok(val)
-    }) };
+    let get_fn = unsafe {
+        NativeFunction::from_closure(move |_this, args, _ctx| {
+            let key = args
+                .first()
+                .map(|v| {
+                    v.to_string(&mut Context::default())
+                        .map(|s| s.to_std_string_escaped().to_lowercase())
+                })
+                .unwrap_or(Ok(String::new()))?;
+            let val = entries_clone
+                .iter()
+                .find(|(k, _)| k.to_lowercase() == key)
+                .map(|(_, v)| JsValue::from(JsString::from(v.as_str())))
+                .unwrap_or(JsValue::null());
+            Ok(val)
+        })
+    };
 
     let entries_clone2 = entries.to_vec();
-    let has_fn = unsafe { NativeFunction::from_closure(move |_this, args, _ctx| {
-        let key = args.first()
-            .map(|v| v.to_string(&mut Context::default()).map(|s| s.to_std_string_escaped().to_lowercase()))
-            .unwrap_or(Ok(String::new()))?;
-        let found = entries_clone2.iter().any(|(k, _)| k.to_lowercase() == key);
-        Ok(JsValue::from(found))
-    }) };
+    let has_fn = unsafe {
+        NativeFunction::from_closure(move |_this, args, _ctx| {
+            let key = args
+                .first()
+                .map(|v| {
+                    v.to_string(&mut Context::default())
+                        .map(|s| s.to_std_string_escaped().to_lowercase())
+                })
+                .unwrap_or(Ok(String::new()))?;
+            let found = entries_clone2.iter().any(|(k, _)| k.to_lowercase() == key);
+            Ok(JsValue::from(found))
+        })
+    };
 
     let entries_clone3 = entries.to_vec();
-    let for_each_fn = unsafe { NativeFunction::from_closure(move |_this, args, ctx| {
-        if let Some(callback) = args.first().and_then(|v| v.as_callable()) {
-            for (key, val) in &entries_clone3 {
-                let key_val = JsValue::from(JsString::from(key.as_str()));
-                let val_val = JsValue::from(JsString::from(val.as_str()));
-                let _ = callback.call(&JsValue::undefined(), &[val_val, key_val, _this.clone()], ctx);
+    let for_each_fn = unsafe {
+        NativeFunction::from_closure(move |_this, args, ctx| {
+            if let Some(callback) = args.first().and_then(|v| v.as_callable()) {
+                for (key, val) in &entries_clone3 {
+                    let key_val = JsValue::from(JsString::from(key.as_str()));
+                    let val_val = JsValue::from(JsString::from(val.as_str()));
+                    let _ = callback.call(
+                        &JsValue::undefined(),
+                        &[val_val, key_val, _this.clone()],
+                        ctx,
+                    );
+                }
             }
-        }
-        Ok(JsValue::undefined())
-    }) };
+            Ok(JsValue::undefined())
+        })
+    };
 
     let obj = ObjectInitializer::new(ctx)
         .function(get_fn, js_string!("get"), 1)
@@ -289,27 +335,40 @@ fn build_headers_object(
 
 fn wrap_in_promise(ctx: &mut Context, value: JsValue) -> JsResult<JsValue> {
     let global = ctx.global_object();
-    let promise_ctor = global.get(js_string!("Promise"), ctx)
+    let promise_ctor = global
+        .get(js_string!("Promise"), ctx)
         .map_err(|_| BoaError::from(JsNativeError::typ().with_message("Promise not available")))?;
-    let promise_obj = promise_ctor.as_object().ok_or_else(|| {
-        BoaError::from(JsNativeError::typ().with_message("Promise is not an object"))
-    })?.clone();
+    let promise_obj = promise_ctor
+        .as_object()
+        .ok_or_else(|| {
+            BoaError::from(JsNativeError::typ().with_message("Promise is not an object"))
+        })?
+        .clone();
     let resolve_fn_val = promise_obj.get(js_string!("resolve"), ctx)?;
-    let resolve_fn = resolve_fn_val.as_object().ok_or_else(|| {
-        BoaError::from(JsNativeError::typ().with_message("Promise.resolve is not callable"))
-    })?.clone();
+    let resolve_fn = resolve_fn_val
+        .as_object()
+        .ok_or_else(|| {
+            BoaError::from(JsNativeError::typ().with_message("Promise.resolve is not callable"))
+        })?
+        .clone();
     resolve_fn.call(&promise_ctor, &[value], ctx)
 }
 
 fn wrap_rejected_promise(ctx: &mut Context, reason: JsValue) -> JsResult<JsValue> {
     let global = ctx.global_object();
     let promise_ctor = global.get(js_string!("Promise"), ctx)?;
-    let promise_obj = promise_ctor.as_object().ok_or_else(|| {
-        BoaError::from(JsNativeError::typ().with_message("Promise is not an object"))
-    })?.clone();
+    let promise_obj = promise_ctor
+        .as_object()
+        .ok_or_else(|| {
+            BoaError::from(JsNativeError::typ().with_message("Promise is not an object"))
+        })?
+        .clone();
     let reject_fn_val = promise_obj.get(js_string!("reject"), ctx)?;
-    let reject_fn = reject_fn_val.as_object().ok_or_else(|| {
-        BoaError::from(JsNativeError::typ().with_message("Promise.reject is not callable"))
-    })?.clone();
+    let reject_fn = reject_fn_val
+        .as_object()
+        .ok_or_else(|| {
+            BoaError::from(JsNativeError::typ().with_message("Promise.reject is not callable"))
+        })?
+        .clone();
     reject_fn.call(&promise_ctor, &[reason], ctx)
 }

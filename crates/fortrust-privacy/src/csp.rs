@@ -101,10 +101,9 @@ impl CspPolicy {
                         });
                     }
                     _ => {
-                        policy.directives.push(PolicyDirective {
-                            directive,
-                            sources,
-                        });
+                        policy
+                            .directives
+                            .push(PolicyDirective { directive, sources });
                     }
                 }
             }
@@ -131,7 +130,10 @@ impl CspPolicy {
             return false;
         }
 
-        policy.sources.iter().any(|source| source_matches(source, resource_url))
+        policy
+            .sources
+            .iter()
+            .any(|source| source_matches(source, resource_url))
     }
 
     pub fn allows_inline_script(&self) -> bool {
@@ -163,11 +165,9 @@ impl CspPolicy {
     }
 
     pub fn is_strict(&self) -> bool {
-        self.directives.iter().any(|d| {
-            d.sources
-                .iter()
-                .any(|s| matches!(s, CspSource::None))
-        })
+        self.directives
+            .iter()
+            .any(|d| d.sources.iter().any(|s| matches!(s, CspSource::None)))
     }
 }
 
@@ -193,9 +193,7 @@ fn parse_csp_source(source: &str) -> Option<CspSource> {
             let nonce = &s[7..s.len() - 1];
             Some(CspSource::Nonce(nonce.to_owned()))
         }
-        s if s.starts_with("'sha") && s.ends_with('\'') => {
-            Some(CspSource::Hash(s.to_owned()))
-        }
+        s if s.starts_with("'sha") && s.ends_with('\'') => Some(CspSource::Hash(s.to_owned())),
         s if s.starts_with("http://") || s.starts_with("https://") || s.contains('.') => {
             Some(CspSource::Host(s.to_owned()))
         }

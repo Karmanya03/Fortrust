@@ -1,16 +1,17 @@
 [workspace]
 members = [
     "crates/fortrust-core",
-    "crates/fortrust-net",
     "crates/fortrust-dom",
-    "crates/fortrust-style",
-    "crates/fortrust-layout",
-    "crates/fortrust-paint",
-    "crates/fortrust-renderer",
-    "crates/fortrust-js",
     "crates/fortrust-ipc",
-    "crates/fortrust-storage",
+    "crates/fortrust-js",
+    "crates/fortrust-layout",
+    "crates/fortrust-net",
+    "crates/fortrust-paint",
     "crates/fortrust-privacy",
+    "crates/fortrust-renderer",
+    "crates/fortrust-search",
+    "crates/fortrust-storage",
+    "crates/fortrust-style",
     "crates/trust-engine",
     "crates/fortrust-chrome",
     "bins/fortrust",
@@ -35,15 +36,34 @@ chrono = { version = "0.4", features = ["serde"] }
 compact_str = { version = "0.8", features = ["serde"] }
 cssparser = "0.35"
 dashmap = "6"
-eframe = { version = "0.33", default-features = false, features = ["default_fonts", "glow"] }
+adblock = "0.12"
+aho-corasick = "1"
+argon2 = "0.5"
+cosmic-text = "0.12"
+eframe = { version = "0.33", default-features = false, features = ["default_fonts", "wgpu"] }
 egui = "0.33"
+egui_wgpu = "0.33"
+h3 = "0.0.6"
+h3-quinn = "0.0.6"
+hickory-resolver = { version = "0.25", features = ["dns-over-https-rustls", "dns-over-tls"] }
+interpolation = "0.3"
+markup5ever = "0.14"
+publicsuffix = "2"
+quinn = { version = "0.11", features = ["rustls"] }
+rusty_v8 = "0.93"
+selectors = "0.25"
+swash = "0.1"
+tantivy = "0.22"
+toml = "0.8"
+urlencoding = "2"
+wgpu = "24"
 http = "1"
 futures-util = "0.3"
 futures-executor = "0.3"
 html5ever = "0.35"
 rand = "0.8"
 redb = "2"
-reqwest = { version = "0.12", default-features = false, features = ["http2", "rustls-tls", "stream"] }
+reqwest = { version = "0.12", default-features = false, features = ["http2", "rustls-tls", "stream", "json"] }
 ring = "0.17"
 rustls = { version = "0.23", default-features = false, features = ["ring", "std", "tls12"] }
 serde = { version = "1", features = ["derive"] }

@@ -1,8 +1,7 @@
-use std::sync::Arc;
-
 use dashmap::DashMap;
 use redb::{Database, ReadableTable, TableDefinition};
 use serde::{Deserialize, Serialize};
+use std::sync::Arc;
 use tracing::debug;
 
 use crate::StorageError;
@@ -117,7 +116,7 @@ pub struct SettingsDatabase {
 }
 
 impl SettingsDatabase {
-    pub fn new(db: &Database) -> Result<Self, StorageError> {
+    pub fn new(db: Arc<Database>) -> Result<Self, StorageError> {
         let write_txn = db.begin_write()?;
         write_txn.open_table(SETTINGS_TABLE)?;
         write_txn.commit()?;
@@ -141,10 +140,7 @@ impl SettingsDatabase {
         }
 
         Ok(Self {
-            db: Some(Arc::new(
-                Database::create("")
-                    .map_err(|e| StorageError::Database(e.to_string()))?,
-            )),
+            db: Some(db),
             cache,
         })
     }

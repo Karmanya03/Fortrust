@@ -2,9 +2,7 @@ use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 
 use boa_engine::{
-    Context, JsResult, JsValue, JsString, NativeFunction,
-    js_string,
-    object::ObjectInitializer,
+    Context, JsResult, JsString, JsValue, NativeFunction, js_string, object::ObjectInitializer,
     property::Attribute,
 };
 
@@ -31,70 +29,82 @@ fn build_storage_object(
     storage: &StorageMap,
 ) -> JsResult<JsValue> {
     let storage_clone = storage.clone();
-    let get_item_fn = unsafe { NativeFunction::from_closure(move |_this, args, ctx| {
-        let key = args
-            .first()
-            .map(|v| v.to_string(ctx).map(|s| s.to_std_string_escaped()))
-            .unwrap_or(Ok(String::new()))?;
-        let map = storage_clone.lock().unwrap();
-        match map.get(&key) {
-            Some(value) => Ok(JsValue::from(JsString::from(value.as_str()))),
-            None => Ok(JsValue::null()),
-        }
-    }) };
+    let get_item_fn = unsafe {
+        NativeFunction::from_closure(move |_this, args, ctx| {
+            let key = args
+                .first()
+                .map(|v| v.to_string(ctx).map(|s| s.to_std_string_escaped()))
+                .unwrap_or(Ok(String::new()))?;
+            let map = storage_clone.lock().unwrap();
+            match map.get(&key) {
+                Some(value) => Ok(JsValue::from(JsString::from(value.as_str()))),
+                None => Ok(JsValue::null()),
+            }
+        })
+    };
 
     let storage_clone2 = storage.clone();
-    let set_item_fn = unsafe { NativeFunction::from_closure(move |_this, args, ctx| {
-        let key = args
-            .first()
-            .map(|v| v.to_string(ctx).map(|s| s.to_std_string_escaped()))
-            .unwrap_or(Ok(String::new()))?;
-        let value = args
-            .get(1)
-            .map(|v| v.to_string(ctx).map(|s| s.to_std_string_escaped()))
-            .unwrap_or(Ok(String::new()))?;
-        let mut map = storage_clone2.lock().unwrap();
-        map.insert(key, value);
-        Ok(JsValue::undefined())
-    }) };
+    let set_item_fn = unsafe {
+        NativeFunction::from_closure(move |_this, args, ctx| {
+            let key = args
+                .first()
+                .map(|v| v.to_string(ctx).map(|s| s.to_std_string_escaped()))
+                .unwrap_or(Ok(String::new()))?;
+            let value = args
+                .get(1)
+                .map(|v| v.to_string(ctx).map(|s| s.to_std_string_escaped()))
+                .unwrap_or(Ok(String::new()))?;
+            let mut map = storage_clone2.lock().unwrap();
+            map.insert(key, value);
+            Ok(JsValue::undefined())
+        })
+    };
 
     let storage_clone3 = storage.clone();
-    let remove_item_fn = unsafe { NativeFunction::from_closure(move |_this, args, ctx| {
-        let key = args
-            .first()
-            .map(|v| v.to_string(ctx).map(|s| s.to_std_string_escaped()))
-            .unwrap_or(Ok(String::new()))?;
-        let mut map = storage_clone3.lock().unwrap();
-        map.remove(&key);
-        Ok(JsValue::undefined())
-    }) };
+    let remove_item_fn = unsafe {
+        NativeFunction::from_closure(move |_this, args, ctx| {
+            let key = args
+                .first()
+                .map(|v| v.to_string(ctx).map(|s| s.to_std_string_escaped()))
+                .unwrap_or(Ok(String::new()))?;
+            let mut map = storage_clone3.lock().unwrap();
+            map.remove(&key);
+            Ok(JsValue::undefined())
+        })
+    };
 
     let storage_clone4 = storage.clone();
-    let clear_fn = unsafe { NativeFunction::from_closure(move |_this, _args, _ctx| {
-        let mut map = storage_clone4.lock().unwrap();
-        map.clear();
-        Ok(JsValue::undefined())
-    }) };
+    let clear_fn = unsafe {
+        NativeFunction::from_closure(move |_this, _args, _ctx| {
+            let mut map = storage_clone4.lock().unwrap();
+            map.clear();
+            Ok(JsValue::undefined())
+        })
+    };
 
     let storage_clone5 = storage.clone();
-    let length_fn = unsafe { NativeFunction::from_closure(move |_this, _args, _ctx| {
-        let map = storage_clone5.lock().unwrap();
-        Ok(JsValue::from(map.len() as i32))
-    }) };
+    let length_fn = unsafe {
+        NativeFunction::from_closure(move |_this, _args, _ctx| {
+            let map = storage_clone5.lock().unwrap();
+            Ok(JsValue::from(map.len() as i32))
+        })
+    };
 
     let storage_clone6 = storage.clone();
-    let key_fn = unsafe { NativeFunction::from_closure(move |_this, args, _ctx| {
-        let index = args
-            .first()
-            .and_then(|v| v.as_number())
-            .map(|n| n as usize)
-            .unwrap_or(0);
-        let map = storage_clone6.lock().unwrap();
-        match map.keys().nth(index) {
-            Some(key) => Ok(JsValue::from(JsString::from(key.as_str()))),
-            None => Ok(JsValue::null()),
-        }
-    }) };
+    let key_fn = unsafe {
+        NativeFunction::from_closure(move |_this, args, _ctx| {
+            let index = args
+                .first()
+                .and_then(|v| v.as_number())
+                .map(|n| n as usize)
+                .unwrap_or(0);
+            let map = storage_clone6.lock().unwrap();
+            match map.keys().nth(index) {
+                Some(key) => Ok(JsValue::from(JsString::from(key.as_str()))),
+                None => Ok(JsValue::null()),
+            }
+        })
+    };
 
     let obj = ObjectInitializer::new(context)
         .function(get_item_fn, js_string!("getItem"), 1)

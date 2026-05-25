@@ -68,11 +68,7 @@ impl TaskQueue {
     pub fn enqueue_macrotask(&mut self, handler: JsValue, args: Vec<JsValue>) {
         static MACROTASK_ID: AtomicU64 = AtomicU64::new(1);
         let id = MACROTASK_ID.fetch_add(1, Ordering::Relaxed);
-        self.macrotasks.push_back(Macrotask {
-            id,
-            handler,
-            args,
-        });
+        self.macrotasks.push_back(Macrotask { id, handler, args });
     }
 
     pub fn drain_microtasks(&mut self) -> Vec<JsValue> {
@@ -136,7 +132,9 @@ impl EventLoop {
     }
 
     pub fn cancel_timer(&self, handle: TimerHandle) {
-        self.timers.borrow_mut().retain(|entry| entry.id != handle.id);
+        self.timers
+            .borrow_mut()
+            .retain(|entry| entry.id != handle.id);
         debug!(timer_id = handle.id, "Timer cancelled");
     }
 
@@ -179,7 +177,9 @@ impl EventLoop {
     }
 
     pub fn enqueue_macrotask(&self, handler: JsValue, args: Vec<JsValue>) {
-        self.task_queue.borrow_mut().enqueue_macrotask(handler, args);
+        self.task_queue
+            .borrow_mut()
+            .enqueue_macrotask(handler, args);
     }
 
     pub fn process_microtasks(&self) -> Vec<JsValue> {

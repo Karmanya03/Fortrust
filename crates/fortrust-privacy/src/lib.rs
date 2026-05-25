@@ -1,14 +1,16 @@
+pub mod adblock_engine;
 pub mod blocker;
-pub mod fingerprint;
-pub mod csp;
 pub mod cookie_policy;
+pub mod csp;
+pub mod fingerprint;
 pub mod https_upgrade;
 
+pub use adblock_engine::{PrivacyFilter, PrivacySettings};
 pub use blocker::{AdBlocker, BlockerDecision, FilterListProvider, RequestClassifier};
-pub use fingerprint::{FingerprintGuard, NoiseStrategy, CanvasNoise, AudioNoise};
-pub use csp::{CspPolicy, CspSource, CspDirective, PolicyDirective};
 pub use cookie_policy::{CookiePolicy, SameSitePolicy};
-pub use https_upgrade::{HttpsUpgrader, UpgradeRule, HttpsDecision};
+pub use csp::{CspDirective, CspPolicy, CspSource, PolicyDirective};
+pub use fingerprint::{AudioNoise, CanvasNoise, FingerprintGuard, NoiseStrategy};
+pub use https_upgrade::{HttpsDecision, HttpsUpgrader, UpgradeRule};
 
 use std::time::{Duration, SystemTime};
 
@@ -86,13 +88,11 @@ impl PrivacyManager {
     ) -> BlockerDecision {
         let decision = self.ad_blocker.should_block(url, source_url, resource_type);
         match &decision {
-            BlockerDecision::Block { reason, .. } => {
-                match reason.as_str() {
-                    "ad" => self.stats.ads_blocked += 1,
-                    "tracker" => self.stats.trackers_blocked += 1,
-                    _ => {}
-                }
-            }
+            BlockerDecision::Block { reason, .. } => match reason.as_str() {
+                "ad" => self.stats.ads_blocked += 1,
+                "tracker" => self.stats.trackers_blocked += 1,
+                _ => {}
+            },
             BlockerDecision::Allow => {}
         }
         decision
