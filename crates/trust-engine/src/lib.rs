@@ -64,6 +64,7 @@ impl SecurityReport {
         source: PageSource,
         body_bytes: usize,
         rendered: &RenderedPage,
+        javascript_enabled: bool,
         external_stylesheets_loaded: usize,
         external_stylesheets_blocked: usize,
         external_images_loaded: usize,
@@ -71,7 +72,7 @@ impl SecurityReport {
     ) -> Self {
         Self {
             privacy_pipeline_enforced: true,
-            javascript_enabled: false,
+            javascript_enabled,
             external_subresources_enabled: external_stylesheets_loaded > 0
                 || external_stylesheets_blocked > 0
                 || external_images_loaded > 0
@@ -136,6 +137,9 @@ pub struct TrustEngine {
     renderer: StaticRenderer,
     network: Option<NetworkClient>,
     mode: EngineMode,
+    // runtime flags to control optional capabilities
+    pub javascript_enabled: bool,
+    pub allow_external_subresources: bool,
 }
 
 impl TrustEngine {
@@ -144,6 +148,8 @@ impl TrustEngine {
             renderer: StaticRenderer::new(),
             network: None,
             mode: EngineMode::Offline,
+            javascript_enabled: cfg!(feature = "javascript"),
+            allow_external_subresources: true,
         }
     }
 
@@ -153,6 +159,8 @@ impl TrustEngine {
             renderer: StaticRenderer::new(),
             network: Some(network),
             mode: EngineMode::Networked,
+            javascript_enabled: cfg!(feature = "javascript"),
+            allow_external_subresources: true,
         })
     }
 
@@ -205,10 +213,15 @@ impl TrustEngine {
         let html =
             std::str::from_utf8(&response.body).map_err(|_| EngineError::InvalidUtf8Document)?;
         let page_url = response.url.to_string();
-        let (author_css, external_stylesheets_blocked) =
-            load_external_stylesheets(network, &page_url, html).await?;
-        let (external_images_loaded, external_images_blocked) =
-            load_external_images(network, &page_url, html).await?;
+        let (author_css, external_stylesheets_blocked, external_images_loaded, external_images_blocked) = if self.allow_external_subresources {
+            let (author_css, external_stylesheets_blocked) =
+                load_external_stylesheets(network, &page_url, html).await?;
+            let (external_images_loaded, external_images_blocked) =
+                load_external_images(network, &page_url, html).await?;
+            (author_css, external_stylesheets_blocked, external_images_loaded, external_images_blocked)
+        } else {
+            (Vec::new(), 0usize, 0usize, 0usize)
+        };
         let author_css_refs = author_css.iter().map(String::as_str).collect::<Vec<_>>();
         self.build_page(
             page_url,
@@ -236,7 +249,7 @@ impl TrustEngine {
         external_images_loaded: usize,
         external_images_blocked: usize,
     ) -> Result<EnginePage, EngineError> {
-        let javascript_enabled = cfg!(feature = "javascript");
+        let javascript_enabled = self.javascript_enabled && cfg!(feature = "javascript");
         let rendered = if javascript_enabled {
             render_with_javascript(html, author_css, viewport, &url)?
         } else {
@@ -246,6 +259,7 @@ impl TrustEngine {
             source,
             html.len(),
             &rendered,
+            javascript_enabled,
             external_stylesheets_loaded,
             external_stylesheets_blocked,
             external_images_loaded,

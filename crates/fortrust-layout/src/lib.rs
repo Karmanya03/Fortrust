@@ -414,23 +414,67 @@ fn layout_block_box(
     }
 
     let mut cursor_y = child_y;
-    for child in &mut layout_box.children {
-        let child_containing = Rect {
-            x: used_x,
-            y: child_y,
-            width: content_width.max(0.0),
-            height: f32::MAX,
+    let mut idx = 0;
+    while idx < layout_box.children.len() {
+        let is_inline = |b: &LayoutBox| {
+            matches!(b.kind, BoxKind::Inline | BoxKind::Text | BoxKind::Replaced)
         };
-        let ch = layout_block_box(
-            child,
-            positioned,
-            child_x(child, used_x),
-            cursor_y,
-            content_width,
-            Some(&child_containing),
-            line_height_px,
-        );
-        cursor_y += ch;
+
+        if is_inline(&layout_box.children[idx]) {
+            let mut row = Vec::new();
+            let mut row_w = 0.0f32;
+            while idx < layout_box.children.len() && is_inline(&layout_box.children[idx]) {
+                let child = &layout_box.children[idx];
+                let child_w = intrinsic_inline_width(child, line_height_px);
+                if !row.is_empty() && row_w + child_w > content_width {
+                    break;
+                }
+                row.push(idx);
+                row_w += child_w;
+                idx += 1;
+            }
+
+            let mut cursor_x = child_x(layout_box, used_x);
+            for index in row {
+                let child = &mut layout_box.children[index];
+                let width = intrinsic_inline_width(child, line_height_px);
+                let height = if child.kind == BoxKind::Replaced {
+                    child.replaced_size.map(|(_, h)| h).unwrap_or(line_height_px)
+                } else {
+                    line_height_px
+                };
+                child.rect = Rect {
+                    x: cursor_x,
+                    y: cursor_y,
+                    width,
+                    height,
+                };
+                if child.kind == BoxKind::Inline {
+                    layout_inline_children(child, cursor_x, cursor_y, line_height_px);
+                }
+                cursor_x += width;
+            }
+            cursor_y += line_height_px;
+        } else {
+            let child = &mut layout_box.children[idx];
+            let child_containing = Rect {
+                x: used_x,
+                y: child_y,
+                width: content_width.max(0.0),
+                height: f32::MAX,
+            };
+            let ch = layout_block_box(
+                child,
+                positioned,
+                child_x(child, used_x),
+                cursor_y,
+                content_width,
+                Some(&child_containing),
+                line_height_px,
+            );
+            cursor_y += ch;
+            idx += 1;
+        }
     }
 
     let total_content_h = cursor_y - child_y;

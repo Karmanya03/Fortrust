@@ -82,12 +82,14 @@ impl SpeedDialState {
         dt: f32,
         needs_new_tab: &mut bool,
     ) -> Option<String> {
-        let mut navigate: Option<String> = None;
+        let mut search_navigation: Option<String> = None;
+        let mut tile_navigation: Option<String> = None;
 
-        self.gradient_t = (self.gradient_t + dt * 0.04).rem_euclid(1.0);
+        self.gradient_t = (self.gradient_t + dt * 0.02).rem_euclid(1.0);
+        // Light, watercolor-like background (off-white -> pale green)
         let bg_color = lerp_color(
-            Color32::from_rgb(18, 18, 30),
-            Color32::from_rgb(28, 20, 45),
+            Color32::from_rgb(247, 243, 238),
+            Color32::from_rgb(219, 233, 224),
             (self.gradient_t * std::f32::consts::TAU).sin() * 0.5 + 0.5,
         );
 
@@ -95,21 +97,26 @@ impl SpeedDialState {
         ui.painter().rect_filled(rect, CornerRadius::ZERO, bg_color);
 
         ui.vertical_centered(|ui| {
-            ui.add_space(60.0);
+            ui.add_space(28.0);
 
-            navigate = self.render_search_bar(ui, theme);
+            self.render_hero(ui, theme);
 
-            ui.add_space(48.0);
+            ui.add_space(22.0);
+
+            search_navigation = self.render_search_bar(ui, theme);
+
+            ui.add_space(28.0);
 
             ui.separator();
             ui.add_space(8.0);
             ui.label(
                 egui::RichText::new("Quick Access")
-                    .size(11.0)
+                    .size(12.0)
+                    .strong()
                     .color(theme.text_secondary),
             );
             ui.add_space(12.0);
-            self.render_tile_grid(ui, theme, dt);
+            tile_navigation = self.render_tile_grid(ui, theme, dt);
         });
 
         ui.ctx()
@@ -120,25 +127,52 @@ impl SpeedDialState {
             *needs_new_tab = false;
         }
 
-        navigate
+        search_navigation.or(tile_navigation)
+    }
+
+    fn render_hero(&self, ui: &mut egui::Ui, theme: &FortrustTheme) {
+        // Minimal hero: centered product name and subtitle for the light design
+        ui.set_width(760.0);
+        ui.vertical_centered(|ui| {
+            ui.add_space(6.0);
+            ui.label(
+                egui::RichText::new("Fortrust")
+                    .size(34.0)
+                    .strong()
+                    .color(theme.text_primary),
+            );
+            ui.add_space(6.0);
+                ui.label(
+                egui::RichText::new("Private browsing with secured Trust Engine.")
+                    .size(14.0)
+                    .color(theme.text_secondary),
+            );
+            ui.add_space(14.0);
+        });
     }
 
     fn render_search_bar(&mut self, ui: &mut egui::Ui, theme: &FortrustTheme) -> Option<String> {
         let mut navigate: Option<String> = None;
 
         egui::Frame {
-            fill: Color32::from_rgba_unmultiplied(255, 255, 255, 12),
-            corner_radius: CornerRadius::same(28),
-            stroke: egui::Stroke::new(1.0, Color32::from_rgba_unmultiplied(255, 255, 255, 25)),
-            inner_margin: egui::Margin::symmetric(20, 12),
+            fill: Color32::WHITE,
+            corner_radius: CornerRadius::same(30),
+            stroke: egui::Stroke::new(0.0, Color32::TRANSPARENT),
+            inner_margin: egui::Margin::symmetric(18, 12),
+            shadow: egui::epaint::Shadow {
+                offset: [0, 4],
+                blur: 18,
+                spread: 0,
+                color: Color32::from_black_alpha(18),
+            },
             ..Default::default()
         }
         .show(ui, |ui| {
-            ui.set_width(560.0);
+            ui.set_width(640.0);
             ui.horizontal(|ui| {
                 egui::ComboBox::from_id_salt("search_engine")
                     .selected_text(self.search_engine.icon())
-                    .width(32.0)
+                    .width(36.0)
                     .show_ui(ui, |ui| {
                         for engine in SearchEngine::all() {
                             ui.selectable_value(
@@ -151,10 +185,10 @@ impl SpeedDialState {
 
                 let resp = ui.add(
                     egui::TextEdit::singleline(&mut self.search_query)
-                        .hint_text("Search or enter address...")
+                        .hint_text("Search the web")
                         .frame(false)
-                        .desired_width(ui.available_width() - 40.0)
-                        .font(egui::FontId::proportional(15.0))
+                        .desired_width(ui.available_width() - 84.0)
+                        .font(egui::FontId::proportional(16.0))
                         .text_color(theme.text_primary),
                 );
 
@@ -165,20 +199,26 @@ impl SpeedDialState {
                     }
                 }
 
-                ui.label(
-                    egui::RichText::new("⌕")
-                        .size(18.0)
-                        .color(theme.text_secondary),
-                );
+                // plus / add button
+                if ui
+                    .add_sized(
+                        [36.0, 36.0],
+                        egui::Button::new(egui::RichText::new("+").size(20.0)).wrap(),
+                    )
+                    .clicked()
+                {
+                    // placeholder for add action
+                }
             });
         });
 
         navigate
     }
 
-    fn render_tile_grid(&mut self, ui: &mut egui::Ui, theme: &FortrustTheme, dt: f32) {
+    fn render_tile_grid(&mut self, ui: &mut egui::Ui, theme: &FortrustTheme, dt: f32) -> Option<String> {
         let tile_size = Vec2::new(140.0, 100.0);
         let cols = 4usize;
+        let mut navigate: Option<String> = None;
 
         egui::Grid::new("speed_dial_grid")
             .spacing(Vec2::new(16.0, 16.0))
@@ -197,25 +237,26 @@ impl SpeedDialState {
                         ui.ctx().request_repaint();
                     }
 
-                    egui::Frame {
-                        fill: theme.tile_bg,
-                        corner_radius: CornerRadius::same(12),
-                        stroke: egui::Stroke::new(1.0, theme.glass_border),
-                        ..Default::default()
+                    let scaled = Vec2::new(tile_size.x * tile.hover_scale, tile_size.y * tile.hover_scale);
+                    let response = ui.add_sized(
+                        scaled,
+                        egui::Button::new(
+                            egui::RichText::new(format!("{}\n{}", tile.title, compact_url(&tile.url)))
+                                .size(12.0)
+                                .color(theme.text_primary),
+                        )
+                        .fill(theme.tile_bg)
+                        .stroke(egui::Stroke::new(1.0, theme.glass_border))
+                        .corner_radius(14),
+                    );
+
+                    if response.clicked() {
+                        navigate = Some(tile.url.clone());
                     }
-                    .show(ui, |ui| {
-                        ui.set_min_size(tile_size);
-                        ui.vertical_centered(|ui| {
-                            ui.add_space(68.0);
-                            ui.label(
-                                egui::RichText::new(&tile.title)
-                                    .size(11.0)
-                                    .color(theme.text_secondary),
-                            );
-                        });
-                    });
                 }
             });
+
+        navigate
     }
 }
 
@@ -243,3 +284,30 @@ fn normalize_input(input: &str) -> String {
         format!("https://duckduckgo.com/?q={}", urlencoding::encode(trimmed))
     }
 }
+
+fn compact_url(url: &str) -> String {
+    url.strip_prefix("https://")
+        .or_else(|| url.strip_prefix("http://"))
+        .unwrap_or(url)
+        .trim_end_matches('/')
+        .to_owned()
+}
+
+fn hero_chip(ui: &mut egui::Ui, theme: &FortrustTheme, label: &str) {
+    egui::Frame {
+        fill: theme.glass_hover,
+        corner_radius: CornerRadius::same(255),
+        stroke: egui::Stroke::new(1.0, theme.glass_border),
+        inner_margin: egui::Margin::symmetric(10, 5),
+        ..Default::default()
+    }
+    .show(ui, |ui| {
+        ui.label(
+            egui::RichText::new(label)
+                .size(11.0)
+                .strong()
+                .color(theme.text_primary),
+        );
+    });
+}
+ 

@@ -67,15 +67,27 @@ pub struct UiConfig {
     pub compact_density: bool,
     pub show_privacy_panel: bool,
     pub show_memory_meter: bool,
+        // Wallpaper choice: "none", "watercolor", "forest"
+        pub wallpaper: String,
+        // Strength 0-100 for wallpaper visibility
+        pub wallpaper_strength: u8,
+    pub glass_strength: u8,
+    pub motion_strength: u8,
 }
 
 impl Default for UiConfig {
     fn default() -> Self {
         Self {
-            theme: "dark".to_owned(),
+            // Default to light Opera-like surface per user request
+            // Image reference: centered light search with soft watercolor background
+            theme: "light".to_owned(),
             compact_density: true,
             show_privacy_panel: true,
             show_memory_meter: true,
+            wallpaper: "watercolor".to_owned(),
+            wallpaper_strength: 84,
+            glass_strength: 82,
+            motion_strength: 70,
         }
     }
 }

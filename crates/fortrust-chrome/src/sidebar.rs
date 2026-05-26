@@ -24,90 +24,88 @@ pub fn render_sidebar(
     let width = anim.current_width();
     let label_opacity = anim.label_opacity();
 
-    egui::SidePanel::left("sidebar")
-        .exact_width(width)
-        .resizable(false)
-        .frame(egui::Frame {
-            fill: theme.glass_bg,
-            inner_margin: egui::Margin::symmetric(8, 12),
-            corner_radius: CornerRadius::ZERO,
-            stroke: egui::Stroke::new(0.5, theme.glass_border),
-            ..Default::default()
-        })
-        .show_inside(ui, |ui| {
-            ui.set_width(width);
-            ui.vertical(|ui| {
-                if icon_button(ui, "🔒", theme).clicked() {
-                    if anim.current_width() > 100.0 {
-                        anim.collapse();
-                    } else {
-                        anim.expand();
-                    }
-                }
+    ui.set_width(width);
+    println!("Fortrust:sidebar width={} max_rect={:?}", width, ui.max_rect());
+    // Make the sidebar background subtle for the light, minimal design
+    ui.painter().rect_filled(ui.max_rect(), CornerRadius::ZERO, Color32::TRANSPARENT);
+    ui.painter().rect_stroke(
+        ui.max_rect(),
+        CornerRadius::ZERO,
+        egui::Stroke::new(0.3, theme.glass_border),
+        egui::StrokeKind::Outside,
+    );
 
-                ui.add_space(8.0);
-                ui.separator();
-                ui.add_space(8.0);
+    ui.vertical(|ui: &mut Ui| {
+        if icon_button(ui, "🔒", theme).clicked() {
+            if anim.current_width() > 100.0 {
+                anim.collapse();
+            } else {
+                anim.expand();
+            }
+        }
 
-                sidebar_item(
-                    ui,
-                    "📑",
-                    "Tabs",
-                    SidebarPage::Tabs,
-                    current_page,
-                    label_opacity,
-                    theme,
-                );
-                sidebar_item(
-                    ui,
-                    "⭐",
-                    "Bookmarks",
-                    SidebarPage::Bookmarks,
-                    current_page,
-                    label_opacity,
-                    theme,
-                );
-                sidebar_item(
-                    ui,
-                    "🕘",
-                    "History",
-                    SidebarPage::History,
-                    current_page,
-                    label_opacity,
-                    theme,
-                );
-                sidebar_item(
-                    ui,
-                    "⬇",
-                    "Downloads",
-                    SidebarPage::Downloads,
-                    current_page,
-                    label_opacity,
-                    theme,
-                );
-                sidebar_item(
-                    ui,
-                    "📝",
-                    "Notes",
-                    SidebarPage::Notes,
-                    current_page,
-                    label_opacity,
-                    theme,
-                );
+        ui.add_space(8.0);
+        ui.separator();
+        ui.add_space(8.0);
 
-                ui.with_layout(egui::Layout::bottom_up(egui::Align::LEFT), |ui| {
-                    sidebar_item(
-                        ui,
-                        "⚙",
-                        "Settings",
-                        SidebarPage::Settings,
-                        current_page,
-                        label_opacity,
-                        theme,
-                    );
-                });
-            });
+        sidebar_item(
+            ui,
+            "📑",
+            "Tabs",
+            SidebarPage::Tabs,
+            current_page,
+            label_opacity,
+            theme,
+        );
+        sidebar_item(
+            ui,
+            "⭐",
+            "Bookmarks",
+            SidebarPage::Bookmarks,
+            current_page,
+            label_opacity,
+            theme,
+        );
+        sidebar_item(
+            ui,
+            "🕘",
+            "History",
+            SidebarPage::History,
+            current_page,
+            label_opacity,
+            theme,
+        );
+        sidebar_item(
+            ui,
+            "⬇",
+            "Downloads",
+            SidebarPage::Downloads,
+            current_page,
+            label_opacity,
+            theme,
+        );
+        sidebar_item(
+            ui,
+            "📝",
+            "Notes",
+            SidebarPage::Notes,
+            current_page,
+            label_opacity,
+            theme,
+        );
+
+        ui.with_layout(egui::Layout::bottom_up(egui::Align::LEFT), |ui: &mut Ui| {
+            sidebar_item(
+                ui,
+                "⚙",
+                "Settings",
+                SidebarPage::Settings,
+                current_page,
+                label_opacity,
+                theme,
+            );
         });
+    });
 }
 
 fn icon_button(ui: &mut Ui, icon: &str, theme: &FortrustTheme) -> egui::Response {
@@ -141,7 +139,7 @@ fn sidebar_item(
     };
 
     let response = ui
-        .horizontal(|ui| {
+        .horizontal(|ui: &mut Ui| {
             ui.painter().rect_filled(
                 ui.available_rect_before_wrap().shrink(2.0),
                 CornerRadius::same(8),

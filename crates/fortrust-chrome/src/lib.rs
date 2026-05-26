@@ -4,6 +4,7 @@ mod omnibox;
 mod shield;
 mod sidebar;
 mod speed_dial;
+mod backgrounds;
 mod theme;
 
 pub use app::FortrustApp;
