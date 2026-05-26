@@ -686,28 +686,25 @@ mod tests {
                 "trust://test",
                 "<title>Trust Test</title><style>p { color: blue; }</style><body><p>Hello</p></body>",
                 &[],
-                Viewport {
-                    width: 320.0,
-                    height: 200.0,
-                },
+                Viewport { width: 320.0, height: 200.0 },
             )
             .unwrap();
 
         assert_eq!(page.title, "Trust Test");
-        assert!(
-            page.rendered
-                .display_list
-                .commands()
-                .iter()
-                .any(|command| matches!(
-                    command,
-                    DisplayCommand::DrawText {
-                        text,
-                        color: Color { r: 0, g: 0, b: 255, a: 255 },
-                        ..
-                    } if text == "Hello"
-                ))
-        );
+        assert!(page
+            .rendered
+            .display_list
+            .commands()
+            .iter()
+            .any(|command| matches!(
+                command,
+                DisplayCommand::DrawText {
+                    text,
+                    color: Color { r: 0, g: 0, b: 255, a: 255 },
+                    ..
+                } if text == "Hello"
+            )));
+
         assert!(!page.security.javascript_enabled);
         assert!(page.security.sandboxed_static_render);
         assert!(page.security.body_bytes > 0);

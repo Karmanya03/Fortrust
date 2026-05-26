@@ -89,19 +89,19 @@ impl Painter {
 }
 
 fn paint_box(layout_box: &LayoutBox, list: &mut DisplayList, options: PaintOptions) {
-    if !is_visible_rect(layout_box.rect) {
-        return;
-    }
+    let visible = is_visible_rect(layout_box.rect);
 
-    if layout_box.style.background_color.a > 0 {
-        list.push(DisplayCommand::FillRect {
-            rect: layout_box.rect,
-            color: layout_box.style.background_color,
-        });
-    }
+    if visible {
+        if layout_box.style.background_color.a > 0 {
+            list.push(DisplayCommand::FillRect {
+                rect: layout_box.rect,
+                color: layout_box.style.background_color,
+            });
+        }
 
-    if options.include_debug_borders && layout_box.kind != BoxKind::Text {
-        paint_debug_border(layout_box.rect, list);
+        if options.include_debug_borders && layout_box.kind != BoxKind::Text {
+            paint_debug_border(layout_box.rect, list);
+        }
     }
 
     if layout_box.kind == BoxKind::Text
