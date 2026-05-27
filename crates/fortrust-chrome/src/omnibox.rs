@@ -11,30 +11,59 @@ pub struct OmniboxState {
 impl OmniboxState {
     pub fn render(&mut self, ui: &mut Ui, theme: &FortrustTheme) -> Option<String> {
         let mut navigate: Option<String> = None;
+        let is_url = self.text.starts_with("http://") || self.text.starts_with("https://");
+        let is_secure = self.text.starts_with("https://");
+        let green = Color32::from_rgb(92, 170, 111);
+
+        let border_color = if self.focused {
+            theme.accent_primary
+        } else {
+            Color32::from_rgba_unmultiplied(255, 255, 255, 25)
+        };
 
         egui::Frame {
-            fill: Color32::from_rgba_unmultiplied(255, 255, 255, 12),
+            fill: if self.focused {
+                Color32::from_rgba_unmultiplied(255, 255, 255, 18)
+            } else {
+                Color32::from_rgba_unmultiplied(255, 255, 255, 12)
+            },
             corner_radius: CornerRadius::same(10),
-            stroke: egui::Stroke::new(1.0, Color32::from_rgba_unmultiplied(255, 255, 255, 25)),
+            stroke: egui::Stroke::new(1.5, border_color),
             inner_margin: egui::Margin::symmetric(12, 6),
             ..Default::default()
         }
         .show(ui, |ui| {
             ui.set_min_width(320.0);
             ui.horizontal(|ui| {
-                ui.label(
-                    egui::RichText::new("🔍")
-                        .size(14.0)
-                        .color(theme.text_secondary),
-                );
+                if is_url {
+                    let lock = if is_secure { "🔒" } else { "⚠" };
+                    let lock_color = if is_secure { green } else { Color32::from_rgb(255, 170, 60) };
+                    ui.label(
+                        egui::RichText::new(lock)
+                            .size(13.0)
+                            .color(lock_color),
+                    );
+                } else {
+                    ui.label(
+                        egui::RichText::new("🔍")
+                            .size(14.0)
+                            .color(theme.text_secondary),
+                    );
+                }
+
+                let font = if is_url {
+                    egui::FontId::monospace(14.0)
+                } else {
+                    egui::FontId::proportional(15.0)
+                };
 
                 let resp = ui.add(
                     egui::TextEdit::singleline(&mut self.text)
                         .hint_text("Search or enter address...")
                         .frame(false)
                         .desired_width(ui.available_width() - 40.0)
-                        .font(egui::FontId::proportional(15.0))
-                        .text_color(theme.text_primary),
+                        .font(font)
+                        .text_color(if is_url { green } else { theme.text_primary }),
                 );
 
                 if resp.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter)) {

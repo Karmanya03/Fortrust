@@ -1,6 +1,6 @@
 use crate::animation::SidebarAnimation;
 use crate::theme::FortrustTheme;
-use egui::{self, Color32, CornerRadius, Ui};
+use egui::{self, Color32, CornerRadius, Ui, Vec2};
 use fortrust_core::Tab;
 
 #[derive(PartialEq, Clone, Copy)]
@@ -36,7 +36,7 @@ pub fn render_sidebar(
     );
 
     ui.vertical(|ui: &mut Ui| {
-        if icon_button(ui, "🔒", theme).clicked() {
+        if icon_button(ui, "◀", theme).clicked() {
             if anim.current_width() > 100.0 {
                 anim.collapse();
             } else {
@@ -56,6 +56,8 @@ pub fn render_sidebar(
             current_page,
             label_opacity,
             theme,
+            false,
+            0,
         );
         sidebar_item(
             ui,
@@ -65,6 +67,8 @@ pub fn render_sidebar(
             current_page,
             label_opacity,
             theme,
+            false,
+            0,
         );
         sidebar_item(
             ui,
@@ -74,6 +78,8 @@ pub fn render_sidebar(
             current_page,
             label_opacity,
             theme,
+            false,
+            0,
         );
         sidebar_item(
             ui,
@@ -83,6 +89,8 @@ pub fn render_sidebar(
             current_page,
             label_opacity,
             theme,
+            false,
+            0,
         );
         sidebar_item(
             ui,
@@ -92,6 +100,8 @@ pub fn render_sidebar(
             current_page,
             label_opacity,
             theme,
+            false,
+            0,
         );
 
         ui.with_layout(egui::Layout::bottom_up(egui::Align::LEFT), |ui: &mut Ui| {
@@ -103,6 +113,8 @@ pub fn render_sidebar(
                 current_page,
                 label_opacity,
                 theme,
+                false,
+                0,
             );
         });
     });
@@ -122,6 +134,7 @@ fn icon_button(ui: &mut Ui, icon: &str, theme: &FortrustTheme) -> egui::Response
     )
 }
 
+#[allow(clippy::too_many_arguments)]
 fn sidebar_item(
     ui: &mut Ui,
     icon: &str,
@@ -130,6 +143,8 @@ fn sidebar_item(
     current: &mut SidebarPage,
     label_opacity: f32,
     theme: &FortrustTheme,
+    show_badge: bool,
+    _badge_count: u32,
 ) {
     let is_active = *current == page;
     let bg = if is_active {
@@ -157,6 +172,15 @@ fn sidebar_item(
                         .color(theme.text_primary.linear_multiply(label_opacity)),
                 );
             }
+            // Notification badge dot
+            if show_badge {
+                let (badge_rect, _) = ui.allocate_exact_size(Vec2::new(8.0, 8.0), egui::Sense::hover());
+                ui.painter().circle_filled(
+                    badge_rect.center(),
+                    4.0,
+                    Color32::from_rgb(255, 69, 58),
+                );
+            }
         })
         .response;
 
@@ -171,4 +195,47 @@ fn sidebar_item(
             theme.glass_hover,
         );
     }
+}
+
+/// iOS-style toggle switch. Returns true if the value changed.
+pub fn toggle_switch(ui: &mut Ui, label: &str, value: &mut bool, theme: &FortrustTheme) -> bool {
+    let green = Color32::from_rgb(92, 170, 111);
+    let gray = Color32::from_rgba_unmultiplied(120, 120, 130, 80);
+    let pill_w = 44.0;
+    let pill_h = 24.0;
+    let knob_r = 10.0;
+    let padding = 2.0;
+
+    ui.horizontal(|ui| {
+        ui.add_space(4.0);
+        let resp = ui.allocate_response(Vec2::new(pill_w, pill_h), egui::Sense::click());
+        let rect = resp.rect;
+        let is_on = *value;
+
+        // Pill background
+        let bg_color = if is_on { green } else { gray };
+        ui.painter().rect_filled(rect, CornerRadius::same(12), bg_color);
+
+        // Knob
+        let knob_x = if is_on {
+            rect.right() - padding - knob_r * 2.0
+        } else {
+            rect.left() + padding
+        };
+        let knob_center = egui::Pos2::new(knob_x + knob_r, rect.center().y);
+        ui.painter().circle_filled(knob_center, knob_r, Color32::WHITE);
+
+        if resp.clicked() {
+            *value = !*value;
+        }
+
+        ui.add_space(8.0);
+        ui.label(
+            egui::RichText::new(label)
+                .size(13.0)
+                .color(theme.text_primary),
+        );
+    })
+    .response
+    .clicked()
 }

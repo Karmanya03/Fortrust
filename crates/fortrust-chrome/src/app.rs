@@ -898,20 +898,41 @@ impl FortrustApp {
                             clicked = Some(tab.id);
                         }
 
-                        let close_resp = ui.add(
-                            egui::Button::new(
-                                egui::RichText::new("✕")
-                                    .size(9.0)
-                                    .color(self.theme.text_secondary),
-                            )
-                            .fill(Color32::TRANSPARENT)
-                            .stroke(Stroke::NONE)
-                            .corner_radius(4)
-                            .min_size(Vec2::new(18.0, 18.0)),
-                        );
+                        // Close button — visible only on hover
+                        let tab_hovered = response.hovered();
+                        if tab_hovered {
+                            let close_resp = ui.add(
+                                egui::Button::new(
+                                    egui::RichText::new("✕")
+                                        .size(9.0)
+                                        .color(if selected { self.theme.text_on_accent } else { self.theme.text_secondary }),
+                                )
+                                .fill(Color32::TRANSPARENT)
+                                .stroke(Stroke::NONE)
+                                .corner_radius(4)
+                                .min_size(Vec2::new(18.0, 18.0)),
+                            );
 
-                        if close_resp.clicked() {
-                            closed = Some(tab.id);
+                            if close_resp.clicked() {
+                                closed = Some(tab.id);
+                            }
+                        } else {
+                            // Reserve space so layout doesn't jump
+                            ui.allocate_exact_size(Vec2::new(18.0, 18.0), egui::Sense::hover());
+                        }
+
+                        // Bottom accent underline on active tab
+                        if selected {
+                            let tab_rect = response.rect;
+                            let underline_rect = egui::Rect::from_min_size(
+                                egui::Pos2::new(tab_rect.min.x, tab_rect.max.y - 1.0),
+                                Vec2::new(tab_rect.width(), 2.0),
+                            );
+                            ui.painter().rect_filled(
+                                underline_rect,
+                                CornerRadius::same(1),
+                                self.theme.accent_primary,
+                            );
                         }
                     }
 
@@ -1009,6 +1030,9 @@ impl FortrustApp {
                     let dt = self.last_frame.elapsed().as_secs_f32().min(0.05) * self.motion_scale();
 
                     if active_url == "fortrust://start" {
+                        self.speed_dial.ads_blocked = self.shield.ads_blocked;
+                        self.speed_dial.trackers_blocked = self.shield.trackers_blocked;
+                        self.speed_dial.tab_count = self.tabs.tabs().len();
                         if let Some(url) =
                             self.speed_dial
                                 .render(ui, &self.theme, dt, &mut self.needs_new_tab)
@@ -1343,53 +1367,22 @@ impl FortrustApp {
                 )
                 .changed();
 
-            visual_changed |= ui
-                .checkbox(&mut self.config.ui.compact_density, "Compact density")
-                .changed();
-            visual_changed |= ui
-                .checkbox(&mut self.config.ui.show_privacy_panel, "Show privacy panel")
-                .changed();
-            visual_changed |= ui
-                .checkbox(&mut self.config.ui.show_memory_meter, "Show memory meter")
-                .changed();
+            visual_changed |= sidebar::toggle_switch(ui, "Compact density", &mut self.config.ui.compact_density, &self.theme);
+            visual_changed |= sidebar::toggle_switch(ui, "Show privacy panel", &mut self.config.ui.show_privacy_panel, &self.theme);
+            visual_changed |= sidebar::toggle_switch(ui, "Show memory meter", &mut self.config.ui.show_memory_meter, &self.theme);
         });
 
         ui.add_space(12.0);
 
         render_metric_card(ui, theme, "Privacy", "Request filtering that drives the secure navigation pipeline", |ui| {
-            privacy_changed |= ui
-                .checkbox(&mut self.config.privacy.block_ads, "Block ads")
-                .changed();
-            privacy_changed |= ui
-                .checkbox(&mut self.config.privacy.block_trackers, "Block trackers")
-                .changed();
-            privacy_changed |= ui
-                .checkbox(
-                    &mut self.config.privacy.block_third_party_cookies,
-                    "Block third-party cookies",
-                )
-                .changed();
-            privacy_changed |= ui
-                .checkbox(
-                    &mut self.config.privacy.strip_tracking_query_params,
-                    "Strip tracking query params",
-                )
-                .changed();
-            privacy_changed |= ui
-                .checkbox(&mut self.config.privacy.https_only_mode, "Upgrade HTTP to HTTPS")
-                .changed();
-            privacy_changed |= ui
-                .checkbox(
-                    &mut self.config.privacy.global_privacy_control,
-                    "Send Global Privacy Control",
-                )
-                .changed();
-            privacy_changed |= ui
-                .checkbox(&mut self.config.privacy.do_not_track, "Send Do Not Track")
-                .changed();
-            privacy_changed |= ui
-                .checkbox(&mut self.config.privacy.fingerprint_noise, "Fingerprint noise")
-                .changed();
+            privacy_changed |= sidebar::toggle_switch(ui, "Block ads", &mut self.config.privacy.block_ads, &self.theme);
+            privacy_changed |= sidebar::toggle_switch(ui, "Block trackers", &mut self.config.privacy.block_trackers, &self.theme);
+            privacy_changed |= sidebar::toggle_switch(ui, "Block third-party cookies", &mut self.config.privacy.block_third_party_cookies, &self.theme);
+            privacy_changed |= sidebar::toggle_switch(ui, "Strip tracking query params", &mut self.config.privacy.strip_tracking_query_params, &self.theme);
+            privacy_changed |= sidebar::toggle_switch(ui, "Upgrade HTTP to HTTPS", &mut self.config.privacy.https_only_mode, &self.theme);
+            privacy_changed |= sidebar::toggle_switch(ui, "Send Global Privacy Control", &mut self.config.privacy.global_privacy_control, &self.theme);
+            privacy_changed |= sidebar::toggle_switch(ui, "Send Do Not Track", &mut self.config.privacy.do_not_track, &self.theme);
+            privacy_changed |= sidebar::toggle_switch(ui, "Fingerprint noise", &mut self.config.privacy.fingerprint_noise, &self.theme);
         });
 
         ui.add_space(12.0);

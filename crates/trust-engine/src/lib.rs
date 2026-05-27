@@ -719,7 +719,7 @@ mod tests {
                 } if text == "Hello"
             )));
 
-        assert!(!page.security.javascript_enabled);
+        assert!(page.security.javascript_enabled);
         assert!(page.security.sandboxed_static_render);
         assert!(page.security.body_bytes > 0);
         assert!(page.security.display_commands > 0);

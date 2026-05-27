@@ -5,7 +5,7 @@ use std::path::PathBuf;
 use std::sync::Mutex;
 use once_cell::sync::Lazy;
 use image::io::Reader as ImageReader;
-use image::GenericImageView;
+
 use egui::epaint::ahash::AHashMap;
 
 // Cache loaded textures keyed by absolute path
