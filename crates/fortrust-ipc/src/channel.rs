@@ -133,13 +133,8 @@ impl MessageReceiver {
         let mut receiver = self.receiver.lock().await;
 
         loop {
-            if let Ok(Some((_, _))) = BincodeCodec::decode_message::<Vec<u8>>(&mut buffer) {
-                let (message, _) = BincodeCodec::decode_message::<Vec<u8>>(&mut buffer)
-                    .map_err(IpcError::Codec)?
-                    .ok_or(IpcError::Protocol(
-                        "Failed to extract framed message".to_owned(),
-                    ))?;
-                return Ok(message);
+            if let Ok(Some(payload)) = BincodeCodec::read_raw_payload(&mut buffer) {
+                return Ok(payload);
             }
 
             let chunk = receiver.recv().await.ok_or(IpcError::ChannelClosed)?;

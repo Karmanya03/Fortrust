@@ -1,5 +1,5 @@
 use fortrust_layout::{BoxKind, LayoutBox, LayoutTree, Rect};
-use fortrust_style::{Color, FontWeight, Length};
+use fortrust_style::{BorderStyle, Color, FontWeight, Length, OutlineStyle};
 
 #[derive(Debug, Clone, PartialEq)]
 pub enum DisplayCommand {
@@ -13,6 +13,36 @@ pub enum DisplayCommand {
         color: Color,
         font_size_px: f32,
         font_weight: FontWeight,
+    },
+    DrawBorder {
+        rect: Rect,
+        top_width: f32,
+        right_width: f32,
+        bottom_width: f32,
+        left_width: f32,
+        top_color: Color,
+        right_color: Color,
+        bottom_color: Color,
+        left_color: Color,
+        top_style: BorderStyle,
+        right_style: BorderStyle,
+        bottom_style: BorderStyle,
+        left_style: BorderStyle,
+    },
+    DrawBoxShadow {
+        rect: Rect,
+        offset_x: f32,
+        offset_y: f32,
+        blur: f32,
+        spread: f32,
+        color: Color,
+        inset: bool,
+    },
+    DrawOutline {
+        rect: Rect,
+        width: f32,
+        color: Color,
+        style: OutlineStyle,
     },
     ClipPush(Rect),
     ClipPop,
@@ -55,6 +85,7 @@ impl DisplayList {
 pub struct PaintOptions {
     pub viewport: Rect,
     pub include_debug_borders: bool,
+    pub viewport_fill: Color,
 }
 
 impl PaintOptions {
@@ -67,6 +98,7 @@ impl PaintOptions {
                 height,
             },
             include_debug_borders: false,
+            viewport_fill: Color::TRANSPARENT,
         }
     }
 }
@@ -81,6 +113,13 @@ impl Painter {
 
     pub fn paint(&self, tree: &LayoutTree, options: PaintOptions) -> DisplayList {
         let mut list = DisplayList::new();
+        // Fill viewport background if set (propagated from html/body)
+        if options.viewport_fill.a > 0 {
+            list.push(DisplayCommand::FillRect {
+                rect: options.viewport,
+                color: options.viewport_fill,
+            });
+        }
         list.push(DisplayCommand::ClipPush(options.viewport));
         paint_box(&tree.root, &mut list, options);
         list.push(DisplayCommand::ClipPop);
@@ -96,6 +135,54 @@ fn paint_box(layout_box: &LayoutBox, list: &mut DisplayList, options: PaintOptio
             list.push(DisplayCommand::FillRect {
                 rect: layout_box.rect,
                 color: layout_box.style.background_color,
+            });
+        }
+
+        // Paint borders
+        if layout_box.border.top > 0.0
+            || layout_box.border.right > 0.0
+            || layout_box.border.bottom > 0.0
+            || layout_box.border.left > 0.0
+        {
+            list.push(DisplayCommand::DrawBorder {
+                rect: layout_box.rect,
+                top_width: layout_box.border.top,
+                right_width: layout_box.border.right,
+                bottom_width: layout_box.border.bottom,
+                left_width: layout_box.border.left,
+                top_color: layout_box.style.border.top.color,
+                right_color: layout_box.style.border.right.color,
+                bottom_color: layout_box.style.border.bottom.color,
+                left_color: layout_box.style.border.left.color,
+                top_style: layout_box.style.border.top.style,
+                right_style: layout_box.style.border.right.style,
+                bottom_style: layout_box.style.border.bottom.style,
+                left_style: layout_box.style.border.left.style,
+            });
+        }
+
+        // Paint box-shadow
+        if let Some(shadow) = &layout_box.style.box_shadow
+            && shadow.color.a > 0 && (shadow.offset_x != 0.0 || shadow.offset_y != 0.0 || shadow.blur > 0.0)
+        {
+            list.push(DisplayCommand::DrawBoxShadow {
+                rect: layout_box.rect,
+                offset_x: shadow.offset_x,
+                offset_y: shadow.offset_y,
+                blur: shadow.blur,
+                spread: shadow.spread,
+                color: shadow.color,
+                inset: shadow.inset,
+            });
+        }
+
+        // Paint outline
+        if layout_box.style.outline.style != OutlineStyle::None && layout_box.style.outline.width > 0.0 && layout_box.style.outline.color.a > 0 {
+            list.push(DisplayCommand::DrawOutline {
+                rect: layout_box.rect,
+                width: layout_box.style.outline.width,
+                color: layout_box.style.outline.color,
+                style: layout_box.style.outline.style,
             });
         }
 
@@ -341,10 +428,59 @@ mod tests {
                     height: 100.0,
                 },
                 include_debug_borders: true,
+                viewport_fill: Color::TRANSPARENT,
             },
         );
 
         assert!(debug.len() > plain.len());
+    }
+
+    #[test]
+    fn paints_borders_when_present() {
+        let arena = DomArena::new();
+        let document = parse_html(
+            &arena,
+            r#"<body><div style="border: 3px solid red; width: 100px; height: 50px;">Bordered</div></body>"#,
+        )
+        .unwrap();
+        let body = document.first_element_by_tag("body").unwrap();
+        let tree = LayoutEngine::new(StyleEngine::new())
+            .layout(
+                body,
+                LayoutConstraints {
+                    viewport_width: 320.0,
+                    viewport_height: 240.0,
+                    containing_block: None,
+                },
+            )
+            .unwrap();
+
+        let list = Painter::new().paint(&tree, PaintOptions::viewport(320.0, 240.0));
+        let border_commands: Vec<_> = list
+            .commands()
+            .iter()
+            .filter(|cmd| matches!(cmd, DisplayCommand::DrawBorder { .. }))
+            .collect();
+
+        assert!(!border_commands.is_empty(), "Expected at least one DrawBorder command");
+        let cmd = border_commands[0];
+        if let DisplayCommand::DrawBorder {
+            top_width,
+            left_width,
+            right_width,
+            bottom_width,
+            top_color,
+            ..
+        } = cmd
+        {
+            assert!(*top_width > 0.0);
+            assert!(*left_width > 0.0);
+            assert!(*right_width > 0.0);
+            assert!(*bottom_width > 0.0);
+            assert_eq!(*top_color, Color { r: 255, g: 0, b: 0, a: 255 });
+        } else {
+            unreachable!();
+        }
     }
 
     #[test]

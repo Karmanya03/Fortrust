@@ -53,16 +53,14 @@ fn try_draw_photo_wallpaper(ctx: &egui::Context, painter: &egui::Painter, ui: &U
 
     // search for candidate file matching stem or exact name
     let mut candidate: Option<PathBuf> = None;
-    for entry in std::fs::read_dir(assets_dir).ok().into_iter().flatten() {
-        if let Ok(entry) = entry {
-            let path = entry.path();
-            if !path.is_file() { continue; }
-            if let Some(stem) = path.file_stem().and_then(|s| s.to_str()) {
-                if stem.eq_ignore_ascii_case(&name) || path.file_name().and_then(|n| n.to_str()).map(|s| s.eq_ignore_ascii_case(&name)).unwrap_or(false) {
-                    candidate = Some(path);
-                    break;
-                }
-            }
+    for entry in std::fs::read_dir(assets_dir).ok().into_iter().flatten().flatten() {
+        let path = entry.path();
+        if !path.is_file() { continue; }
+        if let Some(stem) = path.file_stem().and_then(|s| s.to_str())
+            && (stem.eq_ignore_ascii_case(&name) || path.file_name().and_then(|n| n.to_str()).map(|s| s.eq_ignore_ascii_case(&name)).unwrap_or(false))
+        {
+            candidate = Some(path);
+            break;
         }
     }
 
@@ -94,14 +92,14 @@ fn try_draw_photo_wallpaper(ctx: &egui::Context, painter: &egui::Painter, ui: &U
                         let tex_id = handle.id();
                         map.insert(key.clone(), tex_id);
                         painter.add(egui::Shape::image(tex_id, screen_rect, egui::Rect::from_min_max(Pos2::new(0.0,0.0), Pos2::new(1.0,1.0)), Color32::WHITE));
-                        return true;
+                        true
                     }
-                    Err(_) => return false,
+                    Err(_) => false,
                 },
-                Err(_) => return false,
+                Err(_) => false,
             }
         }
-        Err(_) => return false,
+        Err(_) => false,
     }
 
 }

@@ -1,5 +1,5 @@
-use crate::theme::FortrustTheme;
-use egui::{self, Color32, CornerRadius, Ui};
+use crate::{icons, theme::FortrustTheme};
+use egui::{self, Color32, CornerRadius, Pos2, Rect, Ui, Vec2};
 
 pub struct ShieldState {
     pub enabled: bool,
@@ -36,7 +36,7 @@ impl ShieldState {
             theme.accent_shield
         };
 
-        let label = format!("🛡 {}", total_blocked);
+        let label = format!("{}", total_blocked);
 
         egui::Frame {
             fill: Color32::from_rgba_unmultiplied(color.r(), color.g(), color.b(), 30),
@@ -46,13 +46,21 @@ impl ShieldState {
             ..Default::default()
         }
         .show(ui, |ui| {
-            if ui
-                .label(egui::RichText::new(&label).color(color).size(13.0))
-                .interact(egui::Sense::click())
-                .clicked()
+            ui.horizontal(|ui| {
+                let icon_rect = Rect::from_min_size(
+                    Pos2::new(ui.cursor().min.x, ui.cursor().min.y + 1.0),
+                    Vec2::new(12.0, 12.0),
+                );
+                icons::paint_shield_icon_rect(ui.painter(), icon_rect, color);
+                ui.allocate_space(Vec2::new(14.0, 14.0));
+                if ui
+                    .label(egui::RichText::new(&label).color(color).size(13.0))
+                    .interact(egui::Sense::click())
+                    .clicked()
             {
                 self.popup_open = !self.popup_open;
             }
+            });
         });
     }
 
@@ -87,13 +95,27 @@ impl ShieldState {
 
                 ui.horizontal(|ui| {
                     ui.label(
-                        egui::RichText::new("🛡 Fortrust Shields")
+                        egui::RichText::new("Fortrust Shields")
                             .size(15.0)
                             .strong()
                             .color(theme.text_primary),
                     );
+                    ui.add_space(4.0);
+                    let icon_rect = Rect::from_min_size(
+                        Pos2::new(ui.cursor().min.x, ui.cursor().min.y + 2.0),
+                        Vec2::new(16.0, 16.0),
+                    );
+                    icons::paint_shield_icon_rect(ui.painter(), icon_rect, if self.enabled { theme.accent_shield } else { theme.accent_shield_off });
+                    ui.allocate_space(Vec2::new(18.0, 18.0));
                     ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                        if ui.small_button("✕").clicked() {
+                        let close_btn = ui.add(
+                            egui::Button::new("")
+                                .fill(Color32::TRANSPARENT)
+                                .stroke(egui::Stroke::NONE)
+                                .min_size(Vec2::new(18.0, 18.0)),
+                        );
+                        icons::paint_close_icon(ui.painter(), close_btn.rect, theme.text_muted);
+                        if close_btn.clicked() {
                             self.popup_open = false;
                         }
                     });
@@ -123,15 +145,23 @@ impl ShieldState {
 
                 ui.add_space(8.0);
                 let https_text = if self.https_upgraded {
-                    "✓ Upgraded to HTTPS"
+                    "Upgraded to HTTPS"
                 } else {
-                    "✓ Already HTTPS"
+                    "Already HTTPS"
                 };
-                ui.label(
-                    egui::RichText::new(https_text)
-                        .color(theme.accent_shield)
-                        .size(12.0),
-                );
+                ui.horizontal(|ui| {
+                    let check_rect = Rect::from_min_size(
+                        Pos2::new(ui.cursor().min.x, ui.cursor().min.y + 1.0),
+                        Vec2::new(12.0, 12.0),
+                    );
+                    icons::paint_check_icon(ui.painter(), check_rect, theme.accent_shield);
+                    ui.allocate_space(Vec2::new(14.0, 14.0));
+                    ui.label(
+                        egui::RichText::new(https_text)
+                            .color(theme.accent_shield)
+                            .size(12.0),
+                    );
+                });
             });
     }
 }

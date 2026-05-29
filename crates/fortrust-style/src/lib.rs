@@ -207,6 +207,42 @@ pub enum BorderStyle {
     Outset,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct BoxShadow {
+    pub inset: bool,
+    pub offset_x: f32,
+    pub offset_y: f32,
+    pub blur: f32,
+    pub spread: f32,
+    pub color: Color,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum OutlineStyle {
+    None,
+    Solid,
+    Dashed,
+    Dotted,
+    Double,
+    Groove,
+    Ridge,
+    Inset,
+    Outset,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct OutlineSizes {
+    pub width: f32,
+    pub style: OutlineStyle,
+    pub color: Color,
+}
+
+impl OutlineSizes {
+    pub fn none() -> Self {
+        Self { width: 0.0, style: OutlineStyle::None, color: Color::TRANSPARENT }
+    }
+}
+
 #[derive(Debug, Clone, PartialEq)]
 pub struct ComputedStyle {
     pub display: Display,
@@ -247,6 +283,8 @@ pub struct ComputedStyle {
     pub gap: Length,
     pub row_gap: Length,
     pub column_gap: Length,
+    pub box_shadow: Option<BoxShadow>,
+    pub outline: OutlineSizes,
 }
 
 impl ComputedStyle {
@@ -290,6 +328,8 @@ impl ComputedStyle {
             gap: Length::Px(0.0),
             row_gap: Length::Px(0.0),
             column_gap: Length::Px(0.0),
+            box_shadow: None,
+            outline: OutlineSizes::none(),
         }
     }
 
@@ -412,6 +452,8 @@ enum PropertyValue {
     FlexShrink(f32),
     Order(i32),
     String(String),
+    BoxShadow(BoxShadow),
+    Outline(OutlineSizes),
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -865,6 +907,10 @@ fn parse_property_value(property: &str, value: &str) -> Option<PropertyValue> {
         "border" | "border-top" | "border-right" | "border-bottom" | "border-left" => {
             parse_border_shorthand(value)
         }
+        "box-shadow" => parse_box_shadow(value),
+        "outline" => parse_outline_shorthand(value),
+        "outline-width" => parse_length(value).map(PropertyValue::Length),
+        "outline-style" => parse_outline_style(value),
         "border-width"
         | "border-top-width"
         | "border-right-width"
@@ -923,9 +969,150 @@ fn apply_declarations(style: &mut ComputedStyle, declarations: &[Declaration]) {
             ("flex-grow", PropertyValue::FlexGrow(value)) => style.flex_grow = *value,
             ("flex-shrink", PropertyValue::FlexShrink(value)) => style.flex_shrink = *value,
             ("order", PropertyValue::Order(value)) => style.order = *value,
+            ("border", PropertyValue::Border(value)) => {
+                style.border.top = Border { width: value.top.width, style: value.top.style, color: value.top.color };
+                style.border.right = Border { width: value.right.width, style: value.right.style, color: value.right.color };
+                style.border.bottom = Border { width: value.bottom.width, style: value.bottom.style, color: value.bottom.color };
+                style.border.left = Border { width: value.left.width, style: value.left.style, color: value.left.color };
+            }
+            ("border-top", PropertyValue::Border(value)) => {
+                style.border.top = Border { width: value.top.width, style: value.top.style, color: value.top.color };
+            }
+            ("border-right", PropertyValue::Border(value)) => {
+                style.border.right = Border { width: value.right.width, style: value.right.style, color: value.right.color };
+            }
+            ("border-bottom", PropertyValue::Border(value)) => {
+                style.border.bottom = Border { width: value.bottom.width, style: value.bottom.style, color: value.bottom.color };
+            }
+            ("border-left", PropertyValue::Border(value)) => {
+                style.border.left = Border { width: value.left.width, style: value.left.style, color: value.left.color };
+            }
+            ("border-width", PropertyValue::Length(value)) => {
+                let px = value.to_px(16.0, 1280.0, 16.0);
+                style.border.top.width = px;
+                style.border.right.width = px;
+                style.border.bottom.width = px;
+                style.border.left.width = px;
+            }
+            ("border-top-width", PropertyValue::Length(value)) => {
+                style.border.top.width = value.to_px(16.0, 1280.0, 16.0);
+            }
+            ("border-right-width", PropertyValue::Length(value)) => {
+                style.border.right.width = value.to_px(16.0, 1280.0, 16.0);
+            }
+            ("border-bottom-width", PropertyValue::Length(value)) => {
+                style.border.bottom.width = value.to_px(16.0, 1280.0, 16.0);
+            }
+            ("border-left-width", PropertyValue::Length(value)) => {
+                style.border.left.width = value.to_px(16.0, 1280.0, 16.0);
+            }
+            ("border-color", PropertyValue::Color(value)) => {
+                style.border.top.color = *value;
+                style.border.right.color = *value;
+                style.border.bottom.color = *value;
+                style.border.left.color = *value;
+            }
+            ("border-style", PropertyValue::Border(value)) => {
+                style.border.top.style = value.top.style;
+                style.border.right.style = value.right.style;
+                style.border.bottom.style = value.bottom.style;
+                style.border.left.style = value.left.style;
+            }
+            ("box-shadow", PropertyValue::BoxShadow(value)) => {
+                style.box_shadow = Some(*value);
+            }
+            ("outline", PropertyValue::Outline(value)) => {
+                style.outline = *value;
+            }
+            ("outline-width", PropertyValue::Length(value)) => {
+                style.outline.width = value.to_px(16.0, 1280.0, 16.0);
+            }
+            ("outline-style", PropertyValue::Outline(value)) => {
+                style.outline.style = value.style;
+            }
+            ("outline-color", PropertyValue::Color(value)) => {
+                style.outline.color = *value;
+            }
             _ => {}
         }
     }
+}
+
+fn parse_box_shadow(value: &str) -> Option<PropertyValue> {
+    let trimmed = value.trim();
+    if trimmed.eq_ignore_ascii_case("none") || trimmed.is_empty() {
+        return Some(PropertyValue::BoxShadow(BoxShadow {
+            inset: false, offset_x: 0.0, offset_y: 0.0, blur: 0.0, spread: 0.0, color: Color::TRANSPARENT,
+        }));
+    }
+    let parts: Vec<String> = trimmed.split_whitespace().map(|s| s.to_owned()).collect();
+
+    let mut inset = false;
+    let mut offset_x = 0.0f32;
+    let mut offset_y = 0.0f32;
+    let mut blur = 0.0f32;
+    let mut spread = 0.0f32;
+    let mut color = Color::rgba(0, 0, 0, 128);
+    let mut value_count = 0u8;
+
+    for part in &parts {
+        let lower = part.to_ascii_lowercase();
+        if lower == "inset" {
+            inset = true;
+        } else if let Ok(v) = part.parse::<f32>() {
+            value_count += 1;
+            match value_count {
+                1 => offset_x = v,
+                2 => offset_y = v,
+                3 => blur = v,
+                4 => spread = v,
+                _ => {}
+            }
+        } else if let Some(c) = parse_color(part) {
+            color = c;
+        }
+    }
+
+    Some(PropertyValue::BoxShadow(BoxShadow { inset, offset_x, offset_y, blur, spread, color }))
+}
+
+fn parse_outline_style(value: &str) -> Option<PropertyValue> {
+    match value.trim().to_ascii_lowercase().as_str() {
+        "none" => Some(PropertyValue::Outline(OutlineSizes { width: 0.0, style: OutlineStyle::None, color: Color::TRANSPARENT })),
+        "solid" => Some(PropertyValue::Outline(OutlineSizes { width: 1.0, style: OutlineStyle::Solid, color: Color::BLACK })),
+        "dashed" => Some(PropertyValue::Outline(OutlineSizes { width: 1.0, style: OutlineStyle::Dashed, color: Color::BLACK })),
+        "dotted" => Some(PropertyValue::Outline(OutlineSizes { width: 1.0, style: OutlineStyle::Dotted, color: Color::BLACK })),
+        "double" => Some(PropertyValue::Outline(OutlineSizes { width: 2.0, style: OutlineStyle::Double, color: Color::BLACK })),
+        "groove" => Some(PropertyValue::Outline(OutlineSizes { width: 1.0, style: OutlineStyle::Groove, color: Color::BLACK })),
+        "ridge" => Some(PropertyValue::Outline(OutlineSizes { width: 1.0, style: OutlineStyle::Ridge, color: Color::BLACK })),
+        "inset" => Some(PropertyValue::Outline(OutlineSizes { width: 1.0, style: OutlineStyle::Inset, color: Color::BLACK })),
+        "outset" => Some(PropertyValue::Outline(OutlineSizes { width: 1.0, style: OutlineStyle::Outset, color: Color::BLACK })),
+        _ => None,
+    }
+}
+
+fn parse_outline_shorthand(value: &str) -> Option<PropertyValue> {
+    let mut width = 0.0f32;
+    let mut style = OutlineStyle::None;
+    let mut color = Color::TRANSPARENT;
+    for part in value.split_whitespace() {
+        let lowered = part.to_ascii_lowercase();
+        if let Ok(v) = part.parse::<f32>() {
+            width = v;
+        } else if let Some(c) = parse_color(part) {
+            color = c;
+        } else {
+            match lowered.as_str() {
+                "none" => style = OutlineStyle::None,
+                "solid" => style = OutlineStyle::Solid,
+                "dashed" => style = OutlineStyle::Dashed,
+                "dotted" => style = OutlineStyle::Dotted,
+                "double" => style = OutlineStyle::Double,
+                _ => {}
+            }
+        }
+    }
+    Some(PropertyValue::Outline(OutlineSizes { width, style, color }))
 }
 
 fn parse_border_shorthand(value: &str) -> Option<PropertyValue> {

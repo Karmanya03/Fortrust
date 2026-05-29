@@ -4,19 +4,21 @@ use std::thread;
 use std::time::Duration;
 
 use chrono::Utc;
-use eframe::egui::{self, Color32, Context, CornerRadius, Frame, Margin, Stroke, Vec2};
+use eframe::egui::{self, Color32, Context, CornerRadius, Frame, Margin, Pos2, Rect, Stroke, Vec2};
 use fortrust_core::{
     BlockReason, BrowserConfig, PrivacyConfig, PrivacyEngine, RequestContext, ResourceType, TabId,
     TabManager,
 };
-use fortrust_storage::{Bookmark, HistoryEntry, StorageDatabase, SettingValue};
+use fortrust_storage::{HistoryEntry, StorageDatabase, SettingValue};
 use trust_engine::{Color, DisplayCommand, EnginePage, EngineRect, TrustEngine, Viewport};
 
 use crate::{
     animation::SidebarAnimation,
-    omnibox::OmniboxState,
+    download::{DownloadManager, default_download_dir},
+    icons,
+    omnibox::{OmniboxState, SuggestionItem, SuggestionKind},
     shield::ShieldState,
-    sidebar::{self, SidebarPage},
+    sidebar::{DownloadAction, SidebarState},
     speed_dial::SpeedDialState,
     backgrounds,
     theme::FortrustTheme,
@@ -32,32 +34,39 @@ pub struct FortrustApp {
     tab_pages: HashMap<TabId, TabPageState>,
     request_owner: HashMap<u64, TabId>,
 
-    // Opera Air UI state
+    // v2 UI state
     pub omnibox: OmniboxState,
     pub sidebar_anim: SidebarAnimation,
-    pub sidebar_page: SidebarPage,
+    pub sidebar_state: SidebarState,
     pub speed_dial: SpeedDialState,
     pub shield: ShieldState,
     pub theme: FortrustTheme,
-    pub theme_mode: ThemeMode,
 
     // Performance
     pub total_memory_mb: f32,
-    pub memory_anim: f32,
     pub last_frame: std::time::Instant,
     pub animation_phase: f32,
     pub needs_new_tab: bool,
     pub history_filter: String,
     pub bookmark_filter: String,
-    // show a transient startup overlay for a short time
     pub startup_deadline: Option<std::time::Instant>,
-}
+    pub window_hovered_close: bool,
+    pub window_hovered_min: bool,
+    pub window_hovered_max: bool,
 
-#[derive(Clone, Copy, PartialEq)]
-pub enum ThemeMode {
-    System,
-    Dark,
-    Light,
+    // Tab drag-and-drop
+    drag_tab_id: Option<TabId>,
+    drag_cursor_x: f32,
+
+    // Context menu state
+    context_menu: Option<(egui::Pos2, TabId)>,
+
+    // Page info panel
+    page_info_open: bool,
+
+    // Download manager
+    download_manager: DownloadManager,
+    download_dir: String,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -106,9 +115,7 @@ impl TabPageState {
     }
 
     fn push_history(&mut self, url: String) {
-        if self.current_url() == Some(url.as_str()) {
-            return;
-        }
+        if self.current_url() == Some(url.as_str()) { return; }
         self.history.truncate(self.history_index.saturating_add(1));
         self.history.push(url);
         self.history_index = self.history.len().saturating_sub(1);
@@ -123,26 +130,17 @@ impl TabPageState {
         }
     }
 
-    fn can_go_back(&self) -> bool {
-        self.history_index > 0
-    }
-
-    fn can_go_forward(&self) -> bool {
-        self.history_index + 1 < self.history.len()
-    }
+    fn can_go_back(&self) -> bool { self.history_index > 0 }
+    fn can_go_forward(&self) -> bool { self.history_index + 1 < self.history.len() }
 
     fn go_back(&mut self) -> Option<String> {
-        if !self.can_go_back() {
-            return None;
-        }
+        if !self.can_go_back() { return None; }
         self.history_index -= 1;
         self.current_url().map(str::to_owned)
     }
 
     fn go_forward(&mut self) -> Option<String> {
-        if !self.can_go_forward() {
-            return None;
-        }
+        if !self.can_go_forward() { return None; }
         self.history_index += 1;
         self.current_url().map(str::to_owned)
     }
@@ -155,9 +153,7 @@ impl TabPageState {
     }
 
     fn finish_load(&mut self, request_id: u64, page: EnginePage) -> bool {
-        if self.request_id != Some(request_id) {
-            return false;
-        }
+        if self.request_id != Some(request_id) { return false; }
         self.replace_history(page.url.clone());
         self.page = Some(page);
         self.load_error = None;
@@ -167,9 +163,7 @@ impl TabPageState {
     }
 
     fn fail_load(&mut self, request_id: u64, error: String) -> bool {
-        if self.request_id != Some(request_id) {
-            return false;
-        }
+        if self.request_id != Some(request_id) { return false; }
         self.page = None;
         self.load_error = Some(error);
         self.loading_url = None;
@@ -192,23 +186,12 @@ struct EngineWorker {
 }
 
 enum EngineCommand {
-    Load {
-        request_id: u64,
-        url: String,
-        viewport: Viewport,
-    },
+    Load { request_id: u64, url: String, viewport: Viewport },
 }
 
 enum EngineEvent {
-    Loaded {
-        request_id: u64,
-        page: Box<EnginePage>,
-    },
-    Failed {
-        request_id: u64,
-        url: String,
-        error: String,
-    },
+    Loaded { request_id: u64, page: Box<EnginePage> },
+    Failed { request_id: u64, url: String, error: String },
 }
 
 impl EngineWorker {
@@ -218,42 +201,24 @@ impl EngineWorker {
 
         thread::spawn(move || {
             let runtime = match tokio::runtime::Builder::new_current_thread()
-                .enable_all()
-                .build()
+                .enable_all().build()
             {
-                Ok(runtime) => runtime,
-                Err(error) => {
-                    drain_failed_worker(command_receiver, event_sender, error.to_string());
-                    return;
-                }
+                Ok(r) => r,
+                Err(e) => { drain_failed_worker(command_receiver, event_sender, e.to_string()); return; }
             };
 
             let mut engine = match TrustEngine::secure_networked(privacy) {
-                Ok(engine) => engine,
-                Err(error) => {
-                    drain_failed_worker(command_receiver, event_sender, format!("{error:?}"));
-                    return;
-                }
+                Ok(e) => e,
+                Err(e) => { drain_failed_worker(command_receiver, event_sender, format!("{e:?}")); return; }
             };
 
             while let Ok(command) = command_receiver.recv() {
                 match command {
-                    EngineCommand::Load {
-                        request_id,
-                        url,
-                        viewport,
-                    } => {
+                    EngineCommand::Load { request_id, url, viewport } => {
                         let result = runtime.block_on(engine.load_url(url.clone(), viewport));
                         let event = match result {
-                            Ok(page) => EngineEvent::Loaded {
-                                request_id,
-                                page: Box::new(page),
-                            },
-                            Err(error) => EngineEvent::Failed {
-                                request_id,
-                                url,
-                                error: format!("{error:?}"),
-                            },
+                            Ok(page) => EngineEvent::Loaded { request_id, page: Box::new(page) },
+                            Err(e) => EngineEvent::Failed { request_id, url, error: format!("{e:?}") },
                         };
                         let _ = event_sender.send(event);
                     }
@@ -261,21 +226,13 @@ impl EngineWorker {
             }
         });
 
-        Self {
-            sender: command_sender,
-            receiver: event_receiver,
-            next_request_id: 1,
-        }
+        Self { sender: command_sender, receiver: event_receiver, next_request_id: 1 }
     }
 
     fn load(&mut self, url: String, viewport: Viewport) -> u64 {
         let request_id = self.next_request_id;
         self.next_request_id = self.next_request_id.saturating_add(1);
-        let _ = self.sender.send(EngineCommand::Load {
-            request_id,
-            url,
-            viewport,
-        });
+        let _ = self.sender.send(EngineCommand::Load { request_id, url, viewport });
         request_id
     }
 }
@@ -286,14 +243,8 @@ fn drain_failed_worker(
     error: String,
 ) {
     while let Ok(command) = command_receiver.recv() {
-        let EngineCommand::Load {
-            request_id, url, ..
-        } = command;
-        let _ = event_sender.send(EngineEvent::Failed {
-            request_id,
-            url,
-            error: error.clone(),
-        });
+        let EngineCommand::Load { request_id, url, .. } = command;
+        let _ = event_sender.send(EngineEvent::Failed { request_id, url, error: error.clone() });
     }
 }
 
@@ -309,7 +260,12 @@ impl FortrustApp {
         let mut tab_pages = HashMap::new();
         tab_pages.insert(start_id, TabPageState::new("fortrust://start"));
 
-        Self {
+        let mut speed_dial = SpeedDialState::default();
+        if let Some(ref s) = storage {
+            speed_dial.load_persisted_tiles(s);
+        }
+
+        let mut app = Self {
             privacy: PrivacyEngine::new(config.privacy.clone()),
             internal_engine: TrustEngine::offline(),
             engine_worker: EngineWorker::spawn(config.privacy.clone()),
@@ -321,216 +277,126 @@ impl FortrustApp {
 
             omnibox: OmniboxState::default(),
             sidebar_anim: SidebarAnimation::new(),
-            sidebar_page: SidebarPage::Tabs,
-            speed_dial: SpeedDialState::default(),
+            sidebar_state: SidebarState::default(),
+            speed_dial,
             shield: ShieldState::default(),
             theme,
-            theme_mode: ThemeMode::Dark,
 
             total_memory_mb: 0.0,
-            memory_anim: 0.0,
             last_frame: std::time::Instant::now(),
             animation_phase: 0.0,
             needs_new_tab: false,
             history_filter: String::new(),
             bookmark_filter: String::new(),
-            startup_deadline: Some(std::time::Instant::now() + std::time::Duration::from_millis(1500)),
+            startup_deadline: Some(std::time::Instant::now() + Duration::from_millis(1500)),
+            window_hovered_close: false,
+            window_hovered_min: false,
+            window_hovered_max: false,
+
+            drag_tab_id: None,
+            drag_cursor_x: 0.0,
+            context_menu: None,
+            page_info_open: false,
+            download_manager: DownloadManager::new(),
+            download_dir: default_download_dir(),
+        };
+
+        // Restore persisted download state and auto-resume pending downloads
+        if let Some(ref s) = app.storage {
+            app.download_manager.load_state_from_settings(&s.settings);
+            app.download_manager.resume_all_paused(&app.download_dir);
+        }
+
+        app
+    }
+
+    fn save_download_state(&self) {
+        if let Some(ref s) = self.storage {
+            self.download_manager.save_state_to_settings(&s.settings);
         }
     }
 
     fn load_browser_config(storage: Option<&StorageDatabase>) -> BrowserConfig {
         let mut config = BrowserConfig::default();
-        let Some(storage) = storage else {
-            return config;
-        };
+        let Some(storage) = storage else { return config; };
 
-        if let Some(theme) = storage
-            .settings
-            .load(SETTINGS_UI_THEME)
-            .and_then(|value| value.as_string().map(str::to_owned))
-        {
-            config.ui.theme = theme;
+        macro_rules! load_str {
+            ($key:expr) => {
+                storage.settings.load($key).and_then(|v| v.as_string().map(str::to_owned))
+            };
         }
-        if let Some(value) = storage
-            .settings
-            .load(SETTINGS_UI_COMPACT)
-            .and_then(|value| value.as_bool())
-        {
-            config.ui.compact_density = value;
+        macro_rules! load_bool {
+            ($key:expr) => {
+                storage.settings.load($key).and_then(|v| v.as_bool())
+            };
         }
-        if let Some(value) = storage
-            .settings
-            .load(SETTINGS_UI_WALLPAPER)
-            .and_then(|value| value.as_string().map(str::to_owned))
-        {
-            config.ui.wallpaper = value;
+        macro_rules! load_int {
+            ($key:expr) => {
+                storage.settings.load($key).and_then(|v| v.as_int().map(|i| i as u8))
+            };
         }
-        if let Some(value) = storage
-            .settings
-            .load(SETTINGS_UI_WALLPAPER_STRENGTH)
-            .and_then(|value| value.as_int().map(|v| v as u8))
-        {
-            config.ui.wallpaper_strength = value;
-        }
-        if let Some(value) = storage
-            .settings
-            .load(SETTINGS_UI_PRIVACY_PANEL)
-            .and_then(|value| value.as_bool())
-        {
-            config.ui.show_privacy_panel = value;
-        }
-        if let Some(value) = storage
-            .settings
-            .load(SETTINGS_UI_MEMORY_METER)
-            .and_then(|value| value.as_bool())
-        {
-            config.ui.show_memory_meter = value;
-        }
-        if let Some(value) = storage
-            .settings
-            .load(SETTINGS_UI_GLASS)
-            .and_then(|value| value.as_int())
-        {
-            config.ui.glass_strength = value.clamp(0, 100) as u8;
-        }
-        if let Some(value) = storage
-            .settings
-            .load(SETTINGS_UI_MOTION)
-            .and_then(|value| value.as_int())
-        {
-            config.ui.motion_strength = value.clamp(0, 100) as u8;
-        }
-        if let Some(value) = storage
-            .settings
-            .load(SETTINGS_PRIVACY_BLOCK_ADS)
-            .and_then(|value| value.as_bool())
-        {
-            config.privacy.block_ads = value;
-        }
-        if let Some(value) = storage
-            .settings
-            .load(SETTINGS_PRIVACY_BLOCK_TRACKERS)
-            .and_then(|value| value.as_bool())
-        {
-            config.privacy.block_trackers = value;
-        }
-        if let Some(value) = storage
-            .settings
-            .load(SETTINGS_PRIVACY_THIRD_PARTY)
-            .and_then(|value| value.as_bool())
-        {
-            config.privacy.block_third_party_cookies = value;
-        }
-        if let Some(value) = storage
-            .settings
-            .load(SETTINGS_PRIVACY_STRIP_PARAMS)
-            .and_then(|value| value.as_bool())
-        {
-            config.privacy.strip_tracking_query_params = value;
-        }
-        if let Some(value) = storage
-            .settings
-            .load(SETTINGS_PRIVACY_HTTPS_ONLY)
-            .and_then(|value| value.as_bool())
-        {
-            config.privacy.https_only_mode = value;
-        }
-        if let Some(value) = storage
-            .settings
-            .load(SETTINGS_PRIVACY_GPC)
-            .and_then(|value| value.as_bool())
-        {
-            config.privacy.global_privacy_control = value;
-        }
-        if let Some(value) = storage
-            .settings
-            .load(SETTINGS_PRIVACY_DNT)
-            .and_then(|value| value.as_bool())
-        {
-            config.privacy.do_not_track = value;
-        }
-        if let Some(value) = storage
-            .settings
-            .load(SETTINGS_PRIVACY_FINGERPRINT)
-            .and_then(|value| value.as_bool())
-        {
-            config.privacy.fingerprint_noise = value;
-        }
+
+        if let Some(v) = load_str!(SETTINGS_UI_THEME) { config.ui.theme = v; }
+        if let Some(v) = load_bool!(SETTINGS_UI_COMPACT) { config.ui.compact_density = v; }
+        if let Some(v) = load_str!(SETTINGS_UI_WALLPAPER) { config.ui.wallpaper = v; }
+        if let Some(v) = load_int!(SETTINGS_UI_WALLPAPER_STRENGTH) { config.ui.wallpaper_strength = v; }
+        if let Some(v) = load_bool!(SETTINGS_UI_PRIVACY_PANEL) { config.ui.show_privacy_panel = v; }
+        if let Some(v) = load_bool!(SETTINGS_UI_MEMORY_METER) { config.ui.show_memory_meter = v; }
+        if let Some(v) = load_int!(SETTINGS_UI_GLASS) { config.ui.glass_strength = v.clamp(0, 100); }
+        if let Some(v) = load_int!(SETTINGS_UI_MOTION) { config.ui.motion_strength = v.clamp(0, 100); }
+        if let Some(v) = load_bool!(SETTINGS_PRIVACY_BLOCK_ADS) { config.privacy.block_ads = v; }
+        if let Some(v) = load_bool!(SETTINGS_PRIVACY_BLOCK_TRACKERS) { config.privacy.block_trackers = v; }
+        if let Some(v) = load_bool!(SETTINGS_PRIVACY_THIRD_PARTY) { config.privacy.block_third_party_cookies = v; }
+        if let Some(v) = load_bool!(SETTINGS_PRIVACY_STRIP_PARAMS) { config.privacy.strip_tracking_query_params = v; }
+        if let Some(v) = load_bool!(SETTINGS_PRIVACY_HTTPS_ONLY) { config.privacy.https_only_mode = v; }
+        if let Some(v) = load_bool!(SETTINGS_PRIVACY_GPC) { config.privacy.global_privacy_control = v; }
+        if let Some(v) = load_bool!(SETTINGS_PRIVACY_DNT) { config.privacy.do_not_track = v; }
+        if let Some(v) = load_bool!(SETTINGS_PRIVACY_FINGERPRINT) { config.privacy.fingerprint_noise = v; }
 
         config
     }
 
+    #[allow(dead_code)]
     fn persist_browser_config(&self) {
-        let Some(storage) = &self.storage else {
-            return;
-        };
+        let Some(ref storage) = self.storage else { return; };
 
-        let _ = storage
-            .settings
-            .store(SETTINGS_UI_THEME, &SettingValue::from(self.config.ui.theme.clone()));
-        let _ = storage.settings.store(
-            SETTINGS_UI_COMPACT,
-            &SettingValue::from(self.config.ui.compact_density),
-        );
-        let _ = storage.settings.store(
-            SETTINGS_UI_PRIVACY_PANEL,
-            &SettingValue::from(self.config.ui.show_privacy_panel),
-        );
-        let _ = storage.settings.store(
-            SETTINGS_UI_MEMORY_METER,
-            &SettingValue::from(self.config.ui.show_memory_meter),
-        );
-        let _ = storage.settings.store(
-            SETTINGS_UI_GLASS,
-            &SettingValue::from(i64::from(self.config.ui.glass_strength)),
-        );
-        let _ = storage
-            .settings
-            .store(SETTINGS_UI_WALLPAPER, &SettingValue::from(self.config.ui.wallpaper.clone()));
-        let _ = storage.settings.store(
-            SETTINGS_UI_WALLPAPER_STRENGTH,
-            &SettingValue::from(i64::from(self.config.ui.wallpaper_strength)),
-        );
-        let _ = storage.settings.store(
-            SETTINGS_UI_MOTION,
-            &SettingValue::from(i64::from(self.config.ui.motion_strength)),
-        );
-        let _ = storage
-            .settings
-            .store(SETTINGS_PRIVACY_BLOCK_ADS, &SettingValue::from(self.config.privacy.block_ads));
-        let _ = storage.settings.store(
-            SETTINGS_PRIVACY_BLOCK_TRACKERS,
-            &SettingValue::from(self.config.privacy.block_trackers),
-        );
-        let _ = storage.settings.store(
-            SETTINGS_PRIVACY_THIRD_PARTY,
-            &SettingValue::from(self.config.privacy.block_third_party_cookies),
-        );
-        let _ = storage.settings.store(
-            SETTINGS_PRIVACY_STRIP_PARAMS,
-            &SettingValue::from(self.config.privacy.strip_tracking_query_params),
-        );
-        let _ = storage.settings.store(
-            SETTINGS_PRIVACY_HTTPS_ONLY,
-            &SettingValue::from(self.config.privacy.https_only_mode),
-        );
-        let _ = storage.settings.store(
-            SETTINGS_PRIVACY_GPC,
-            &SettingValue::from(self.config.privacy.global_privacy_control),
-        );
-        let _ = storage
-            .settings
-            .store(SETTINGS_PRIVACY_DNT, &SettingValue::from(self.config.privacy.do_not_track));
-        let _ = storage.settings.store(
-            SETTINGS_PRIVACY_FINGERPRINT,
-            &SettingValue::from(self.config.privacy.fingerprint_noise),
-        );
+        macro_rules! save_str {
+            ($key:expr, $val:expr) => {
+                let _ = storage.settings.store($key, &SettingValue::from($val.clone()));
+            };
+        }
+        macro_rules! save_bool {
+            ($key:expr, $val:expr) => {
+                let _ = storage.settings.store($key, &SettingValue::from($val));
+            };
+        }
+        macro_rules! save_int {
+            ($key:expr, $val:expr) => {
+                let _ = storage.settings.store($key, &SettingValue::from(i64::from($val)));
+            };
+        }
+
+        save_str!(SETTINGS_UI_THEME, self.config.ui.theme);
+        save_bool!(SETTINGS_UI_COMPACT, self.config.ui.compact_density);
+        save_bool!(SETTINGS_UI_PRIVACY_PANEL, self.config.ui.show_privacy_panel);
+        save_bool!(SETTINGS_UI_MEMORY_METER, self.config.ui.show_memory_meter);
+        save_int!(SETTINGS_UI_GLASS, self.config.ui.glass_strength);
+        save_str!(SETTINGS_UI_WALLPAPER, self.config.ui.wallpaper);
+        save_int!(SETTINGS_UI_WALLPAPER_STRENGTH, self.config.ui.wallpaper_strength);
+        save_int!(SETTINGS_UI_MOTION, self.config.ui.motion_strength);
+        save_bool!(SETTINGS_PRIVACY_BLOCK_ADS, self.config.privacy.block_ads);
+        save_bool!(SETTINGS_PRIVACY_BLOCK_TRACKERS, self.config.privacy.block_trackers);
+        save_bool!(SETTINGS_PRIVACY_THIRD_PARTY, self.config.privacy.block_third_party_cookies);
+        save_bool!(SETTINGS_PRIVACY_STRIP_PARAMS, self.config.privacy.strip_tracking_query_params);
+        save_bool!(SETTINGS_PRIVACY_HTTPS_ONLY, self.config.privacy.https_only_mode);
+        save_bool!(SETTINGS_PRIVACY_GPC, self.config.privacy.global_privacy_control);
+        save_bool!(SETTINGS_PRIVACY_DNT, self.config.privacy.do_not_track);
+        save_bool!(SETTINGS_PRIVACY_FINGERPRINT, self.config.privacy.fingerprint_noise);
     }
 
     fn theme_for_mode(theme: &str, glass_strength: u8) -> FortrustTheme {
         match theme.to_ascii_lowercase().as_str() {
             "light" => FortrustTheme::light_with_glass_strength(glass_strength),
-            "system" => FortrustTheme::dark_with_glass_strength(glass_strength),
             _ => FortrustTheme::dark_with_glass_strength(glass_strength),
         }
     }
@@ -544,6 +410,7 @@ impl FortrustApp {
         0.65 + (self.config.ui.motion_strength.min(100) as f32 / 100.0) * 0.85
     }
 
+    #[allow(dead_code)]
     fn rebuild_privacy_pipeline(&mut self) {
         self.privacy = PrivacyEngine::new(self.config.privacy.clone());
         self.engine_worker = EngineWorker::spawn(self.config.privacy.clone());
@@ -551,39 +418,58 @@ impl FortrustApp {
 
     fn open_storage() -> Option<StorageDatabase> {
         let base = if cfg!(target_os = "windows") {
-            std::env::var("APPDATA")
-                .ok()
-                .map(|p| format!("{}\\Fortrust", p))
+            std::env::var("APPDATA").ok().map(|p| format!("{p}\\Fortrust"))
         } else {
-            std::env::var("HOME")
-                .ok()
-                .map(|p| format!("{}/.local/share/fortrust", p))
+            std::env::var("HOME").ok().map(|p| format!("{p}/.local/share/fortrust"))
         };
         match base {
             Some(dir) => {
-                let path = format!("{}\\storage.redb", dir);
+                let path = format!("{dir}\\storage.redb");
                 let _ = std::fs::create_dir_all(&dir);
                 Some(StorageDatabase::open_or_default(path))
             }
-            None => {
-                tracing::warn!("No data directory found, running without persistent storage");
-                None
-            }
+            None => { tracing::warn!("No data directory found"); None }
         }
     }
 
-    fn active_tab_id(&self) -> Option<TabId> {
-        self.tabs.active_id()
-    }
-
+    fn active_tab_id(&self) -> Option<TabId> { self.tabs.active_id() }
     fn active_state(&self) -> Option<&TabPageState> {
         self.active_tab_id().and_then(|id| self.tab_pages.get(&id))
     }
-
     fn tab_state_mut(&mut self, id: TabId) -> &mut TabPageState {
-        self.tab_pages
-            .entry(id)
-            .or_insert_with(|| TabPageState::new("fortrust://start"))
+        self.tab_pages.entry(id).or_insert_with(|| TabPageState::new("fortrust://start"))
+    }
+
+    fn current_bookmarked(&self) -> bool {
+        let Some(url) = self.active_state().and_then(|s| s.current_url()).or_else(|| self.tabs.active_tab().map(|t| t.url.as_str())) else {
+            return false;
+        };
+        self.storage.as_ref().and_then(|s| s.bookmarks.get_by_url(url)).is_some()
+    }
+
+    fn toggle_bookmark(&mut self) {
+        let Some(url) = self.active_state().and_then(|s| s.current_url()).or_else(|| self.tabs.active_tab().map(|t| t.url.as_str())).map(str::to_owned) else { return; };
+        let url_c = url.clone();
+        let title = self.active_state().and_then(|s| s.page.as_ref().map(|p| p.title.clone()))
+            .or_else(|| self.tabs.active_tab().map(|t| t.title.to_string()))
+            .unwrap_or(url_c);
+        let Some(ref storage) = self.storage else { return; };
+        if storage.bookmarks.get_by_url(&url).is_some() {
+            let _ = storage.bookmarks.delete(&url);
+        } else {
+            let bm = fortrust_storage::Bookmark {
+                id: url.clone(),
+                url: url.clone(),
+                title,
+                folder_id: None,
+                added_at: chrono::Utc::now(),
+                last_visited: None,
+                visit_count: 0,
+                icon_data: None,
+                description: None,
+            };
+            let _ = storage.bookmarks.store(&bm);
+        }
     }
 
     fn navigate_input(&mut self, input: String, history_mode: HistoryMode) {
@@ -598,29 +484,18 @@ impl FortrustApp {
         match decision.blocked {
             Some(reason) => self.show_blocked_page(decision.original_url, reason, history_mode),
             None => {
-                let effective = decision
-                    .effective_url
-                    .unwrap_or_else(|| decision.original_url.clone());
+                let effective = decision.effective_url.unwrap_or(decision.original_url);
                 self.commit_navigation(effective, history_mode);
             }
         }
     }
 
-    fn show_blocked_page(
-        &mut self,
-        original_url: String,
-        _reason: BlockReason,
-        history_mode: HistoryMode,
-    ) {
-        let Some(tab_id) = self.active_tab_id() else {
-            return;
-        };
+    fn show_blocked_page(&mut self, original_url: String, _reason: BlockReason, history_mode: HistoryMode) {
+        let Some(tab_id) = self.active_tab_id() else { return; };
         self.shield.ads_blocked = self.shield.ads_blocked.saturating_add(1);
         self.tabs.record_privacy_block(tab_id);
-        self.tabs
-            .navigate_tab(tab_id, "fortrust://blocked", "Blocked");
+        self.tabs.navigate_tab(tab_id, "fortrust://blocked", "Blocked");
         self.omnibox.text = original_url;
-
         let state = self.tab_state_mut(tab_id);
         match history_mode {
             HistoryMode::Push => state.push_history("fortrust://blocked".to_owned()),
@@ -630,9 +505,7 @@ impl FortrustApp {
     }
 
     fn commit_navigation(&mut self, url: String, history_mode: HistoryMode) {
-        let Some(tab_id) = self.active_tab_id() else {
-            return;
-        };
+        let Some(tab_id) = self.active_tab_id() else { return; };
         let title = title_from_url(&url);
         self.tabs.navigate_tab(tab_id, url.clone(), title);
         self.omnibox.text = url.clone();
@@ -648,21 +521,15 @@ impl FortrustApp {
             return;
         }
 
-        let request_id = self.engine_worker.load(
-            url.clone(),
-            Viewport {
-                width: 1180.0,
-                height: 760.0,
-            },
-        );
+        let request_id = self.engine_worker.load(url.clone(), Viewport {
+            width: 1180.0, height: 760.0,
+        });
         self.request_owner.insert(request_id, tab_id);
         self.tab_state_mut(tab_id).begin_load(url, request_id);
     }
 
     fn go_back(&mut self) {
-        let Some(tab_id) = self.active_tab_id() else {
-            return;
-        };
+        let Some(tab_id) = self.active_tab_id() else { return; };
         if let Some(url) = self.tab_state_mut(tab_id).go_back() {
             self.omnibox.text = url.clone();
             self.navigate_input(url, HistoryMode::Replace);
@@ -670,9 +537,7 @@ impl FortrustApp {
     }
 
     fn go_forward(&mut self) {
-        let Some(tab_id) = self.active_tab_id() else {
-            return;
-        };
+        let Some(tab_id) = self.active_tab_id() else { return; };
         if let Some(url) = self.tab_state_mut(tab_id).go_forward() {
             self.omnibox.text = url.clone();
             self.navigate_input(url, HistoryMode::Replace);
@@ -680,27 +545,19 @@ impl FortrustApp {
     }
 
     fn reload(&mut self) {
-        let url = self
-            .active_state()
+        let url = self.active_state()
             .and_then(TabPageState::current_url)
             .map(str::to_owned)
             .unwrap_or_else(|| self.omnibox.text.clone());
         self.navigate_input(url, HistoryMode::Replace);
     }
 
-    fn can_go_back(&self) -> bool {
-        self.active_state().is_some_and(TabPageState::can_go_back)
-    }
-
-    fn can_go_forward(&self) -> bool {
-        self.active_state()
-            .is_some_and(TabPageState::can_go_forward)
-    }
+    fn can_go_back(&self) -> bool { self.active_state().is_some_and(TabPageState::can_go_back) }
+    fn can_go_forward(&self) -> bool { self.active_state().is_some_and(TabPageState::can_go_forward) }
 
     fn open_new_tab(&mut self) {
         let id = self.tabs.open_tab("fortrust://start", "Speed Dial", false);
-        self.tab_pages
-            .insert(id, TabPageState::new("fortrust://start"));
+        self.tab_pages.insert(id, TabPageState::new("fortrust://start"));
         self.omnibox.text = "fortrust://start".to_owned();
         self.needs_new_tab = true;
     }
@@ -709,343 +566,576 @@ impl FortrustApp {
         self.tabs.close_tab(id);
         self.tab_pages.remove(&id);
         self.request_owner.retain(|_, owner| *owner != id);
-        if self.tabs.tabs().is_empty() {
-            self.open_new_tab();
-        }
-        if let Some(tab) = self.tabs.active_tab() {
-            self.omnibox.text = tab.url.to_string();
-        }
+        if self.tabs.tabs().is_empty() { self.open_new_tab(); }
+        if let Some(tab) = self.tabs.active_tab() { self.omnibox.text = tab.url.to_string(); }
+    }
+
+    fn cycle_tab(&mut self, forward: bool) {
+        let tabs = self.tabs.tabs();
+        if tabs.len() < 2 { return; }
+        let active = self.active_tab_id();
+        let idx = active.and_then(|id| tabs.iter().position(|t| t.id == id)).unwrap_or(0);
+        let next = if forward {
+            (idx + 1) % tabs.len()
+        } else {
+            (idx + tabs.len() - 1) % tabs.len()
+        };
+        self.tabs.activate(tabs[next].id);
+        if let Some(tab) = self.tabs.active_tab() { self.omnibox.text = tab.url.to_string(); }
     }
 
     fn poll_loading(&mut self, ctx: &Context) {
         while let Ok(event) = self.engine_worker.receiver.try_recv() {
             match event {
                 EngineEvent::Loaded { request_id, page } => {
-                    let Some(tab_id) = self.request_owner.remove(&request_id) else {
-                        continue;
-                    };
+                    let Some(tab_id) = self.request_owner.remove(&request_id) else { continue; };
                     let page = *page;
-                    let memory_estimate = (page.security.body_bytes as f32 / 1024.0 / 1024.0)
-                        .max(0.25)
+                    let memory_estimate = (page.security.body_bytes as f32 / 1024.0 / 1024.0).max(0.25)
                         + (page.security.display_commands as f32 * 0.01);
                     let title = page.title.clone();
                     let url = page.url.clone();
                     let accepted = self.tab_state_mut(tab_id).finish_load(request_id, page);
                     if accepted {
                         self.tabs.navigate_tab(tab_id, url.clone(), title.clone());
-                        if self.active_tab_id() == Some(tab_id) {
-                            self.omnibox.text = url.clone();
-                        }
-                        if !url.starts_with("fortrust://")
-                            && !url.starts_with("about:")
+                        if self.active_tab_id() == Some(tab_id) { self.omnibox.text = url.clone(); }
+                        if !url.starts_with("fortrust://") && !url.starts_with("about:")
                             && let Some(ref storage) = self.storage
                         {
                             let entry = HistoryEntry {
-                                url: url.clone(),
-                                title,
-                                visit_time: Utc::now(),
-                                visit_count: 1,
-                                typed_count: 0,
-                                is_bookmarked: false,
+                                url: url.clone(), title, visit_time: Utc::now(),
+                                visit_count: 1, typed_count: 0, is_bookmarked: false,
                             };
                             let _ = storage.history.store(&entry);
                         }
                         self.total_memory_mb = memory_estimate;
                     }
                 }
-                EngineEvent::Failed {
-                    request_id,
-                    url,
-                    error,
-                } => {
-                    let Some(tab_id) = self.request_owner.remove(&request_id) else {
-                        continue;
-                    };
+                EngineEvent::Failed { request_id, url, error } => {
+                    let Some(tab_id) = self.request_owner.remove(&request_id) else { continue; };
                     let err_msg = error.clone();
                     let accepted = self.tab_state_mut(tab_id).fail_load(request_id, error);
-                    if accepted {
-                        tracing::warn!("Load failed for {}: {}", url, err_msg);
-                    }
+                    if accepted { tracing::warn!("Load failed for {}: {}", url, err_msg); }
                 }
             }
         }
-
-        if self
-            .tab_pages
-            .values()
-            .any(|state| state.loading_url.is_some())
-        {
+        if self.tab_pages.values().any(|state| state.loading_url.is_some()) {
             ctx.request_repaint_after(Duration::from_millis(16));
         }
     }
 
-    fn render_toolbar(&mut self, ctx: &Context) {
-        let glass_frame = Frame {
-            fill: self.theme.glass_bg,
-            inner_margin: Margin::symmetric(12, 8),
-            outer_margin: Margin::symmetric(6, 0),
-            corner_radius: CornerRadius::same(16),
-            stroke: Stroke::new(1.0, self.theme.glass_border),
-            shadow: egui::epaint::Shadow {
-                offset: [0, 8],
-                blur: 24,
-                spread: 0,
-                color: Color32::from_black_alpha(40),
-            },
-            ..Default::default()
-        };
-
-        egui::TopBottomPanel::top("fortrust_toolbar")
-            .exact_height(50.0)
-            .frame(glass_frame)
-            .show(ctx, |ui| {
-                ui.horizontal(|ui| {
-                    // Back/Forward/Reload
-                    let back = self.can_go_back();
-                    let fwd = self.can_go_forward();
-                    if nav_button(ui, "◀", back, &self.theme).clicked() {
-                        self.go_back();
-                    }
-                    if nav_button(ui, "▶", fwd, &self.theme).clicked() {
-                        self.go_forward();
-                    }
-                    if nav_button(ui, "⟳", true, &self.theme).clicked() {
-                        self.reload();
-                    }
-
-                    // Omnibox
-                    ui.add_space(8.0);
-                    if let Some(url) = self.omnibox.render(ui, &self.theme) {
-                        self.navigate_input(url, HistoryMode::Push);
-                    }
-
-                    // Shield button
-                    ui.add_space(8.0);
-                    self.shield.render_button(ui, &self.theme);
-
-                    if self.config.ui.show_memory_meter {
-                        ui.add_space(10.0);
-                        ui.label(
-                            egui::RichText::new(format!("🧠 {:.1} MB", self.total_memory_mb))
-                                .size(12.0)
-                                .color(self.theme.text_secondary),
-                        );
-                    }
-                });
-            });
-    }
+    // ── TAB BAR ─────────────────────────────────────────────
 
     fn render_tab_bar(&mut self, ctx: &Context) {
-        let glass_frame = Frame {
-            fill: self.theme.glass_bg,
-            inner_margin: Margin::symmetric(8, 4),
-            outer_margin: Margin::symmetric(6, 6),
-            corner_radius: CornerRadius::same(12),
-            stroke: Stroke::new(1.0, self.theme.glass_border),
-            shadow: egui::epaint::Shadow {
-                offset: [0, 8],
-                blur: 24,
-                spread: 0,
-                color: Color32::from_black_alpha(40),
-            },
-            ..Default::default()
-        };
+        let pointer_down = ctx.input(|i| i.pointer.any_down());
+        let pointer_released = ctx.input(|i| i.pointer.any_released());
+        let pointer_pos = ctx.input(|i| i.pointer.hover_pos());
+        let pointer_x = pointer_pos.map(|p| p.x).unwrap_or(0.0);
+
+        // End drag on release
+        if self.drag_tab_id.is_some() && pointer_released {
+            self.drag_tab_id = None;
+        }
 
         egui::TopBottomPanel::top("fortrust_tab_bar")
-            .exact_height(40.0)
-            .frame(glass_frame)
+            .exact_height(37.0)
+            .frame(Frame {
+                fill: self.theme.surface_tab_bar,
+                inner_margin: Margin::symmetric(4, 0),
+                outer_margin: Margin::ZERO,
+                ..Default::default()
+            })
             .show(ctx, |ui| {
                 ui.horizontal(|ui| {
-                    ui.add_space(4.0);
+                    ui.add_space(2.0);
+
                     let active = self.tabs.active_id();
                     let mut clicked = None;
                     let mut closed = None;
+                    // Track cumulative tab x positions for reorder detection
+                    let tab_count = self.tabs.tabs().len();
+                    let mut tab_x_positions: Vec<(TabId, f32, f32)> = Vec::with_capacity(tab_count); // (id, left, right)
+                    let mut reorder_target: Option<(TabId, usize)> = None;
 
-                    for tab in self.tabs.tabs() {
-                        let selected = Some(tab.id) == active;
-                        let busy = self
-                            .tab_pages
-                            .get(&tab.id)
-                            .is_some_and(|state| state.loading_url.is_some());
+                    for (i, tab) in self.tabs.tabs().iter().enumerate() {
+                        let is_dragging = self.drag_tab_id == Some(tab.id);
 
-                        let label = if busy {
-                            format!("{} ...", tab.title)
-                        } else {
-                            tab.title.to_string()
-                        };
-
-                        let fill = if selected {
-                            self.theme.accent_primary
-                        } else {
-                            Color32::TRANSPARENT
-                        };
-
-                        let response = ui.add(
-                            egui::Button::new(egui::RichText::new(&label).size(11.0).color(
-                                if selected {
-                                    self.theme.text_on_accent
-                                } else {
-                                    self.theme.text_secondary
-                                },
-                            ))
-                            .fill(fill)
-                            .stroke(Stroke::NONE)
-                            .corner_radius(6)
-                            .min_size(Vec2::new(80.0, 26.0)),
+                        let tab_size = Vec2::new(
+                            (tab.title.len() as f32 * 6.5 + 60.0).clamp(60.0, 180.0),
+                            27.0,
                         );
+                        let tab_rect = ui.allocate_space(tab_size).1;
+                        let tab_rect = Rect::from_min_size(tab_rect.min, tab_size);
+                        tab_x_positions.push((tab.id, tab_rect.min.x, tab_rect.max.x));
 
-                        if response.clicked() {
-                            clicked = Some(tab.id);
+                        // Start drag on pointer down + movement
+                        if !is_dragging && self.drag_tab_id.is_none()
+                            && pointer_down && ui.rect_contains_pointer(tab_rect)
+                        {
+                            self.drag_tab_id = Some(tab.id);
+                            self.drag_cursor_x = pointer_x;
                         }
 
-                        // Close button — visible only on hover
-                        let tab_hovered = response.hovered();
-                        if tab_hovered {
-                            let close_resp = ui.add(
-                                egui::Button::new(
-                                    egui::RichText::new("✕")
-                                        .size(9.0)
-                                        .color(if selected { self.theme.text_on_accent } else { self.theme.text_secondary }),
-                                )
-                                .fill(Color32::TRANSPARENT)
-                                .stroke(Stroke::NONE)
-                                .corner_radius(4)
-                                .min_size(Vec2::new(18.0, 18.0)),
-                            );
+                        let selected = Some(tab.id) == active;
 
-                            if close_resp.clicked() {
-                                closed = Some(tab.id);
+                        // Skip painting the original position of the dragged tab
+                        if !is_dragging {
+                            // Tab hover and active background
+                            if selected {
+                                ui.painter().rect_filled(tab_rect, CornerRadius::same(6), self.theme.surface_deepest);
+                            } else if ui.rect_contains_pointer(tab_rect) {
+                                ui.painter().rect_filled(tab_rect, CornerRadius::same(6), Color32::from_rgba_unmultiplied(255, 255, 255, 12));
                             }
-                        } else {
-                            // Reserve space so layout doesn't jump
-                            ui.allocate_exact_size(Vec2::new(18.0, 18.0), egui::Sense::hover());
+
+                            let is_speed_dial = tab.url.starts_with("fortrust://start");
+                            let is_secure = tab.url.starts_with("https://");
+
+                            // Favicon based on page type
+                            if is_speed_dial {
+                                let fg = Color32::from_rgba_unmultiplied(79, 158, 255, 180);
+                                let fg2 = Color32::from_rgba_unmultiplied(79, 158, 255, 100);
+                                let fav_rect = Rect::from_min_size(Pos2::new(tab_rect.min.x + 6.0, tab_rect.center().y - 6.5), Vec2::new(13.0, 13.0));
+                                ui.painter().rect_filled(fav_rect, CornerRadius::same(2), Color32::from_rgb(26, 32, 48));
+                                ui.painter().rect_filled(Rect::from_min_size(Pos2::new(fav_rect.min.x + 2.0, fav_rect.min.y + 2.0), Vec2::new(4.0, 4.0)), CornerRadius::same(1), fg);
+                                ui.painter().rect_filled(Rect::from_min_size(Pos2::new(fav_rect.min.x + 7.0, fav_rect.min.y + 2.0), Vec2::new(4.0, 4.0)), CornerRadius::same(1), fg);
+                                ui.painter().rect_filled(Rect::from_min_size(Pos2::new(fav_rect.min.x + 2.0, fav_rect.min.y + 7.0), Vec2::new(4.0, 4.0)), CornerRadius::same(1), fg2);
+                                ui.painter().rect_filled(Rect::from_min_size(Pos2::new(fav_rect.min.x + 7.0, fav_rect.min.y + 7.0), Vec2::new(4.0, 4.0)), CornerRadius::same(1), fg2);
+                            } else {
+                                // Globe icon for web pages
+                                let fav_rect = Rect::from_min_size(Pos2::new(tab_rect.min.x + 6.0, tab_rect.center().y - 6.5), Vec2::new(13.0, 13.0));
+                                let c = if is_secure { self.theme.accent_shield } else { self.theme.text_secondary };
+                                ui.painter().circle_stroke(Pos2::new(fav_rect.center().x, fav_rect.center().y), 5.5, Stroke::new(1.3, c));
+                                let cx = fav_rect.center().x;
+                                let cy = fav_rect.center().y;
+                                ui.painter().line_segment([Pos2::new(cx - 4.5, cy), Pos2::new(cx + 4.5, cy)], Stroke::new(1.3, c));
+                                ui.painter().line_segment([Pos2::new(cx, cy - 4.5), Pos2::new(cx, cy + 4.5)], Stroke::new(1.3, c));
+                            }
+
+                            // Title text
+                            let title_color = if selected { self.theme.text_primary } else { self.theme.text_secondary };
+                            let title_x = tab_rect.min.x + 22.0;
+                            let display_title: String = if tab.title.len() > 18 { format!("{}...", &tab.title[..15]) } else { tab.title.to_string() };
+                            ui.painter().text(
+                                Pos2::new(title_x, tab_rect.center().y),
+                                egui::Align2::LEFT_CENTER,
+                                display_title,
+                                egui::FontId::proportional(12.0),
+                                title_color,
+                            );
+
+                            let click_resp = ui.allocate_rect(tab_rect, egui::Sense::click());
+                            if click_resp.clicked() { clicked = Some(tab.id); }
+                            if click_resp.middle_clicked() { closed = Some(tab.id); }
+                            if click_resp.secondary_clicked() {
+                                self.context_menu = Some((pointer_pos.unwrap_or(Pos2::ZERO), tab.id));
+                            }
+
+                            // Close button on hover
+                            if ui.rect_contains_pointer(tab_rect) {
+                                let close_rect = Rect::from_min_size(Pos2::new(tab_rect.max.x - 19.0, tab_rect.center().y - 7.5), Vec2::new(15.0, 15.0));
+                                let close_hovered = ui.rect_contains_pointer(close_rect);
+                                if close_hovered { ui.painter().rect_filled(close_rect, CornerRadius::same(3), Color32::from_rgba_unmultiplied(255, 255, 255, 20)); }
+                                icons::paint_close_icon(ui.painter(), close_rect, self.theme.text_muted);
+                                if ui.allocate_rect(close_rect, egui::Sense::click()).clicked() { closed = Some(tab.id); }
+                            }
+
+                            // Active underline
+                            if selected {
+                                ui.painter().rect_filled(
+                                    Rect::from_min_size(
+                                        Pos2::new(tab_rect.min.x, tab_rect.max.y - 1.5),
+                                        Vec2::new(tab_rect.width(), 1.5),
+                                    ),
+                                    CornerRadius::same(1),
+                                    self.theme.accent_primary,
+                                );
+                            }
                         }
 
-                        // Bottom accent underline on active tab
-                        if selected {
-                            let tab_rect = response.rect;
-                            let underline_rect = egui::Rect::from_min_size(
-                                egui::Pos2::new(tab_rect.min.x, tab_rect.max.y - 1.0),
-                                Vec2::new(tab_rect.width(), 2.0),
-                            );
-                            ui.painter().rect_filled(
-                                underline_rect,
-                                CornerRadius::same(1),
-                                self.theme.accent_primary,
+                        // Reorder detection: if dragging this tab past another
+                        if self.drag_tab_id == Some(tab.id) && pointer_down && i + 1 < tab_x_positions.len() {
+                            let next_left = tab_x_positions.get(i + 1).map(|&(_, l, _)| l).unwrap_or(tab_rect.max.x);
+                            if pointer_x > next_left {
+                                reorder_target = Some((tab.id, (i + 1).min(tab_x_positions.len() - 1)));
+                            }
+                        }
+                    }
+
+                    // Paint drop indicator if dragging
+                    if let Some(drag_id) = self.drag_tab_id {
+                        // Paint ghost at cursor
+                        let ghost_w = (self.tabs.tabs().iter().find(|t| t.id == drag_id)
+                            .map(|t| (t.title.len() as f32 * 6.5 + 60.0).clamp(60.0, 180.0))
+                            .unwrap_or(120.0)).min(200.0);
+                        let ghost_rect = Rect::from_min_size(
+                            Pos2::new(pointer_x - ghost_w / 2.0, 6.0),
+                            Vec2::new(ghost_w, 27.0),
+                        );
+                        ui.painter().rect_filled(ghost_rect, CornerRadius::same(6), Color32::from_rgba_unmultiplied(79, 158, 255, 40));
+                        ui.painter().rect_stroke(ghost_rect, CornerRadius::same(6), Stroke::new(1.0, Color32::from_rgba_unmultiplied(79, 158, 255, 80)), egui::StrokeKind::Inside);
+                        if let Some(tab) = self.tabs.tabs().iter().find(|t| t.id == drag_id) {
+                            ui.painter().text(
+                                Pos2::new(ghost_rect.center().x, ghost_rect.center().y),
+                                egui::Align2::CENTER_CENTER,
+                                if tab.title.len() > 12 { format!("{}...", &tab.title[..10]) } else { tab.title.to_string() },
+                                egui::FontId::proportional(12.0),
+                                Color32::from_rgba_unmultiplied(200, 220, 255, 180),
                             );
                         }
                     }
 
-                    if ui
-                        .add(
-                            egui::Button::new(
-                                egui::RichText::new("+")
-                                    .size(13.0)
-                                    .color(self.theme.text_primary),
-                            )
+                    // Apply reorder if needed (outside the borrow of tabs)
+                    if let Some((id, new_idx)) = reorder_target
+                        && self.tabs.reorder_tab(id, new_idx)
+                    {
+                        ctx.request_repaint();
+                    }
+
+                    // Add tab button
+                    let add_tab_btn = ui.add(
+                        egui::Button::new("")
                             .fill(Color32::TRANSPARENT)
                             .stroke(Stroke::NONE)
-                            .corner_radius(6)
+                            .corner_radius(5)
                             .min_size(Vec2::new(26.0, 26.0)),
-                        )
-                        .clicked()
-                    {
-                        self.open_new_tab();
+                    );
+                    icons::paint_plus_icon(ui.painter(), add_tab_btn.rect, self.theme.text_muted);
+                    if add_tab_btn.clicked() { self.open_new_tab(); }
+
+                    // Spacer — window controls (always visible, macOS-style)
+                    let wc_btn_size = 12.0;
+                    let wc_gap = 6.0;
+                    let wc_needed = 8.0 + wc_btn_size + wc_gap + wc_btn_size + wc_gap + wc_btn_size + 8.0;
+                    if ui.available_width() >= wc_needed {
+                        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                            ui.add_space(8.0);
+
+                            // Close (red dot)
+                            let close_rect = ui.allocate_space(Vec2::new(wc_btn_size, wc_btn_size)).1;
+                            let close_hovered = ui.rect_contains_pointer(close_rect);
+                            ui.painter().circle_filled(close_rect.center(), wc_btn_size / 2.0, Color32::from_rgb(255, 95, 87));
+                            if close_hovered {
+                                icons::paint_close_icon(ui.painter(), Rect::from_center_size(close_rect.center(), Vec2::new(8.0, 8.0)), Color32::from_rgba_unmultiplied(80, 20, 15, 200));
+                            } else {
+                                ui.painter().circle_filled(close_rect.center(), wc_btn_size / 4.0, Color32::from_rgba_unmultiplied(160, 40, 40, 120));
+                            }
+                            ui.add_space(wc_gap);
+                            let close_clicked = ui.allocate_rect(close_rect, egui::Sense::click()).clicked();
+
+                            // Minimize (yellow dot)
+                            let min_rect = ui.allocate_space(Vec2::new(wc_btn_size, wc_btn_size)).1;
+                            let min_hovered = ui.rect_contains_pointer(min_rect);
+                            ui.painter().circle_filled(min_rect.center(), wc_btn_size / 2.0, Color32::from_rgb(254, 188, 46));
+                            if min_hovered {
+                                ui.painter().line_segment(
+                                    [Pos2::new(min_rect.center().x - 2.5, min_rect.center().y), Pos2::new(min_rect.center().x + 2.5, min_rect.center().y)],
+                                    Stroke::new(1.5, Color32::from_rgba_unmultiplied(120, 80, 15, 200)),
+                                );
+                            } else {
+                                ui.painter().circle_filled(min_rect.center(), wc_btn_size / 4.0, Color32::from_rgba_unmultiplied(160, 100, 25, 120));
+                            }
+                            ui.add_space(wc_gap);
+                            let min_clicked = ui.allocate_rect(min_rect, egui::Sense::click()).clicked();
+
+                            // Maximize (green dot)
+                            let max_rect = ui.allocate_space(Vec2::new(wc_btn_size, wc_btn_size)).1;
+                            let max_hovered = ui.rect_contains_pointer(max_rect);
+                            ui.painter().circle_filled(max_rect.center(), wc_btn_size / 2.0, Color32::from_rgb(40, 200, 64));
+                            if max_hovered {
+                                let sq = Rect::from_center_size(max_rect.center(), Vec2::new(5.0, 5.0));
+                                ui.painter().rect_stroke(sq, CornerRadius::same(1), Stroke::new(1.5, Color32::from_rgba_unmultiplied(15, 90, 25, 200)), egui::StrokeKind::Inside);
+                            } else {
+                                ui.painter().circle_filled(max_rect.center(), wc_btn_size / 4.0, Color32::from_rgba_unmultiplied(25, 120, 40, 120));
+                            }
+                            let max_clicked = ui.allocate_rect(max_rect, egui::Sense::click()).clicked();
+
+                            if min_clicked { ui.ctx().send_viewport_cmd(egui::ViewportCommand::Minimized(true)); }
+                            if max_clicked { ui.ctx().send_viewport_cmd(egui::ViewportCommand::Maximized(true)); }
+                            if close_clicked { ui.ctx().send_viewport_cmd(egui::ViewportCommand::Close); }
+                        });
                     }
 
                     if let Some(id) = clicked {
                         self.tabs.activate(id);
-                        if let Some(tab) = self.tabs.active_tab() {
-                            self.omnibox.text = tab.url.to_string();
+                        if let Some(tab) = self.tabs.active_tab() { self.omnibox.text = tab.url.to_string(); }
+                    }
+                    if let Some(id) = closed { self.close_tab(id); }
+                });
+            });
+        // Tab context menu
+        self.render_tab_context_menu(ctx);
+    }
+
+    fn render_tab_context_menu(&mut self, ctx: &Context) {
+        let Some((pos, tab_id)) = self.context_menu else { return; };
+        let tab_url = self.tabs.tabs().iter().find(|t| t.id == tab_id).map(|t| t.url.as_str()).unwrap_or("").to_owned();
+        let tab_title = self.tabs.tabs().iter().find(|t| t.id == tab_id).map(|t| t.title.as_str()).unwrap_or("").to_owned();
+
+        let area_id = egui::Id::new("tab_context_menu");
+        egui::Area::new(area_id)
+            .order(egui::Order::Foreground)
+            .fixed_pos(pos)
+            .show(ctx, |ui| {
+                let mut close = false;
+                let mut action: Option<&str> = None;
+
+                let frame = egui::Frame {
+                    fill: Color32::from_rgb(30, 34, 42),
+                    stroke: egui::Stroke::new(1.0, Color32::from_rgb(50, 57, 73)),
+                    ..Default::default()
+                };
+                frame.show(ui, |ui| {
+                    ui.set_min_width(170.0);
+                    for item in &["Close Tab", "Close Others", "Close Right", "Reload", "Duplicate"] {
+                        let resp = ui.selectable_label(false, *item);
+                        if resp.clicked() {
+                            close = true;
+                            action = Some(item);
                         }
                     }
-                    if let Some(id) = closed {
-                        self.close_tab(id);
+                });
+
+                if close {
+                    match action {
+                        Some("Close Tab") => { self.close_tab(tab_id); }
+                        Some("Close Others") => {
+                            let ids: Vec<_> = self.tabs.tabs().iter().filter(|t| t.id != tab_id).map(|t| t.id).collect();
+                            for id in ids { self.close_tab(id); }
+                        }
+                        Some("Close Right") => {
+                            let ids: Vec<_> = self.tabs.tabs().iter().skip_while(|t| t.id != tab_id).skip(1).map(|t| t.id).collect();
+                            for id in ids { self.close_tab(id); }
+                        }
+                        Some("Reload") => {
+                            self.omnibox.text = tab_url.clone();
+                            self.navigate_input(tab_url.clone(), crate::app::HistoryMode::Replace);
+                        }
+                        Some("Duplicate") => {
+                            self.open_new_tab();
+                            if let Some(new_id) = self.active_tab_id() {
+                                self.tabs.navigate_tab(new_id, tab_url.clone(), tab_title.clone());
+                            }
+                        }
+                        _ => {}
                     }
+                    self.context_menu = None;
+                }
+
+                // Close on click outside
+                if ui.input(|i| i.pointer.any_click()) && !ui.rect_contains_pointer(ui.min_rect()) {
+                    self.context_menu = None;
+                }
+            });
+    }
+
+    fn history_suggestions(&self) -> Vec<SuggestionItem> {
+        let Some(ref storage) = self.storage else { return vec![] };
+        let Ok(entries) = storage.history.recently_visited(20) else { return vec![] };
+        entries.into_iter().map(|e| SuggestionItem {
+            kind: if e.is_bookmarked { SuggestionKind::Bookmark } else { SuggestionKind::History },
+            text: if e.title.is_empty() { e.url.clone() } else { e.title.clone() },
+            url: e.url,
+        }).collect()
+    }
+
+    // ── ADDRESS BAR ─────────────────────────────────────────
+
+    fn render_address_bar(&mut self, ctx: &Context) {
+        egui::TopBottomPanel::top("fortrust_address_bar")
+            .exact_height(37.0)
+            .frame(Frame {
+                fill: self.theme.surface_tab_bar,
+                inner_margin: Margin::symmetric(8, 0),
+                ..Default::default()
+            })
+            .show(ctx, |ui| {
+                ui.horizontal(|ui| {
+                    // Back button with SVG
+                    let back_enabled = self.can_go_back();
+                    let back_color = if back_enabled { self.theme.text_secondary } else { self.theme.text_muted };
+                    let back_resp = ui.add(
+                        egui::Button::new("")
+                            .fill(Color32::TRANSPARENT)
+                            .stroke(Stroke::NONE)
+                            .corner_radius(5)
+                            .min_size(Vec2::new(28.0, 28.0)),
+                    );
+                    icons::paint_back_icon(ui.painter(), back_resp.rect, back_color);
+                    if back_resp.clicked() && back_enabled { self.go_back(); }
+
+                    // Forward button with SVG
+                    let fwd_enabled = self.can_go_forward();
+                    let fwd_color = if fwd_enabled { self.theme.text_secondary } else { self.theme.text_muted };
+                    let fwd_resp = ui.add(
+                        egui::Button::new("")
+                            .fill(Color32::TRANSPARENT)
+                            .stroke(Stroke::NONE)
+                            .corner_radius(5)
+                            .min_size(Vec2::new(28.0, 28.0)),
+                    );
+                    icons::paint_forward_icon(ui.painter(), fwd_resp.rect, fwd_color);
+                    if fwd_resp.clicked() && fwd_enabled { self.go_forward(); }
+
+                    // Reload button with SVG
+                    let reload_resp = ui.add(
+                        egui::Button::new("")
+                            .fill(Color32::TRANSPARENT)
+                            .stroke(Stroke::NONE)
+                            .corner_radius(5)
+                            .min_size(Vec2::new(28.0, 28.0)),
+                    );
+                    icons::paint_reload_icon(ui.painter(), reload_resp.rect, self.theme.text_secondary);
+                    if reload_resp.clicked() { self.reload(); }
+
+                    ui.add_space(4.0);
+
+                    // Address pill
+                    let history_suggestions = self.history_suggestions();
+                    if let Some(url) = self.omnibox.render(ui, &self.theme, &history_suggestions) {
+                        self.navigate_input(url, HistoryMode::Push);
+                    }
+
+                    // Right toolbar buttons (hide if too narrow)
+                    ui.add_space(4.0);
+                    if ui.available_width() > 160.0 {
+
+                    // Favorites with SVG
+                    let is_bm = self.current_bookmarked();
+                    let star_resp = ui.add(
+                        egui::Button::new("")
+                            .fill(Color32::TRANSPARENT)
+                            .stroke(Stroke::NONE)
+                            .corner_radius(5)
+                            .min_size(Vec2::new(28.0, 28.0)),
+                    );
+                    let star_color = if is_bm { self.theme.accent_primary } else { self.theme.text_muted };
+                    icons::paint_star_icon(ui.painter(), star_resp.rect, star_color);
+                    if star_resp.clicked() { self.toggle_bookmark(); }
+
+                    // Sidebar toggle with SVG
+                    let sb_resp = ui.add(
+                        egui::Button::new("")
+                            .fill(Color32::TRANSPARENT)
+                            .stroke(Stroke::NONE)
+                            .corner_radius(5)
+                            .min_size(Vec2::new(28.0, 28.0)),
+                    );
+                    icons::paint_sidebar_icon(ui.painter(), sb_resp.rect, self.theme.text_muted);
+                    if sb_resp.clicked() {
+                        if self.sidebar_anim.is_open() { self.sidebar_anim.close(); }
+                        else { self.sidebar_anim.open(); }
+                    }
+
+                    // Menu button with SVG
+                    let menu_resp = ui.add(
+                        egui::Button::new("")
+                            .fill(Color32::TRANSPARENT)
+                            .stroke(Stroke::NONE)
+                            .corner_radius(5)
+                            .min_size(Vec2::new(28.0, 28.0)),
+                    );
+                    icons::paint_menu_icon(ui.painter(), menu_resp.rect, self.theme.text_muted);
+
+                    // Shield button
+                    self.shield.render_button(ui, &self.theme);
+
+                    // Memory meter
+                    if self.config.ui.show_memory_meter {
+                        ui.add_space(6.0);
+                        ui.label(
+                            egui::RichText::new(format!("MB {:.1}", self.total_memory_mb))
+                                .size(11.0)
+                                .color(self.theme.text_muted),
+                        );
+                    }
+                    } // end available_width > 160 for right toolbar
                 });
             });
     }
 
+    // ── CENTRAL PANEL ──────────────────────────────────────
+
     fn render_central_panel(&mut self, ctx: &Context) {
         let mut navigate: Option<String> = None;
-        let selected_page = self.sidebar_page;
-        let selected_page_str = match selected_page {
-            SidebarPage::Tabs => "Tabs",
-            SidebarPage::Bookmarks => "Bookmarks",
-            SidebarPage::History => "History",
-            SidebarPage::Downloads => "Downloads",
-            SidebarPage::Notes => "Notes",
-            SidebarPage::Settings => "Settings",
-        };
-        let active_url_hint = self
-            .active_state()
-            .and_then(TabPageState::current_url)
-            .map(str::to_owned)
-            .or_else(|| self.tabs.active_tab().map(|tab| tab.url.to_string()))
-            .unwrap_or_else(|| "fortrust://start".to_owned());
-        println!("Fortrust:render_central_panel selected_page={} active_url={}", selected_page_str, active_url_hint);
-
-        let glass_frame = Frame {
-            fill: self.theme.glass_bg,
-            inner_margin: Margin::symmetric(0, 0),
-            outer_margin: Margin::symmetric(6, 6),
-            corner_radius: CornerRadius::same(16),
-            stroke: Stroke::new(1.0, self.theme.glass_border),
-            shadow: egui::epaint::Shadow {
-                offset: [0, 8],
-                blur: 24,
-                spread: 0,
-                color: Color32::from_black_alpha(40),
-            },
-            ..Default::default()
-        };
 
         egui::CentralPanel::default()
-            .frame(glass_frame)
+            .frame(Frame {
+                fill: self.theme.surface_deepest,
+                inner_margin: Margin::ZERO,
+                outer_margin: Margin::ZERO,
+                ..Default::default()
+            })
             .show(ctx, |ui| {
-                    // DEBUG: geometry + visual confirmation
-                    let central_rect = ui.max_rect();
-                    println!("Fortrust:central_rect={:?}", central_rect);
-                    ui.painter().rect_stroke(
-                        central_rect,
-                        CornerRadius::same(12),
-                        egui::Stroke::new(2.0, Color32::from_rgb(200, 40, 40)),
-                        egui::StrokeKind::Outside,
-                    );
-                    ui.painter().text(
-                        central_rect.center(),
-                        egui::Align2::CENTER_CENTER,
-                        "CENTRAL PANEL ACTIVE",
-                        egui::FontId::proportional(28.0),
-                        Color32::from_rgb(255, 0, 0),
-                    );
-                if selected_page == SidebarPage::Tabs {
-                    let active_url = self
-                        .active_state()
-                        .and_then(TabPageState::current_url)
-                        .map(str::to_owned)
-                        .or_else(|| self.tabs.active_tab().map(|tab| tab.url.to_string()))
-                        .unwrap_or_else(|| "fortrust://start".to_owned());
+                // Render icon rail on the left
+                egui::SidePanel::left("fortrust_icon_rail")
+                    .exact_width(30.0)
+                    .resizable(false)
+                    .frame(Frame {
+                        fill: self.theme.surface_rail,
+                        inner_margin: Margin::ZERO,
+                        outer_margin: Margin::ZERO,
+                        ..Default::default()
+                    })
+                    .show_inside(ui, |ui| {
+                        self.sidebar_state.render_icon_rail(ui, &self.theme, &mut self.sidebar_anim);
+                    });
 
-                    let dt = self.last_frame.elapsed().as_secs_f32().min(0.05) * self.motion_scale();
-
-                    if active_url == "fortrust://start" {
-                        self.speed_dial.ads_blocked = self.shield.ads_blocked;
-                        self.speed_dial.trackers_blocked = self.shield.trackers_blocked;
-                        self.speed_dial.tab_count = self.tabs.tabs().len();
-                        if let Some(url) =
-                            self.speed_dial
-                                .render(ui, &self.theme, dt, &mut self.needs_new_tab)
-                        {
-                            navigate = Some(url);
-                        }
-                    } else if active_url == "fortrust://blocked" {
-                        self.render_blocked_page(ui);
-                    } else {
-                        self.render_web_content(ui, &active_url);
+                // Render sidebar overlay
+                let old_theme = self.config.ui.theme.clone();
+                let downloads_entries = self.download_manager.all_downloads();
+                if let Some(url) = self.sidebar_state.render_overlay(ui, &self.theme, &mut self.sidebar_anim, &mut self.config, self.storage.as_ref(), &downloads_entries) {
+                    navigate = Some(url);
+                }
+                // Process pending download actions from sidebar
+                if let Some((dl_id, action)) = self.sidebar_state.pending_download_cmd.take() {
+                    match action {
+                        DownloadAction::Pause => self.download_manager.pause_download(dl_id),
+                        DownloadAction::Resume => self.download_manager.resume_download(dl_id, &self.download_dir),
+                        DownloadAction::Remove => self.download_manager.remove_download(dl_id),
                     }
+                }
+                if self.config.ui.theme != old_theme { self.refresh_theme(ctx); }
+
+                // Main content area
+                let active_url = self.active_state()
+                    .and_then(TabPageState::current_url)
+                    .map(str::to_owned)
+                    .or_else(|| self.tabs.active_tab().map(|tab| tab.url.to_string()))
+                    .unwrap_or_else(|| "fortrust://start".to_owned());
+
+                // Loading progress bar
+                let is_loading = self.active_tab_id().is_some_and(|id|
+                    self.tab_pages.get(&id).and_then(|s| s.loading_url.as_deref()).is_some_and(|u| u != active_url)
+                );
+                if is_loading {
+                    let bar_rect = Rect::from_min_size(
+                        Pos2::new(ui.max_rect().min.x, ui.max_rect().min.y),
+                        Vec2::new(ui.max_rect().width(), 3.0),
+                    );
+                    let progress = (self.animation_phase * 3.0).sin() * 0.5 + 0.5;
+                    let fill_w = bar_rect.width() * (0.15 + progress * 0.55);
+                    let fill_x = bar_rect.min.x + (bar_rect.width() - fill_w) * progress;
+                    ui.painter().rect_filled(bar_rect, CornerRadius::ZERO, Color32::from_rgba_unmultiplied(79, 158, 255, 40));
+                    ui.painter().rect_filled(
+                        Rect::from_min_size(Pos2::new(fill_x, bar_rect.min.y), Vec2::new(fill_w, 3.0)),
+                        CornerRadius::ZERO, self.theme.accent_primary,
+                    );
+                }
+
+                if active_url == "fortrust://start" {
+                    self.speed_dial.ads_blocked = self.shield.ads_blocked;
+                    self.speed_dial.trackers_blocked = self.shield.trackers_blocked;
+                    self.speed_dial.tab_count = self.tabs.tabs().len();
+                    self.speed_dial.blocked_requests = self.shield.ads_blocked as u64 + self.shield.trackers_blocked as u64;
+                    self.speed_dial.doh_enabled = self.config.privacy.https_only_mode;
+                    self.speed_dial.fingerprinting_protection = self.config.privacy.fingerprint_noise;
+                    let dt = self.last_frame.elapsed().as_secs_f32().min(0.05) * self.motion_scale();
+                    if let Some(url) = self.speed_dial.render(ui, &self.theme, dt, &mut self.needs_new_tab, self.storage.as_ref()) {
+                        navigate = Some(url);
+                    }
+                } else if active_url == "fortrust://blocked" {
+                    self.render_blocked_page(ui);
                 } else {
-                    self.render_sidebar_page(ui, selected_page);
+                    self.render_web_content(ui, &active_url);
                 }
             });
 
@@ -1056,11 +1146,16 @@ impl FortrustApp {
 
     fn render_blocked_page(&mut self, ui: &mut egui::Ui) {
         ui.vertical_centered(|ui| {
-            ui.add_space(96.0);
+            ui.add_space(80.0);
+            let icon_rect = Rect::from_min_size(
+                Pos2::new(ui.max_rect().center().x - 20.0, ui.cursor().min.y),
+                Vec2::new(40.0, 40.0),
+            );
+            icons::paint_shield_icon_rect(ui.painter(), icon_rect, self.theme.accent_shield_off);
+            ui.add_space(50.0);
             ui.label(
-                egui::RichText::new("🛡 Request Blocked")
-                    .size(30.0)
-                    .strong()
+                egui::RichText::new("Request Blocked")
+                    .size(30.0).strong()
                     .color(self.theme.accent_shield_off),
             );
             ui.add_space(10.0);
@@ -1071,469 +1166,23 @@ impl FortrustApp {
         });
     }
 
-    fn render_sidebar_page(&mut self, ui: &mut egui::Ui, page: SidebarPage) {
-        let theme = self.theme;
-        let title = match page {
-            SidebarPage::Tabs => "Tabs",
-            SidebarPage::Bookmarks => "Bookmarks",
-            SidebarPage::History => "History",
-            SidebarPage::Downloads => "Downloads",
-            SidebarPage::Notes => "Notes",
-            SidebarPage::Settings => "Settings",
-        };
-        let subtitle = match page {
-            SidebarPage::Tabs => "",
-            SidebarPage::Bookmarks => "Saved destinations and quick actions.",
-            SidebarPage::History => "Recent visits captured by the storage layer.",
-            SidebarPage::Downloads => "Download manager surface and future queue controls.",
-            SidebarPage::Notes => "Local scratchpad space for pinned notes.",
-            SidebarPage::Settings => "Visual, motion, and privacy controls for Fortrust.",
-        };
-
-        ui.add_space(12.0);
-        ui.vertical(|ui| {
-            ui.label(
-                egui::RichText::new(title)
-                    .size(26.0)
-                    .strong()
-                    .color(theme.text_primary),
-            );
-            if !subtitle.is_empty() {
-                ui.label(
-                    egui::RichText::new(subtitle)
-                        .size(13.0)
-                        .color(theme.text_secondary),
-                );
-            }
-        });
-        ui.add_space(16.0);
-
-        match page {
-            SidebarPage::Bookmarks => self.render_bookmarks_page(ui),
-            SidebarPage::History => self.render_history_page(ui),
-            SidebarPage::Downloads => self.render_downloads_page(ui),
-            SidebarPage::Notes => self.render_notes_page(ui),
-            SidebarPage::Settings => self.render_settings_page(ui),
-            SidebarPage::Tabs => {}
-        }
-    }
-
-    fn render_bookmarks_page(&mut self, ui: &mut egui::Ui) {
-        let theme = self.theme;
-        let bookmarks = self
-            .storage
-            .as_ref()
-            .map(|storage| storage.bookmarks.all())
-            .unwrap_or_default();
-        let query = self.bookmark_filter.to_ascii_lowercase();
-        let mut add_current = false;
-        let mut open_target: Option<String> = None;
-        let mut delete_target: Option<String> = None;
-
-        ui.horizontal(|ui| {
-            ui.label(egui::RichText::new("Search").color(theme.text_secondary));
-            ui.add_sized(
-                [320.0, 30.0],
-                egui::TextEdit::singleline(&mut self.bookmark_filter)
-                    .hint_text("Filter bookmarks")
-                    .frame(false),
-            );
-            if ui.button("Bookmark current page").clicked() {
-                add_current = true;
-            }
-        });
-
-        ui.add_space(12.0);
-
-        let mut any_visible = false;
-        for bookmark in bookmarks {
-            if !query.is_empty()
-                && !bookmark.url.to_ascii_lowercase().contains(&query)
-                && !bookmark.title.to_ascii_lowercase().contains(&query)
-            {
-                continue;
-            }
-            any_visible = true;
-            render_metric_card(ui, theme, &bookmark.title, &bookmark.url, |ui| {
-                ui.horizontal(|ui| {
-                    if ui.button("Open").clicked() {
-                        open_target = Some(bookmark.url.clone());
-                    }
-                    if ui.button("Delete").clicked() {
-                        delete_target = Some(bookmark.url.clone());
-                    }
-                });
-            });
-            ui.add_space(8.0);
-        }
-
-        if !any_visible {
-            render_empty_state(
-                ui,
-                theme,
-                "No bookmarks yet",
-                "Use the action above to pin the current page or add a quick launch tile.",
-            );
-        }
-
-        if add_current {
-            self.bookmark_current_page();
-        }
-        if let Some(url) = open_target {
-            self.navigate_input(url, HistoryMode::Push);
-        }
-        if let Some(url) = delete_target
-            && let Some(storage) = self.storage.as_ref()
-        {
-            let _ = storage.bookmarks.delete(&url);
-        }
-    }
-
-    fn render_history_page(&mut self, ui: &mut egui::Ui) {
-        let theme = self.theme;
-        let history = self
-            .storage
-            .as_ref()
-            .and_then(|storage| storage.history.recently_visited(100).ok())
-            .unwrap_or_default();
-        let query = self.history_filter.to_ascii_lowercase();
-        let mut open_target: Option<String> = None;
-        let mut bookmark_target: Option<HistoryEntry> = None;
-        let mut delete_target: Option<String> = None;
-        let mut clear_history = false;
-
-        ui.horizontal(|ui| {
-            ui.label(egui::RichText::new("Search").color(theme.text_secondary));
-            ui.add_sized(
-                [320.0, 30.0],
-                egui::TextEdit::singleline(&mut self.history_filter)
-                    .hint_text("Filter history")
-                    .frame(false),
-            );
-            if ui.button("Clear history").clicked() {
-                clear_history = true;
-            }
-        });
-
-        ui.add_space(12.0);
-
-        let mut any_visible = false;
-        for entry in history {
-            if !query.is_empty()
-                && !entry.url.to_ascii_lowercase().contains(&query)
-                && !entry.title.to_ascii_lowercase().contains(&query)
-            {
-                continue;
-            }
-            any_visible = true;
-            render_metric_card(ui, theme, &entry.title, &entry.url, |ui| {
-                ui.horizontal(|ui| {
-                    if ui.button("Open").clicked() {
-                        open_target = Some(entry.url.clone());
-                    }
-                    if ui.button("Bookmark").clicked() {
-                        bookmark_target = Some(entry.clone());
-                    }
-                    if ui.button("Remove").clicked() {
-                        delete_target = Some(entry.url.clone());
-                    }
-                });
-                ui.add_space(6.0);
-                metric_row(ui, theme, "Visits", &entry.visit_count.to_string());
-                metric_row(ui, theme, "Last seen", &entry.visit_time.to_rfc2822());
-            });
-            ui.add_space(8.0);
-        }
-
-        if !any_visible {
-            render_empty_state(
-                ui,
-                theme,
-                "No history found",
-                "Visited pages will appear here once they finish loading.",
-            );
-        }
-
-        if clear_history
-            && let Some(storage) = self.storage.as_ref()
-        {
-            let _ = storage.history.clear();
-        }
-        if let Some(url) = open_target {
-            self.navigate_input(url, HistoryMode::Push);
-        }
-        if let Some(entry) = bookmark_target {
-            self.save_bookmark(entry.url, entry.title);
-        }
-        if let Some(url) = delete_target
-            && let Some(storage) = self.storage.as_ref()
-        {
-            let _ = storage.history.delete_entry(&url);
-        }
-    }
-
-    fn render_downloads_page(&mut self, ui: &mut egui::Ui) {
-        let theme = self.theme;
-        let stats = self.storage.as_ref().map(|storage| storage.stats());
-
-        render_metric_card(
-            ui,
-            theme,
-            "Storage",
-            "Backed by redb with an in-memory fallback",
-            |ui| {
-                let history_count = stats.as_ref().map(|s| s.history_count).unwrap_or(0);
-                let bookmark_count = stats.as_ref().map(|s| s.bookmark_count).unwrap_or(0);
-                let cookie_count = stats.as_ref().map(|s| s.cookie_count).unwrap_or(0);
-                metric_row(ui, theme, "History entries", &history_count.to_string());
-                metric_row(ui, theme, "Bookmarks", &bookmark_count.to_string());
-                metric_row(ui, theme, "Cookies", &cookie_count.to_string());
-            },
-        );
-
-        ui.add_space(12.0);
-        render_empty_state(
-            ui,
-            theme,
-            "Download manager not wired yet",
-            "The page is active, but queueing and transfer tracking still need a dedicated backend.",
-        );
-    }
-
-    fn render_notes_page(&mut self, ui: &mut egui::Ui) {
-        let theme = self.theme;
-        render_empty_state(
-            ui,
-            theme,
-            "Notes surface is reserved",
-            "This page is ready for local scratch notes, but the editing backend is not wired yet.",
-        );
-    }
-
-    fn render_settings_page(&mut self, ui: &mut egui::Ui) {
-        let theme = self.theme;
-        let mut theme_changed = false;
-        let mut visual_changed = false;
-        let mut privacy_changed = false;
-        let mut reset_requested = false;
-        let active_security = self
-            .active_state()
-            .and_then(|state| state.page.as_ref())
-            .map(|page| page.security.clone());
-        let storage_stats = self.storage.as_ref().map(|storage| storage.stats());
-
-        render_metric_card(ui, theme, "Appearance", "Glass surfaces and motion controls", |ui| {
-            ui.horizontal(|ui| {
-                ui.label(egui::RichText::new("Theme").color(theme.text_secondary));
-                theme_changed |= ui
-                    .selectable_value(&mut self.config.ui.theme, "dark".to_owned(), "Dark")
-                    .changed();
-                theme_changed |= ui
-                    .selectable_value(&mut self.config.ui.theme, "light".to_owned(), "Light")
-                    .changed();
-                theme_changed |= ui
-                    .selectable_value(&mut self.config.ui.theme, "system".to_owned(), "System")
-                    .changed();
-            });
-
-            ui.add_space(8.0);
-            ui.horizontal(|ui| {
-                ui.label(egui::RichText::new("Wallpaper").color(theme.text_secondary));
-                ui.selectable_value(&mut self.config.ui.wallpaper, "watercolor".to_owned(), "Watercolor");
-                ui.selectable_value(&mut self.config.ui.wallpaper, "forest".to_owned(), "Forest");
-                ui.selectable_value(&mut self.config.ui.wallpaper, "none".to_owned(), "None");
-            });
-
-            visual_changed |= ui
-                .add(
-                    egui::Slider::new(&mut self.config.ui.wallpaper_strength, 0..=100)
-                        .text("Wallpaper strength")
-                        .show_value(true),
-                )
-                .changed();
-
-            visual_changed |= ui
-                .add(
-                    egui::Slider::new(&mut self.config.ui.glass_strength, 30..=100)
-                        .text("Glass strength")
-                        .show_value(true),
-                )
-                .changed();
-            visual_changed |= ui
-                .add(
-                    egui::Slider::new(&mut self.config.ui.motion_strength, 20..=100)
-                        .text("Motion strength")
-                        .show_value(true),
-                )
-                .changed();
-
-            visual_changed |= sidebar::toggle_switch(ui, "Compact density", &mut self.config.ui.compact_density, &self.theme);
-            visual_changed |= sidebar::toggle_switch(ui, "Show privacy panel", &mut self.config.ui.show_privacy_panel, &self.theme);
-            visual_changed |= sidebar::toggle_switch(ui, "Show memory meter", &mut self.config.ui.show_memory_meter, &self.theme);
-        });
-
-        ui.add_space(12.0);
-
-        render_metric_card(ui, theme, "Privacy", "Request filtering that drives the secure navigation pipeline", |ui| {
-            privacy_changed |= sidebar::toggle_switch(ui, "Block ads", &mut self.config.privacy.block_ads, &self.theme);
-            privacy_changed |= sidebar::toggle_switch(ui, "Block trackers", &mut self.config.privacy.block_trackers, &self.theme);
-            privacy_changed |= sidebar::toggle_switch(ui, "Block third-party cookies", &mut self.config.privacy.block_third_party_cookies, &self.theme);
-            privacy_changed |= sidebar::toggle_switch(ui, "Strip tracking query params", &mut self.config.privacy.strip_tracking_query_params, &self.theme);
-            privacy_changed |= sidebar::toggle_switch(ui, "Upgrade HTTP to HTTPS", &mut self.config.privacy.https_only_mode, &self.theme);
-            privacy_changed |= sidebar::toggle_switch(ui, "Send Global Privacy Control", &mut self.config.privacy.global_privacy_control, &self.theme);
-            privacy_changed |= sidebar::toggle_switch(ui, "Send Do Not Track", &mut self.config.privacy.do_not_track, &self.theme);
-            privacy_changed |= sidebar::toggle_switch(ui, "Fingerprint noise", &mut self.config.privacy.fingerprint_noise, &self.theme);
-        });
-
-        ui.add_space(12.0);
-
-        render_metric_card(ui, theme, "Diagnostics", "Current storage and engine state", |ui| {
-            if let Some(stats) = storage_stats.as_ref() {
-                metric_row(ui, theme, "History count", &stats.history_count.to_string());
-                metric_row(ui, theme, "Bookmark count", &stats.bookmark_count.to_string());
-                metric_row(ui, theme, "Cookie count", &stats.cookie_count.to_string());
-            } else {
-                metric_row(ui, theme, "Storage", "Fallback mode");
-            }
-
-            if let Some(security) = active_security.as_ref() {
-                metric_row(
-                    ui,
-                    theme,
-                    "JS enabled",
-                    if security.javascript_enabled { "Yes" } else { "No" },
-                );
-                metric_row(
-                    ui,
-                    theme,
-                    "Privacy pipeline",
-                    if security.privacy_pipeline_enforced { "On" } else { "Off" },
-                );
-                metric_row(
-                    ui,
-                    theme,
-                    "Subresources",
-                    if security.external_subresources_enabled {
-                        "Loaded"
-                    } else {
-                        "Blocked"
-                    },
-                );
-                metric_row(ui, theme, "Display commands", &security.display_commands.to_string());
-            }
-        });
-
-        ui.add_space(16.0);
-        ui.horizontal(|ui| {
-            if ui.button("Reset to defaults").clicked() {
-                reset_requested = true;
-            }
-            if ui.button("Save settings").clicked() {
-                theme_changed = true;
-                visual_changed = true;
-                privacy_changed = true;
-            }
-        });
-
-        if reset_requested {
-            self.config = BrowserConfig::default();
-            self.rebuild_privacy_pipeline();
-            self.refresh_theme(ui.ctx());
-            self.persist_browser_config();
-            return;
-        }
-
-        if theme_changed || visual_changed {
-            self.refresh_theme(ui.ctx());
-            self.persist_browser_config();
-        }
-
-        if privacy_changed {
-            self.rebuild_privacy_pipeline();
-            self.persist_browser_config();
-        }
-    }
-
-    fn bookmark_current_page(&mut self) {
-        let Some(storage) = self.storage.as_ref() else {
-            return;
-        };
-        let Some(tab) = self.tabs.active_tab() else {
-            return;
-        };
-        let current_url = tab.url.to_string();
-        if current_url.starts_with("fortrust://") || current_url.starts_with("about:") {
-            return;
-        }
-
-        let title = self
-            .active_state()
-            .and_then(|state| state.page.as_ref().map(|page| page.title.clone()))
-            .unwrap_or_else(|| tab.title.to_string());
-
-        let bookmark = Bookmark {
-            id: current_url.clone(),
-            url: current_url,
-            title,
-            folder_id: None,
-            added_at: Utc::now(),
-            last_visited: None,
-            visit_count: 1,
-            icon_data: None,
-            description: None,
-        };
-        let _ = storage.bookmarks.store(&bookmark);
-    }
-
-    fn save_bookmark(&mut self, url: String, title: String) {
-        let Some(storage) = self.storage.as_ref() else {
-            return;
-        };
-        let bookmark = Bookmark {
-            id: url.clone(),
-            url,
-            title,
-            folder_id: None,
-            added_at: Utc::now(),
-            last_visited: None,
-            visit_count: 1,
-            icon_data: None,
-            description: None,
-        };
-        let _ = storage.bookmarks.store(&bookmark);
-    }
-
     fn render_web_content(&mut self, ui: &mut egui::Ui, url: &str) {
-        let Some(tab_id) = self.active_tab_id() else {
-            return;
-        };
+        let Some(tab_id) = self.active_tab_id() else { return; };
 
-        let is_loading = self
-            .tab_pages
-            .get(&tab_id)
+        let is_loading = self.tab_pages.get(&tab_id)
             .map(|s| s.loading_url.as_deref() == Some(url))
             .unwrap_or(false);
-        if is_loading {
-            self.render_loading(ui, url);
-            return;
-        }
+        if is_loading { self.render_loading(ui, url); return; }
 
-        let load_error = self
-            .tab_pages
-            .get(&tab_id)
-            .and_then(|s| s.load_error.as_deref().map(|e| e.to_owned()));
-        if let Some(error) = load_error {
-            self.render_error(ui, url, &error);
-            return;
-        }
+        let load_error = self.tab_pages.get(&tab_id)
+            .and_then(|s| s.load_error.as_deref().map(str::to_owned));
+        if let Some(error) = load_error { self.render_error(ui, url, &error); return; }
 
-        let page_url = self
-            .tab_pages
-            .get(&tab_id)
+        let page_url = self.tab_pages.get(&tab_id)
             .and_then(|s| s.page.as_ref().map(|p| p.url.clone()));
         if let Some(ref page_url_val) = page_url
             && page_url_val == url
-            && let Some(page) = &self.tab_pages.get(&tab_id).and_then(|s| s.page.as_ref())
+            && let Some(page) = self.tab_pages.get(&tab_id).and_then(|s| s.page.as_ref())
         {
             self.paint_engine_page(ui, page);
             return;
@@ -1543,10 +1192,7 @@ impl FortrustApp {
             width: ui.available_width().max(320.0),
             height: ui.available_height().max(240.0),
         };
-        if let Ok(page) = self
-            .internal_engine
-            .internal_page("fortrust://empty", viewport)
-        {
+        if let Ok(page) = self.internal_engine.internal_page("fortrust://empty", viewport) {
             self.paint_engine_page(ui, &page);
         } else {
             self.render_error(ui, url, "no rendered page is available for this tab");
@@ -1555,41 +1201,33 @@ impl FortrustApp {
 
     fn render_loading(&mut self, ui: &mut egui::Ui, url: &str) {
         let rect = ui.max_rect();
-        let center = egui::Pos2::new(rect.center().x, rect.top() + rect.height() * 0.42);
+        let center = Pos2::new(rect.center().x, rect.top() + rect.height() * 0.42);
         let phase = self.animation_phase;
         let radius = 26.0 + (phase.sin() * 0.5 + 0.5) * 10.0;
-        ui.painter().circle_filled(
-            center,
-            radius + 14.0,
-            Color32::from_rgba_unmultiplied(130, 100, 255, 32),
-        );
-        ui.painter()
-            .circle_filled(center, radius, self.theme.accent_primary);
+        ui.painter().circle_filled(center, radius + 14.0, Color32::from_rgba_unmultiplied(79, 158, 255, 32));
+        ui.painter().circle_filled(center, radius, self.theme.accent_primary);
         ui.painter().text(
-            egui::Pos2::new(center.x, center.y + 64.0),
-            egui::Align2::CENTER_CENTER,
-            "Fortrust is loading",
-            egui::FontId::proportional(28.0),
-            self.theme.text_primary,
+            Pos2::new(center.x, center.y + 64.0), egui::Align2::CENTER_CENTER,
+            "Fortrust is loading", egui::FontId::proportional(28.0), self.theme.text_primary,
         );
         ui.painter().text(
-            egui::Pos2::new(center.x, center.y + 94.0),
-            egui::Align2::CENTER_CENTER,
-            url,
-            egui::FontId::proportional(13.0),
-            self.theme.text_secondary,
+            Pos2::new(center.x, center.y + 94.0), egui::Align2::CENTER_CENTER,
+            url, egui::FontId::proportional(13.0), self.theme.text_secondary,
         );
     }
 
     fn render_error(&mut self, ui: &mut egui::Ui, url: &str, error: &str) {
         ui.vertical_centered(|ui| {
-            ui.add_space(72.0);
-            ui.label(
-                egui::RichText::new("⛔ Load Error")
-                    .size(28.0)
-                    .strong()
-                    .color(self.theme.accent_shield_off),
+            ui.add_space(64.0);
+            let icon_cx = ui.max_rect().center().x;
+            let icon_cy = ui.cursor().min.y + 18.0;
+            ui.painter().circle_stroke(Pos2::new(icon_cx, icon_cy), 16.0, Stroke::new(2.5, self.theme.accent_shield_off));
+            ui.painter().line_segment(
+                [Pos2::new(icon_cx - 10.0, icon_cy - 10.0), Pos2::new(icon_cx + 10.0, icon_cy + 10.0)],
+                Stroke::new(2.5, self.theme.accent_shield_off),
             );
+            ui.add_space(46.0);
+            ui.label(egui::RichText::new("Load Error").size(28.0).strong().color(self.theme.accent_shield_off));
             ui.add_space(8.0);
             ui.label(egui::RichText::new(url).color(self.theme.accent_primary));
             ui.add_space(8.0);
@@ -1602,36 +1240,107 @@ impl FortrustApp {
         let (surface, _) = ui.allocate_exact_size(outer, egui::Sense::hover());
         let painter = ui.painter_at(surface);
         painter.rect_filled(surface.shrink(18.0), 22.0, self.theme.glass_bg);
-
         let content = surface.shrink2(Vec2::new(12.0, 12.0));
         painter.rect_filled(content, CornerRadius::same(8), Color32::WHITE);
         for command in page.rendered.display_list.commands() {
             match command {
                 DisplayCommand::FillRect { rect, color } => {
-                    painter.rect_filled(
-                        to_egui_rect(content.min, *rect),
-                        0.0,
-                        to_egui_color(*color),
-                    );
+                    painter.rect_filled(to_egui_rect(content.min, *rect), 0.0, to_egui_color(*color));
                 }
-                DisplayCommand::DrawText {
-                    rect,
-                    text,
-                    color,
-                    font_size_px,
-                    ..
-                } => {
+                DisplayCommand::DrawText { rect, text, color, font_size_px, .. } => {
                     painter.text(
-                        egui::Pos2::new(content.min.x + rect.x, content.min.y + rect.y),
-                        egui::Align2::LEFT_TOP,
-                        text,
+                        Pos2::new(content.min.x + rect.x, content.min.y + rect.y),
+                        egui::Align2::LEFT_TOP, text,
                         egui::FontId::proportional(*font_size_px),
                         to_egui_color(*color),
                     );
                 }
+                DisplayCommand::DrawBorder {
+                    rect,
+                    top_width,
+                    right_width,
+                    bottom_width,
+                    left_width,
+                    top_color,
+                    right_color,
+                    bottom_color,
+                    left_color,
+                    top_style: _,
+                    right_style: _,
+                    bottom_style: _,
+                    left_style: _,
+                } => {
+                    paint_border(content.min, &painter, *rect, *top_width, *right_width, *bottom_width, *left_width, *top_color, *right_color, *bottom_color, *left_color);
+                }
+                DisplayCommand::DrawBoxShadow {
+                    rect, offset_x, offset_y, blur, spread, color, inset: _,
+                } => {
+                    if color.a > 0 {
+                        let shadow_rect = Rect::from_min_size(
+                            Pos2::new(content.min.x + rect.x + offset_x - spread, content.min.y + rect.y + offset_y - spread),
+                            Vec2::new(rect.width + spread * 2.0, rect.height + spread * 2.0),
+                        );
+                        let alpha = (color.a as f32 / 255.0 * 0.4 * (1.0 - (blur / 20.0).min(0.8))) as u8;
+                        let shadow_color = Color32::from_rgba_unmultiplied(color.r, color.g, color.b, alpha);
+                        painter.rect_filled(shadow_rect, 6.0, shadow_color);
+                    }
+                }
+                DisplayCommand::DrawOutline {
+                    rect, width, color, style: _,
+                } => {
+                    if width > &0.0 && color.a > 0 {
+                        let r = Rect::from_min_size(
+                            Pos2::new(content.min.x + rect.x, content.min.y + rect.y),
+                            Vec2::new(rect.width, rect.height),
+                        );
+                        painter.rect_stroke(r, 0.0, egui::Stroke::new(*width, to_egui_color(*color)), egui::StrokeKind::Outside);
+                    }
+                }
                 DisplayCommand::ClipPush(_) | DisplayCommand::ClipPop => {}
             }
         }
+    }
+
+    fn render_page_info(&mut self, ctx: &Context) {
+        let url = self.active_state().and_then(|s| s.current_url())
+            .or_else(|| self.tabs.active_tab().map(|t| t.url.as_str()))
+            .unwrap_or("fortrust://start")
+            .to_owned();
+        let is_secure = url.starts_with("https://");
+        let cookie_count = self.storage.as_ref().map(|s| s.cookies.count()).unwrap_or(0);
+
+        let mut open = self.page_info_open;
+        egui::Window::new("Page Info")
+            .id(egui::Id::new("page_info_panel"))
+            .anchor(egui::Align2::RIGHT_TOP, [-20.0, 80.0])
+            .resizable(false)
+            .default_width(320.0)
+            .collapsible(false)
+            .open(&mut open)
+            .show(ctx, |ui| {
+                ui.label(egui::RichText::new("Connection").strong().size(13.0));
+                if is_secure {
+                    ui.colored_label(Color32::from_rgb(40, 200, 64), "HTTPS - Secure connection");
+                } else {
+                    ui.colored_label(Color32::from_rgb(255, 160, 60), "HTTP - Not secure");
+                }
+                ui.add_space(8.0);
+                ui.label(egui::RichText::new("URL").strong().size(13.0));
+                ui.label(egui::RichText::new(&url).size(11.5).color(self.theme.text_secondary));
+                ui.add_space(8.0);
+                ui.label(egui::RichText::new("Privacy").strong().size(13.0));
+                ui.label(format!("Cookies: {cookie_count}"));
+                ui.label(format!("Ads blocked: {}", self.shield.ads_blocked));
+                ui.label(format!("Trackers blocked: {}", self.shield.trackers_blocked));
+                if let Some(tab_state) = self.active_state().and_then(|s| s.page.as_ref()) {
+                    ui.add_space(8.0);
+                    ui.label(egui::RichText::new("Page Size").strong().size(13.0));
+                    let size_kb = tab_state.security.body_bytes as f64 / 1024.0;
+                    ui.label(format!("{size_kb:.1} KB"));
+                    ui.label(format!("Display commands: {}", tab_state.security.display_commands));
+                }
+            });
+        self.page_info_open = open;
     }
 }
 
@@ -1642,39 +1351,54 @@ impl eframe::App for FortrustApp {
         let motion_scale = self.motion_scale();
         self.animation_phase = ctx.input(|i| i.time as f32 * (1.15 + motion_scale * 0.45));
 
-        let sidebar_page_str = match self.sidebar_page {
-            SidebarPage::Tabs => "Tabs",
-            SidebarPage::Bookmarks => "Bookmarks",
-            SidebarPage::History => "History",
-            SidebarPage::Downloads => "Downloads",
-            SidebarPage::Notes => "Notes",
-            SidebarPage::Settings => "Settings",
-        };
+        // Keyboard shortcuts
+        ctx.input_mut(|i| {
+            let ctrl = i.modifiers.ctrl;
+            let shift = i.modifiers.shift;
+            if ctrl && i.key_pressed(egui::Key::T) {
+                self.open_new_tab();
+            } else if ctrl && i.key_pressed(egui::Key::W) {
+                if let Some(id) = self.active_tab_id() {
+                    self.close_tab(id);
+                }
+            } else if ctrl && shift && i.key_pressed(egui::Key::Tab) {
+                self.cycle_tab(false);
+            } else if ctrl && i.key_pressed(egui::Key::Tab) {
+                self.cycle_tab(true);
+            } else if ctrl && i.key_pressed(egui::Key::L) {
+                self.omnibox.focused = true;
+                self.omnibox.text.clear();
+            } else if ctrl && i.key_pressed(egui::Key::R) {
+                self.reload();
+            } else if i.key_pressed(egui::Key::I) && ctrl {
+                self.page_info_open = !self.page_info_open;
+            } else if i.key_pressed(egui::Key::Escape) {
+                if self.sidebar_anim.is_open() {
+                    self.sidebar_anim.close();
+                } else {
+                    self.omnibox.focused = false;
+                }
+            }
+            false
+        });
 
-        println!(
-            "Fortrust:update page={} tabs={} active_id={:?} needs_new_tab={} glass={}",
-            sidebar_page_str,
-            self.tabs.tabs().len(),
-            self.tabs.active_id(),
-            self.needs_new_tab,
-            self.config.ui.glass_strength,
-        );
-
-        // Tick animations
+        // Tick sidebar animation
         self.sidebar_anim.tick(dt * motion_scale);
-        if !self.sidebar_anim.width.is_settled() {
+        if !self.sidebar_anim.overlay_offset.is_settled() {
             ctx.request_repaint();
         }
 
         // Poll loading engine
         self.poll_loading(ctx);
 
+        // Save download state periodically
+        self.save_download_state();
+
         // Clear startup overlay after deadline
         if let Some(dl) = self.startup_deadline {
             if std::time::Instant::now() >= dl {
                 self.startup_deadline = None;
             } else {
-                // keep repainting until deadline passes
                 ctx.request_repaint_after(dl - std::time::Instant::now());
             }
         }
@@ -1682,97 +1406,49 @@ impl eframe::App for FortrustApp {
         // Apply egui style
         apply_egui_style(ctx, &self.theme, &self.config.ui);
 
-        // Render shield popup first (floats above everything)
+        // Render shield popup
         if self.config.ui.show_privacy_panel {
             self.shield.render_popup(ctx, &self.theme);
         }
 
-        // Background: draw textured wallpaper via backgrounds module
+        // Background wallpaper
         let screen_rect = ctx.content_rect();
         backgrounds::paint_background(ctx, screen_rect, &self.theme, &self.config.ui);
 
-        // Render sidebar
-        let tabs = self.tabs.tabs().to_vec();
-        let mut active_idx = 0;
-        if let Some(active_id) = self.tabs.active_id() {
-            active_idx = tabs.iter().position(|t| t.id == active_id).unwrap_or(0);
-        }
-
-        let sidebar_frame = Frame {
-            fill: self.theme.glass_bg,
-            inner_margin: Margin::symmetric(8, 8),
-            outer_margin: Margin::symmetric(6, 6),
-            corner_radius: CornerRadius::same(16),
-            stroke: Stroke::new(1.0, self.theme.glass_border),
-            shadow: egui::epaint::Shadow {
-                offset: [0, 8],
-                blur: 24,
-                spread: 0,
-                color: Color32::from_black_alpha(40),
-            },
-            ..Default::default()
-        };
-
-        egui::SidePanel::left("sidebar")
-            .exact_width(self.sidebar_anim.current_width() + 16.0) // padding adjustment
-            .resizable(false)
-            .frame(sidebar_frame)
-            .show(ctx, |ui| {
-                sidebar::render_sidebar(
-                    ui,
-                    &mut self.sidebar_anim,
-                    &mut self.sidebar_page,
-                    &self.theme,
-                    &tabs,
-                    &mut active_idx,
-                );
-            });
-
-        // Render tab bar
+        // Render the layout
         self.render_tab_bar(ctx);
-
-        // Render toolbar with omnibox
-        self.render_toolbar(ctx);
-
-        // Render central panel
+        self.render_address_bar(ctx);
         self.render_central_panel(ctx);
+
+        // Page info panel
+        if self.page_info_open {
+            self.render_page_info(ctx);
+        }
 
         // Keep repainting for animations
         let frame_delay = (33.0 / motion_scale.max(0.5)).round().clamp(16.0, 40.0) as u64;
         ctx.request_repaint_after(Duration::from_millis(frame_delay));
 
+        // Startup overlay
         if self.startup_deadline.is_some() {
             egui::Area::new("startup_overlay".into())
-                .order(egui::Order::Background)
-                .fixed_pos(egui::pos2(24.0, 24.0))
+                .order(egui::Order::Foreground)
+                .fixed_pos(Pos2::new(24.0, 24.0))
                 .interactable(false)
                 .show(ctx, |ui| {
                     Frame {
                         fill: self.theme.glass_bg,
                         inner_margin: Margin::symmetric(18, 14),
-                        outer_margin: Margin::ZERO,
                         corner_radius: CornerRadius::same(16),
                         stroke: Stroke::new(1.0, self.theme.glass_border),
                         shadow: egui::epaint::Shadow {
-                            offset: [0, 8],
-                            blur: 24,
-                            spread: 0,
+                            offset: [0, 8], blur: 24, spread: 0,
                             color: Color32::from_black_alpha(50),
                         },
                         ..Default::default()
-                    }
-                    .show(ui, |ui| {
-                        ui.label(
-                            egui::RichText::new("Fortrust starting")
-                                .size(18.0)
-                                .strong()
-                                .color(self.theme.text_primary),
-                        );
-                        ui.label(
-                            egui::RichText::new("Private browser shell and Trust Engine are loading the home surface.")
-                                .size(12.0)
-                                .color(self.theme.text_secondary),
-                        );
+                    }.show(ui, |ui| {
+                        ui.label(egui::RichText::new("Fortrust starting").size(18.0).strong().color(self.theme.text_primary));
+                        ui.label(egui::RichText::new("Private browser shell is loading.").size(12.0).color(self.theme.text_secondary));
                     });
                 });
         }
@@ -1781,9 +1457,9 @@ impl eframe::App for FortrustApp {
 
 fn apply_egui_style(ctx: &egui::Context, theme: &FortrustTheme, ui_config: &fortrust_core::UiConfig) {
     let mut style = (*ctx.style()).clone();
-    style.visuals.panel_fill = Color32::TRANSPARENT; // Background drawn manually
+    style.visuals.panel_fill = Color32::TRANSPARENT;
     style.visuals.window_fill = theme.glass_bg;
-    style.visuals.window_stroke = egui::Stroke::new(1.0, theme.glass_border);
+    style.visuals.window_stroke = Stroke::new(1.0, theme.glass_border);
     let density = if ui_config.compact_density { 0.88 } else { 1.08 };
     style.spacing.item_spacing = Vec2::new(8.0 * density, 4.0 * density);
     style.spacing.button_padding = Vec2::new(8.0 * density, 5.0 * density);
@@ -1791,118 +1467,47 @@ fn apply_egui_style(ctx: &egui::Context, theme: &FortrustTheme, ui_config: &fort
     ctx.set_style(style);
 }
 
-fn render_metric_card<R>(
-    ui: &mut egui::Ui,
-    theme: FortrustTheme,
-    title: &str,
-    subtitle: &str,
-    add_contents: impl FnOnce(&mut egui::Ui) -> R,
-) -> R {
-    Frame {
-        fill: theme.glass_bg,
-        inner_margin: Margin::symmetric(16, 14),
-        outer_margin: Margin::ZERO,
-        corner_radius: CornerRadius::same(18),
-        stroke: Stroke::new(1.0, theme.glass_border),
-        shadow: egui::epaint::Shadow {
-            offset: [0, 8],
-            blur: 24,
-            spread: 0,
-            color: Color32::from_black_alpha(26),
-        },
-        ..Default::default()
-    }
-    .show(ui, |ui| {
-        ui.label(
-            egui::RichText::new(title)
-                .size(15.0)
-                .strong()
-                .color(theme.text_primary),
-        );
-        ui.label(
-            egui::RichText::new(subtitle)
-                .size(12.0)
-                .color(theme.text_secondary),
-        );
-        ui.add_space(12.0);
-        add_contents(ui)
-    })
-    .inner
-}
-
-fn metric_row(ui: &mut egui::Ui, theme: FortrustTheme, label: &str, value: &str) {
-    ui.horizontal(|ui| {
-        ui.label(
-            egui::RichText::new(label)
-                .size(12.0)
-                .color(theme.text_secondary),
-        );
-        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-            ui.label(
-                egui::RichText::new(value)
-                    .size(12.0)
-                    .strong()
-                    .color(theme.text_primary),
-            );
-        });
-    });
-}
-
-fn render_empty_state(ui: &mut egui::Ui, theme: FortrustTheme, title: &str, message: &str) {
-    ui.vertical_centered(|ui| {
-        ui.add_space(48.0);
-        ui.label(
-            egui::RichText::new(title)
-                .size(20.0)
-                .strong()
-                .color(theme.text_primary),
-        );
-        ui.add_space(8.0);
-        ui.label(
-            egui::RichText::new(message)
-                .size(13.0)
-                .color(theme.text_secondary),
-        );
-    });
-}
-
-fn nav_button(
-    ui: &mut egui::Ui,
-    text: &str,
-    enabled: bool,
-    theme: &FortrustTheme,
-) -> egui::Response {
-    ui.add_enabled(
-        enabled,
-        egui::Button::new(
-            egui::RichText::new(text)
-                .color(theme.text_secondary)
-                .size(13.0),
-        )
-        .fill(Color32::TRANSPARENT)
-        .stroke(Stroke::NONE)
-        .corner_radius(6)
-        .min_size(Vec2::new(28.0, 28.0)),
-    )
-}
-
-fn to_egui_rect(origin: egui::Pos2, rect: EngineRect) -> egui::Rect {
-    egui::Rect::from_min_size(
-        egui::Pos2::new(origin.x + rect.x, origin.y + rect.y),
-        egui::Vec2::new(rect.width, rect.height),
-    )
+fn to_egui_rect(origin: Pos2, rect: EngineRect) -> Rect {
+    Rect::from_min_size(Pos2::new(origin.x + rect.x, origin.y + rect.y), Vec2::new(rect.width, rect.height))
 }
 
 fn to_egui_color(color: Color) -> Color32 {
     Color32::from_rgba_unmultiplied(color.r, color.g, color.b, color.a)
 }
 
+#[allow(clippy::too_many_arguments)]
+fn paint_border(
+    origin: Pos2,
+    painter: &egui::Painter,
+    rect: EngineRect,
+    top_width: f32,
+    right_width: f32,
+    bottom_width: f32,
+    left_width: f32,
+    top_color: Color,
+    right_color: Color,
+    bottom_color: Color,
+    left_color: Color,
+) {
+    let r = Rect::from_min_size(Pos2::new(origin.x + rect.x, origin.y + rect.y), Vec2::new(rect.width, rect.height));
+    if top_width > 0.0 && top_color.a > 0 {
+        painter.rect_filled(Rect::from_min_size(r.left_top(), Vec2::new(r.width(), top_width)), 0.0, to_egui_color(top_color));
+    }
+    if bottom_width > 0.0 && bottom_color.a > 0 {
+        painter.rect_filled(Rect::from_min_size(Pos2::new(r.left(), r.bottom() - bottom_width), Vec2::new(r.width(), bottom_width)), 0.0, to_egui_color(bottom_color));
+    }
+    if left_width > 0.0 && left_color.a > 0 {
+        painter.rect_filled(Rect::from_min_size(r.left_top(), Vec2::new(left_width, r.height())), 0.0, to_egui_color(left_color));
+    }
+    if right_width > 0.0 && right_color.a > 0 {
+        painter.rect_filled(Rect::from_min_size(Pos2::new(r.right() - right_width, r.top()), Vec2::new(right_width, r.height())), 0.0, to_egui_color(right_color));
+    }
+}
+
 fn normalize_input(input: &str) -> String {
     let trimmed = input.trim();
-    if trimmed.starts_with("fortrust://")
-        || trimmed.starts_with("about:")
-        || trimmed.starts_with("http://")
-        || trimmed.starts_with("https://")
+    if trimmed.starts_with("fortrust://") || trimmed.starts_with("about:")
+        || trimmed.starts_with("http://") || trimmed.starts_with("https://")
     {
         trimmed.to_owned()
     } else if looks_like_host_candidate(trimmed) {
@@ -1914,15 +1519,9 @@ fn normalize_input(input: &str) -> String {
 }
 
 fn looks_like_host_candidate(input: &str) -> bool {
-    if input.is_empty() || input.contains(' ') {
-        return false;
-    }
-    if input.starts_with('[') && input.contains(']') {
-        return true;
-    }
-    if input.eq_ignore_ascii_case("localhost") || input.starts_with("localhost:") {
-        return true;
-    }
+    if input.is_empty() || input.contains(' ') { return false; }
+    if input.starts_with('[') && input.contains(']') { return true; }
+    if input.eq_ignore_ascii_case("localhost") || input.starts_with("localhost:") { return true; }
     input.contains('.')
 }
 
@@ -1931,7 +1530,5 @@ fn title_from_url(url: &str) -> String {
         .or_else(|| url.strip_prefix("http://"))
         .unwrap_or(url)
         .trim_end_matches('/')
-        .chars()
-        .take(24)
-        .collect()
+        .chars().take(24).collect()
 }

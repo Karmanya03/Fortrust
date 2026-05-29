@@ -1,241 +1,579 @@
-use crate::animation::SidebarAnimation;
-use crate::theme::FortrustTheme;
-use egui::{self, Color32, CornerRadius, Ui, Vec2};
-use fortrust_core::Tab;
+use crate::{animation::SidebarAnimation, icons, theme::FortrustTheme};
+use egui::{self, Color32, CornerRadius, Pos2, Rect, Stroke, Vec2};
+use fortrust_core::BrowserConfig;
+use fortrust_storage::StorageDatabase;
+
+#[derive(Debug, Clone, PartialEq)]
+pub enum DownloadAction {
+    Pause,
+    Resume,
+    Remove,
+}
 
 #[derive(PartialEq, Clone, Copy)]
-pub enum SidebarPage {
-    Tabs,
-    Bookmarks,
-    History,
+pub enum SidebarSection {
+    Setup,
+    Feeds,
+    AI,
     Downloads,
-    Notes,
-    Settings,
+    Bookmarks,
+    More,
 }
 
-pub fn render_sidebar(
-    ui: &mut Ui,
-    anim: &mut SidebarAnimation,
-    current_page: &mut SidebarPage,
-    theme: &FortrustTheme,
-    _tabs: &[Tab],
-    _active_tab: &mut usize,
-) {
-    let width = anim.current_width();
-    let label_opacity = anim.label_opacity();
+impl SidebarSection {
+    pub fn title(&self) -> &str {
+        match self {
+            Self::Setup => "Sidebar Setup",
+            Self::Feeds => "Feeds",
+            Self::AI => "AI Assistant",
+            Self::Downloads => "Downloads",
+            Self::Bookmarks => "Bookmarks",
+            Self::More => "More",
+        }
+    }
+}
 
-    ui.set_width(width);
-    println!("Fortrust:sidebar width={} max_rect={:?}", width, ui.max_rect());
-    // Make the sidebar background subtle for the light, minimal design
-    ui.painter().rect_filled(ui.max_rect(), CornerRadius::ZERO, Color32::TRANSPARENT);
-    ui.painter().rect_stroke(
-        ui.max_rect(),
-        CornerRadius::ZERO,
-        egui::Stroke::new(0.3, theme.glass_border),
-        egui::StrokeKind::Outside,
+#[derive(Clone)]
+pub struct SidebarState {
+    pub visible: bool,
+    pub section: SidebarSection,
+    pub pending_download_cmd: Option<(u64, DownloadAction)>,
+    pub workspaces_enabled: bool,
+    pub boosts_enabled: bool,
+    pub break_reminder_enabled: bool,
+    pub chatgpt_enabled: bool,
+    pub messenger_enabled: bool,
+    pub whatsapp_enabled: bool,
+    pub discord_enabled: bool,
+    pub telegram_enabled: bool,
+    pub signal_enabled: bool,
+    pub instagram_enabled: bool,
+    pub x_enabled: bool,
+    pub bluesky_enabled: bool,
+    pub player_enabled: bool,
+    pub speed_dial_enabled: bool,
+    pub bookmarks_enabled: bool,
+    pub history_enabled: bool,
+    pub downloads_enabled: bool,
+    pub extensions_enabled: bool,
+    pub settings_enabled: bool,
+    pub show_sidebar: bool,
+    pub auto_hide: bool,
+    pub notifications_enabled: bool,
+    pub messengers_expanded: bool,
+    pub add_ext_hover: bool,
+    pub trackers_blocked: u32,
+}
+
+impl Default for SidebarState {
+    fn default() -> Self {
+        Self {
+            visible: true,
+            section: SidebarSection::Setup,
+            pending_download_cmd: None,
+            workspaces_enabled: false,
+            boosts_enabled: true,
+            break_reminder_enabled: true,
+            chatgpt_enabled: true,
+            messenger_enabled: false,
+            whatsapp_enabled: false,
+            discord_enabled: false,
+            telegram_enabled: false,
+            signal_enabled: false,
+            instagram_enabled: false,
+            x_enabled: false,
+            bluesky_enabled: false,
+            player_enabled: false,
+            speed_dial_enabled: true,
+            bookmarks_enabled: true,
+            history_enabled: true,
+            downloads_enabled: true,
+            extensions_enabled: false,
+            settings_enabled: true,
+            show_sidebar: true,
+            auto_hide: false,
+            notifications_enabled: true,
+            messengers_expanded: false,
+            add_ext_hover: false,
+            trackers_blocked: 0,
+        }
+    }
+}
+
+impl SidebarState {
+    pub fn render_icon_rail(&mut self, ui: &mut egui::Ui, theme: &FortrustTheme, anim: &mut SidebarAnimation) {
+        let rect = ui.available_rect_before_wrap();
+        ui.painter().rect_filled(rect, CornerRadius::ZERO, theme.surface_rail);
+
+        let rail_left = rect.min.x;
+        let mut y = rect.min.y + 8.0;
+
+        let icon_color = theme.text_secondary;
+        let active_color = theme.accent_primary;
+
+        let is_open = anim.is_open();
+
+        if Self::rail_btn(ui, theme, rail_left, &mut y, is_open && self.section == SidebarSection::Setup) {
+            self.handle_click(SidebarSection::Setup, anim);
+        }
+        let icon_rect = Rect::from_min_size(Pos2::new(rail_left + 3.0, y - 24.0), Vec2::new(24.0, 24.0));
+        icons::paint_setup_icon(ui.painter(), icon_rect, if is_open && self.section == SidebarSection::Setup { active_color } else { icon_color });
+
+        y += 2.0;
+        if Self::rail_btn(ui, theme, rail_left, &mut y, is_open && self.section == SidebarSection::Feeds) {
+            self.handle_click(SidebarSection::Feeds, anim);
+        }
+        let icon_rect = Rect::from_min_size(Pos2::new(rail_left + 3.0, y - 24.0), Vec2::new(24.0, 24.0));
+        icons::paint_feeds_icon(ui.painter(), icon_rect, if is_open && self.section == SidebarSection::Feeds { active_color } else { icon_color });
+
+        y += 2.0;
+        if Self::rail_btn(ui, theme, rail_left, &mut y, is_open && self.section == SidebarSection::AI) {
+            self.handle_click(SidebarSection::AI, anim);
+        }
+        let icon_rect = Rect::from_min_size(Pos2::new(rail_left + 3.0, y - 24.0), Vec2::new(24.0, 24.0));
+        icons::paint_ai_icon(ui.painter(), icon_rect, if is_open && self.section == SidebarSection::AI { active_color } else { icon_color });
+
+        y += 2.0;
+        if Self::rail_btn(ui, theme, rail_left, &mut y, is_open && self.section == SidebarSection::Downloads) {
+            self.handle_click(SidebarSection::Downloads, anim);
+        }
+        let icon_rect = Rect::from_min_size(Pos2::new(rail_left + 3.0, y - 24.0), Vec2::new(24.0, 24.0));
+        icons::paint_downloads_icon(ui.painter(), icon_rect, if is_open && self.section == SidebarSection::Downloads { active_color } else { icon_color });
+
+        y += 2.0;
+        if Self::rail_btn(ui, theme, rail_left, &mut y, is_open && self.section == SidebarSection::Bookmarks) {
+            self.handle_click(SidebarSection::Bookmarks, anim);
+        }
+        let icon_rect = Rect::from_min_size(Pos2::new(rail_left + 3.0, y - 24.0), Vec2::new(24.0, 24.0));
+        icons::paint_bookmark_icon(ui.painter(), icon_rect, if is_open && self.section == SidebarSection::Bookmarks { active_color } else { icon_color });
+
+        y += 80.0;
+        ui.painter().line_segment(
+            [Pos2::new(rail_left + 7.0, y), Pos2::new(rail_left + 17.0, y)],
+            Stroke::new(1.0, theme.glass_border),
+        );
+        y += 8.0;
+
+        if Self::rail_btn(ui, theme, rail_left, &mut y, is_open && self.section == SidebarSection::More) {
+            self.handle_click(SidebarSection::More, anim);
+        }
+        let icon_rect = Rect::from_min_size(Pos2::new(rail_left + 3.0, y - 24.0), Vec2::new(24.0, 24.0));
+        icons::paint_more_icon(ui.painter(), icon_rect, if is_open && self.section == SidebarSection::More { active_color } else { icon_color });
+    }
+
+    fn handle_click(&mut self, section: SidebarSection, anim: &mut SidebarAnimation) {
+        let is_open = anim.is_open();
+        if is_open && self.section == section {
+            anim.close();
+        } else {
+            self.section = section;
+            anim.open();
+        }
+    }
+
+    fn rail_btn(ui: &mut egui::Ui, theme: &FortrustTheme, rl: f32, y: &mut f32, active: bool) -> bool {
+        let rect = Rect::from_min_size(Pos2::new(rl + 3.0, *y), Vec2::new(24.0, 24.0));
+        let bg = if active { Color32::from_rgba_unmultiplied(79, 158, 255, 33) }
+                 else if ui.rect_contains_pointer(rect) { theme.glass_hover }
+                 else { Color32::TRANSPARENT };
+        ui.painter().rect_filled(rect, CornerRadius::same(5), bg);
+        let resp = ui.allocate_rect(rect, egui::Sense::click());
+        if active {
+            ui.painter().circle_filled(Pos2::new(rect.right() - 3.0, rect.top() + 3.0), 2.5, theme.accent_primary);
+        }
+        *y += 24.0;
+        resp.clicked()
+    }
+
+    pub fn render_overlay(&mut self, ui: &mut egui::Ui, theme: &FortrustTheme, anim: &mut SidebarAnimation, config: &mut BrowserConfig, storage: Option<&StorageDatabase>, downloads: &[crate::download::DownloadEntry]) -> Option<String> {
+        let offset = anim.current_offset();
+        if offset < 1.0 { return None; }
+
+        let area = ui.max_rect();
+        let sbr = Rect::from_min_size(Pos2::new(area.min.x, area.min.y), Vec2::new(offset, area.height()));
+
+        ui.painter().rect_filled(sbr, CornerRadius::ZERO, Color32::from_rgb(24, 28, 34));
+        ui.painter().rect_stroke(sbr, CornerRadius::ZERO, Stroke::new(1.0, Color32::from_rgb(39, 45, 56)), egui::StrokeKind::Inside);
+
+        // Gradient shadow on sidebar right edge
+        let shadow_right = sbr.right();
+        for i in 0..8 {
+            let alpha = (60 - i * 7).max(0) as u8;
+            let x = shadow_right + i as f32 * 1.5;
+            ui.painter().rect_filled(
+                Rect::from_min_size(Pos2::new(x, sbr.top()), Vec2::new(1.5, sbr.height())),
+                CornerRadius::ZERO,
+                Color32::from_black_alpha(alpha),
+            );
+        }
+
+        let sx = sbr.min.x + 18.0;
+
+        // Header
+        ui.painter().rect_filled(Rect::from_min_size(Pos2::new(sbr.min.x, sbr.min.y), Vec2::new(sbr.width(), 44.0)), CornerRadius::ZERO, Color32::from_rgb(24, 28, 34));
+        ui.painter().line_segment([Pos2::new(sbr.min.x, sbr.min.y + 44.0), Pos2::new(sbr.max.x, sbr.min.y + 44.0)], Stroke::new(1.0, Color32::from_rgb(39, 45, 56)));
+
+        ui.painter().text(Pos2::new(sx, sbr.min.y + 16.0), egui::Align2::LEFT_TOP, self.section.title(), egui::FontId::proportional(13.5), theme.text_primary);
+
+        let cr = Rect::from_min_size(Pos2::new(sbr.max.x - 30.0, sbr.min.y + 10.0), Vec2::new(22.0, 22.0));
+        if ui.rect_contains_pointer(cr) { ui.painter().rect_filled(cr, CornerRadius::same(4), theme.glass_hover); }
+        if ui.allocate_rect(cr, egui::Sense::click()).clicked() { anim.close(); }
+        icons::paint_close_icon(ui.painter(), cr, theme.text_muted);
+
+        // Only render scrollable content when sidebar is wide enough to avoid negative-size panic
+        if offset < 36.0 { return None; }
+
+        // Scrollable content
+        let content_rect = Rect::from_min_size(
+            Pos2::new(sbr.min.x, sbr.min.y + 56.0),
+            Vec2::new(sbr.width(), (sbr.height() - 56.0).max(0.0)),
+        );
+        let mut content_ui = ui.new_child(egui::UiBuilder::new().max_rect(content_rect).layout(egui::Layout::top_down(egui::Align::LEFT)));
+
+        let scroll_result = egui::ScrollArea::vertical()
+            .auto_shrink([false; 2])
+            .show(&mut content_ui, |ui| {
+                ui.add_space(0.0);
+                let sx = sbr.min.x + 18.0;
+                let sw = (sbr.width() - 36.0).max(0.0);
+
+                match self.section {
+                    SidebarSection::Setup => {
+                        section_label_ui(ui, theme, "Workspaces", sx, sw);
+                        self.workspaces_enabled = toggle_row_ui(ui, theme, "", self.workspaces_enabled, sx, sw);
+
+                        section_label_ui(ui, theme, "Mindfulness Features", sx, sw);
+                        self.boosts_enabled = icon_check_row_ui(ui, theme, "Boosts", self.boosts_enabled, sx, sw, icons::paint_sun_icon);
+                        self.break_reminder_enabled = icon_check_row_ui(ui, theme, "Take a Break", self.break_reminder_enabled, sx, sw, icons::paint_timer_icon);
+
+                        section_label_ui(ui, theme, "AI Services", sx, sw);
+                        self.chatgpt_enabled = icon_check_row_ui(ui, theme, "ChatGPT", self.chatgpt_enabled, sx, sw, icons::paint_face_icon);
+
+                        section_label_ui(ui, theme, "Messengers", sx, sw);
+                        self.messenger_enabled = icon_check_row_ui(ui, theme, "Facebook Messenger", self.messenger_enabled, sx, sw, icons::paint_chat_icon);
+                        self.whatsapp_enabled = icon_check_row_ui(ui, theme, "WhatsApp", self.whatsapp_enabled, sx, sw, icons::paint_globe_icon);
+                        self.discord_enabled = icon_check_row_ui(ui, theme, "Discord", self.discord_enabled, sx, sw, icons::paint_at_icon);
+
+                        let more_txt = if self.messengers_expanded { "Show less" } else { "Show more" };
+                        if show_more_btn_ui(ui, theme, more_txt, sx, sw) {
+                            self.messengers_expanded ^= true;
+                        }
+                        if self.messengers_expanded {
+                            self.telegram_enabled = icon_check_row_ui(ui, theme, "Telegram", self.telegram_enabled, sx, sw, icons::paint_at_icon);
+                            self.signal_enabled = icon_check_row_ui(ui, theme, "Signal", self.signal_enabled, sx, sw, icons::paint_signal_icon);
+                        }
+
+                        section_label_ui(ui, theme, "Social Media", sx, sw);
+                        self.instagram_enabled = icon_check_row_ui(ui, theme, "Instagram", self.instagram_enabled, sx, sw, icons::paint_camera_icon);
+                        self.x_enabled = icon_check_row_ui(ui, theme, "X", self.x_enabled, sx, sw, icons::paint_x_icon);
+                        self.bluesky_enabled = icon_check_row_ui(ui, theme, "Bluesky", self.bluesky_enabled, sx, sw, icons::paint_heart_icon);
+
+                        section_label_ui(ui, theme, "Special Features", sx, sw);
+                        self.player_enabled = icon_check_row_ui(ui, theme, "Player", self.player_enabled, sx, sw, icons::paint_compass_icon);
+
+                        section_label_ui(ui, theme, "Browser Tools", sx, sw);
+                        self.speed_dial_enabled = icon_check_row_ui(ui, theme, "Speed Dial", self.speed_dial_enabled, sx, sw, icons::paint_grid_icon);
+                        self.bookmarks_enabled = icon_check_row_ui(ui, theme, "Bookmarks", self.bookmarks_enabled, sx, sw, icons::paint_bookmark_icon);
+                        self.history_enabled = icon_check_row_ui(ui, theme, "History", self.history_enabled, sx, sw, icons::paint_history_icon);
+                        self.downloads_enabled = icon_check_row_ui(ui, theme, "Downloads", self.downloads_enabled, sx, sw, icons::paint_downloads_icon);
+                        self.extensions_enabled = icon_check_row_ui(ui, theme, "Extensions", self.extensions_enabled, sx, sw, icons::paint_puzzle_icon);
+                        self.settings_enabled = icon_check_row_ui(ui, theme, "Settings", self.settings_enabled, sx, sw, icons::paint_gear_icon);
+
+                        section_label_ui(ui, theme, "Sidebar Extensions", sx, sw);
+                        add_ext_btn_ui(ui, theme, sx, sw);
+
+                        section_label_ui(ui, theme, "Settings", sx, sw);
+                        self.show_sidebar = toggle_row_ui(ui, theme, "Show sidebar", self.show_sidebar, sx, sw);
+                        self.auto_hide = toggle_row_ui(ui, theme, "Automatically hide sidebar", self.auto_hide, sx, sw);
+                        self.notifications_enabled = toggle_row_ui(ui, theme, "Enable notifications for messengers", self.notifications_enabled, sx, sw);
+                        None
+                    }
+                    SidebarSection::Feeds => {
+                        section_label_ui(ui, theme, "Feed Sources", sx, sw);
+                        self.speed_dial_enabled = icon_check_row_ui(ui, theme, "RSS Feeds", self.speed_dial_enabled, sx, sw, icons::paint_feeds_icon);
+                        self.bookmarks_enabled = icon_check_row_ui(ui, theme, "Newsletters", self.bookmarks_enabled, sx, sw, icons::paint_bookmark_icon);
+                        section_label_ui(ui, theme, "Updates", sx, sw);
+                        ui.painter().text(Pos2::new(sx, ui.cursor().min.y + 4.0), egui::Align2::LEFT_TOP, "No feeds configured", egui::FontId::proportional(12.0), theme.text_muted);
+                        ui.allocate_space(Vec2::new(sw, 24.0));
+                        None
+                    }
+                    SidebarSection::AI => {
+                        section_label_ui(ui, theme, "AI Providers", sx, sw);
+                        self.chatgpt_enabled = icon_check_row_ui(ui, theme, "ChatGPT", self.chatgpt_enabled, sx, sw, icons::paint_face_icon);
+                        section_label_ui(ui, theme, "Quick Actions", sx, sw);
+                        let cy = ui.cursor().min.y;
+                        ui.painter().text(Pos2::new(sx, cy + 4.0), egui::Align2::LEFT_TOP, "Summarize page", egui::FontId::proportional(12.0), theme.text_secondary);
+                        ui.allocate_space(Vec2::new(sw, 24.0));
+                        let cy = ui.cursor().min.y;
+                        ui.painter().text(Pos2::new(sx, cy + 4.0), egui::Align2::LEFT_TOP, "Explain selection", egui::FontId::proportional(12.0), theme.text_secondary);
+                        ui.allocate_space(Vec2::new(sw, 24.0));
+                        let cy = ui.cursor().min.y;
+                        ui.painter().text(Pos2::new(sx, cy + 4.0), egui::Align2::LEFT_TOP, "Translate", egui::FontId::proportional(12.0), theme.text_secondary);
+                        ui.allocate_space(Vec2::new(sw, 24.0));
+                        None
+                    }
+                    SidebarSection::Downloads => {
+                        use crate::download::DownloadStatus;
+                        section_label_ui(ui, theme, "Downloads", sx, sw);
+                        if downloads.is_empty() {
+                            let cy = ui.cursor().min.y;
+                            ui.painter().text(Pos2::new(sx, cy + 4.0), egui::Align2::LEFT_TOP, "No downloads yet.", egui::FontId::proportional(12.0), theme.text_muted);
+                            ui.allocate_space(Vec2::new(sw, 30.0));
+                        } else {
+                            for dl in downloads {
+                                let y = ui.cursor().min.y;
+                                let rect = Rect::from_min_size(Pos2::new(sx, y), Vec2::new(sw, 48.0));
+                                let hovered = ui.rect_contains_pointer(rect);
+                                if hovered {
+                                    ui.painter().rect_filled(rect, CornerRadius::same(4), Color32::from_white_alpha(6));
+                                }
+
+                                // Download icon
+                                let icon_rect = Rect::from_min_size(Pos2::new(sx + 2.0, y + 4.0), Vec2::new(14.0, 14.0));
+                                icons::paint_downloads_icon(ui.painter(), icon_rect, if hovered { theme.text_primary } else { theme.text_secondary });
+
+                                // Filename
+                                let fname = if dl.filename.len() > 24 { format!("{}...", &dl.filename[..21]) } else { dl.filename.clone() };
+                                ui.painter().text(Pos2::new(sx + 22.0, y + 2.0), egui::Align2::LEFT_TOP, &fname, egui::FontId::proportional(12.0), theme.text_secondary);
+
+                                // Status/progress
+                                let status_text = match dl.status {
+                                    DownloadStatus::Downloading => {
+                                        let pct = if dl.total_bytes > 0 { dl.downloaded_bytes as f64 / dl.total_bytes as f64 * 100.0 } else { 0.0 };
+                                        let speed_mb = dl.speed_bytes_per_sec / 1024.0 / 1024.0;
+                                        format!("{:.0}% ({:.1} MB/s)", pct, speed_mb)
+                                    }
+                                    DownloadStatus::Paused => format!("Paused ({}/{})", dl.downloaded_bytes / 1024, (dl.total_bytes.max(dl.downloaded_bytes)) / 1024),
+                                    DownloadStatus::Completed => "Completed".into(),
+                                    DownloadStatus::Failed(ref e) => format!("Failed: {}", if e.len() > 20 { &e[..20] } else { e }),
+                                    DownloadStatus::Queued => "Queued".into(),
+                                };
+                                ui.painter().text(Pos2::new(sx + 22.0, y + 18.0), egui::Align2::LEFT_TOP, &status_text, egui::FontId::proportional(9.5), theme.text_muted);
+
+                                // Progress bar for active downloads
+                                if matches!(dl.status, DownloadStatus::Downloading) && dl.total_bytes > 0 {
+                                    let bar_rect = Rect::from_min_size(Pos2::new(sx + 22.0, y + 32.0), Vec2::new(sw - 60.0, 4.0));
+                                    ui.painter().rect_filled(bar_rect, CornerRadius::same(2), Color32::from_rgba_unmultiplied(255, 255, 255, 16));
+                                    let fill_w = (dl.downloaded_bytes as f32 / dl.total_bytes as f32) * bar_rect.width();
+                                    if fill_w > 0.0 {
+                                        ui.painter().rect_filled(Rect::from_min_size(bar_rect.min, Vec2::new(fill_w, bar_rect.height())), CornerRadius::same(2), theme.accent_primary);
+                                    }
+                                }
+
+                                // Action buttons (pause/resume/remove) on hover
+                                if hovered {
+                                    let can_pause = matches!(dl.status, DownloadStatus::Downloading);
+                                    let can_resume = matches!(dl.status, DownloadStatus::Paused | DownloadStatus::Failed(_));
+                                    let btn_rect = Rect::from_min_size(Pos2::new(rect.max.x - 58.0, y + 6.0), Vec2::new(50.0, 20.0));
+                                    if can_pause {
+                                        if ui.allocate_rect(btn_rect, egui::Sense::click()).clicked() {
+                                            self.pending_download_cmd = Some((dl.id, DownloadAction::Pause));
+                                        }
+                                        ui.painter().rect_filled(btn_rect, CornerRadius::same(3), Color32::from_rgba_unmultiplied(255, 180, 50, 30));
+                                        ui.painter().text(btn_rect.center(), egui::Align2::CENTER_CENTER, "Pause", egui::FontId::proportional(10.0), Color32::from_rgb(255, 180, 50));
+                                    } else if can_resume {
+                                        if ui.allocate_rect(btn_rect, egui::Sense::click()).clicked() {
+                                            self.pending_download_cmd = Some((dl.id, DownloadAction::Resume));
+                                        }
+                                        ui.painter().rect_filled(btn_rect, CornerRadius::same(3), Color32::from_rgba_unmultiplied(50, 200, 80, 30));
+                                        ui.painter().text(btn_rect.center(), egui::Align2::CENTER_CENTER, "Resume", egui::FontId::proportional(10.0), Color32::from_rgb(50, 200, 80));
+                                    }
+                                    let del_rect = Rect::from_min_size(Pos2::new(rect.max.x - 24.0, y + 28.0), Vec2::new(20.0, 18.0));
+                                    if ui.allocate_rect(del_rect, egui::Sense::click()).clicked() {
+                                        self.pending_download_cmd = Some((dl.id, DownloadAction::Remove));
+                                    }
+                                    icons::paint_close_icon(ui.painter(), del_rect, theme.text_muted);
+                                }
+
+                                ui.allocate_space(Vec2::new(sw, 52.0));
+                            }
+                        }
+                        None
+                    }
+                    SidebarSection::Bookmarks => {
+                        let bookmarks: Vec<fortrust_storage::Bookmark> = storage.map(|s| s.bookmarks.all()).unwrap_or_default();
+                        let mut deleted: Option<String> = None;
+                        for bm in &bookmarks {
+                            let y = ui.cursor().min.y;
+                            let rect = Rect::from_min_size(Pos2::new(sx, y), Vec2::new(sw, 32.0));
+                            let hovered = ui.rect_contains_pointer(rect);
+                            if hovered {
+                                ui.painter().rect_filled(rect, CornerRadius::same(4), Color32::from_white_alpha(6));
+                            }
+                            // Bookmark icon
+                            let icon_rect = Rect::from_min_size(Pos2::new(sx + 2.0, y + 9.0), Vec2::new(14.0, 14.0));
+                            icons::paint_bookmark_icon(ui.painter(), icon_rect, if hovered { theme.text_primary } else { theme.text_secondary });
+                            // Title
+                            let display = if bm.title.len() > 28 { format!("{}...", &bm.title[..25]) } else { bm.title.clone() };
+                            ui.painter().text(Pos2::new(sx + 22.0, y + 6.0), egui::Align2::LEFT_TOP, &display, egui::FontId::proportional(12.0), theme.text_secondary);
+                            // URL
+                            let url_display = if bm.url.len() > 34 { format!("{}...", &bm.url[..31]) } else { bm.url.clone() };
+                            ui.painter().text(Pos2::new(sx + 22.0, y + 20.0), egui::Align2::LEFT_TOP, &url_display, egui::FontId::proportional(9.5), theme.text_muted);
+                            // Delete button
+                            let del_rect = Rect::from_min_size(Pos2::new(rect.max.x - 26.0, y + 6.0), Vec2::new(20.0, 20.0));
+                            let del_hovered = ui.rect_contains_pointer(del_rect);
+                            if del_hovered { ui.painter().rect_filled(del_rect, CornerRadius::same(3), Color32::from_rgba_unmultiplied(255, 60, 60, 30)); }
+                            icons::paint_close_icon(ui.painter(), del_rect, if del_hovered { theme.accent_shield_off } else { theme.text_muted });
+                            if ui.allocate_rect(del_rect, egui::Sense::click()).clicked() {
+                                deleted = Some(bm.id.clone());
+                            }
+                            ui.allocate_space(Vec2::new(sw, 36.0));
+                        }
+                        if bookmarks.is_empty() {
+                            let cy = ui.cursor().min.y;
+                            ui.painter().text(Pos2::new(sx, cy + 4.0), egui::Align2::LEFT_TOP, "No bookmarks yet. Click the star in the address bar to add one.", egui::FontId::proportional(12.0), theme.text_muted);
+                            ui.allocate_space(Vec2::new(sw, 30.0));
+                        }
+                        if let Some(id) = deleted
+                            && let Some(s) = storage {
+                            let _ = s.bookmarks.delete(&id);
+                        }
+                        None
+                    }
+                    SidebarSection::More => {
+                        section_label_ui(ui, theme, "Appearance", sx, sw);
+                        let current_theme = config.ui.theme.clone();
+                        let is_dark = current_theme == "dark";
+                        let new_dark = toggle_row_ui(ui, theme, "Dark theme", is_dark, sx, sw);
+                        if new_dark != is_dark {
+                            config.ui.theme = if new_dark { "dark".into() } else { "light".into() };
+                            if let Some(s) = storage { let _ = s.settings.store("chrome.ui.theme", &fortrust_storage::SettingValue::from(config.ui.theme.as_str())); }
+                        }
+                        let current_compact = config.ui.compact_density;
+                        let new_compact = toggle_row_ui(ui, theme, "Compact density", current_compact, sx, sw);
+                        if new_compact != current_compact {
+                            config.ui.compact_density = new_compact;
+                            if let Some(s) = storage { let _ = s.settings.store("chrome.ui.compact_density", &fortrust_storage::SettingValue::from(if new_compact { "1" } else { "0" })); }
+                        }
+
+                        section_label_ui(ui, theme, "Privacy", sx, sw);
+                        let cur_block_ads = config.privacy.block_ads;
+                        let new_block_ads = toggle_row_ui(ui, theme, "Block ads", cur_block_ads, sx, sw);
+                        if new_block_ads != cur_block_ads {
+                            config.privacy.block_ads = new_block_ads;
+                            if let Some(s) = storage { let _ = s.settings.store("chrome.privacy.block_ads", &fortrust_storage::SettingValue::from(if new_block_ads { "1" } else { "0" })); }
+                        }
+                        let cur_block_trk = config.privacy.block_trackers;
+                        let new_block_trk = toggle_row_ui(ui, theme, "Block trackers", cur_block_trk, sx, sw);
+                        if new_block_trk != cur_block_trk {
+                            config.privacy.block_trackers = new_block_trk;
+                            if let Some(s) = storage { let _ = s.settings.store("chrome.privacy.block_trackers", &fortrust_storage::SettingValue::from(if new_block_trk { "1" } else { "0" })); }
+                        }
+                        let cur_https = config.privacy.https_only_mode;
+                        let new_https = toggle_row_ui(ui, theme, "HTTPS-only mode", cur_https, sx, sw);
+                        if new_https != cur_https {
+                            config.privacy.https_only_mode = new_https;
+                            if let Some(s) = storage { let _ = s.settings.store("chrome.privacy.https_only_mode", &fortrust_storage::SettingValue::from(if new_https { "1" } else { "0" })); }
+                        }
+                        let cur_fp = config.privacy.fingerprint_noise;
+                        let new_fp = toggle_row_ui(ui, theme, "Fingerprint protection", cur_fp, sx, sw);
+                        if new_fp != cur_fp {
+                            config.privacy.fingerprint_noise = new_fp;
+                            if let Some(s) = storage { let _ = s.settings.store("chrome.privacy.fingerprint_noise", &fortrust_storage::SettingValue::from(if new_fp { "1" } else { "0" })); }
+                        }
+
+                        section_label_ui(ui, theme, "Sidebar", sx, sw);
+                        self.show_sidebar = toggle_row_ui(ui, theme, "Show sidebar", self.show_sidebar, sx, sw);
+                        self.auto_hide = toggle_row_ui(ui, theme, "Auto-hide sidebar", self.auto_hide, sx, sw);
+                        None
+                    }
+                }
+            });
+        scroll_result.inner
+    }
+}
+
+fn section_label_ui(ui: &mut egui::Ui, theme: &FortrustTheme, label: &str, sx: f32, sw: f32) {
+    let y = ui.cursor().min.y;
+    ui.painter().text(Pos2::new(sx, y + 4.0), egui::Align2::LEFT_TOP, label, egui::FontId::proportional(11.0), theme.text_muted);
+    ui.allocate_space(Vec2::new(sw, 24.0));
+}
+
+fn icon_check_row_ui(ui: &mut egui::Ui, theme: &FortrustTheme, label: &str, value: bool, sx: f32, sw: f32, icon_fn: fn(&egui::Painter, Rect, Color32)) -> bool {
+    check_row_icon_ui(ui, theme, label, value, sx, sw, Some(icon_fn)).0
+}
+
+fn check_row_icon_ui(
+    ui: &mut egui::Ui, theme: &FortrustTheme, label: &str, mut value: bool,
+    sx: f32, sw: f32, icon: Option<fn(&egui::Painter, Rect, Color32)>,
+) -> (bool, bool) {
+    let y = ui.cursor().min.y;
+    let icon_offset = if icon.is_some() { 24.0 } else { 0.0 };
+    let rect = Rect::from_min_size(Pos2::new(sx, y), Vec2::new(sw, 28.0)).expand2(Vec2::new(0.0, 2.0));
+    if ui.rect_contains_pointer(rect) {
+        ui.painter().rect_filled(rect.shrink2(Vec2::new(0.0, 4.0)), CornerRadius::ZERO, Color32::from_white_alpha(4));
+    }
+
+    let hovered = ui.rect_contains_pointer(rect);
+
+    // Draw icon if provided
+    if let Some(icon_fn) = icon {
+        let icon_rect = Rect::from_min_size(
+            Pos2::new(rect.min.x + 2.0, rect.center().y - 7.0),
+            Vec2::new(14.0, 14.0),
+        );
+        icon_fn(ui.painter(), icon_rect, if hovered { theme.text_primary } else { theme.text_secondary });
+    }
+
+    ui.painter().text(
+        Pos2::new(rect.min.x + 2.0 + icon_offset, rect.center().y),
+        egui::Align2::LEFT_CENTER,
+        label,
+        egui::FontId::proportional(12.5),
+        theme.text_secondary,
     );
 
-    ui.vertical(|ui: &mut Ui| {
-        if icon_button(ui, "◀", theme).clicked() {
-            if anim.current_width() > 100.0 {
-                anim.collapse();
-            } else {
-                anim.expand();
-            }
-        }
+    let clicked = ui.allocate_rect(rect, egui::Sense::click()).clicked();
+    if clicked { value = !value; }
 
-        ui.add_space(8.0);
-        ui.separator();
-        ui.add_space(8.0);
-
-        sidebar_item(
-            ui,
-            "📑",
-            "Tabs",
-            SidebarPage::Tabs,
-            current_page,
-            label_opacity,
-            theme,
-            false,
-            0,
-        );
-        sidebar_item(
-            ui,
-            "⭐",
-            "Bookmarks",
-            SidebarPage::Bookmarks,
-            current_page,
-            label_opacity,
-            theme,
-            false,
-            0,
-        );
-        sidebar_item(
-            ui,
-            "🕘",
-            "History",
-            SidebarPage::History,
-            current_page,
-            label_opacity,
-            theme,
-            false,
-            0,
-        );
-        sidebar_item(
-            ui,
-            "⬇",
-            "Downloads",
-            SidebarPage::Downloads,
-            current_page,
-            label_opacity,
-            theme,
-            false,
-            0,
-        );
-        sidebar_item(
-            ui,
-            "📝",
-            "Notes",
-            SidebarPage::Notes,
-            current_page,
-            label_opacity,
-            theme,
-            false,
-            0,
-        );
-
-        ui.with_layout(egui::Layout::bottom_up(egui::Align::LEFT), |ui: &mut Ui| {
-            sidebar_item(
-                ui,
-                "⚙",
-                "Settings",
-                SidebarPage::Settings,
-                current_page,
-                label_opacity,
-                theme,
-                false,
-                0,
-            );
-        });
-    });
-}
-
-fn icon_button(ui: &mut Ui, icon: &str, theme: &FortrustTheme) -> egui::Response {
-    ui.add(
-        egui::Button::new(
-            egui::RichText::new(icon)
-                .size(18.0)
-                .color(theme.text_primary),
-        )
-        .fill(Color32::TRANSPARENT)
-        .min_size(egui::Vec2::new(36.0, 36.0))
-        .corner_radius(8)
-        .stroke(egui::Stroke::NONE),
-    )
-}
-
-#[allow(clippy::too_many_arguments)]
-fn sidebar_item(
-    ui: &mut Ui,
-    icon: &str,
-    label: &str,
-    page: SidebarPage,
-    current: &mut SidebarPage,
-    label_opacity: f32,
-    theme: &FortrustTheme,
-    show_badge: bool,
-    _badge_count: u32,
-) {
-    let is_active = *current == page;
-    let bg = if is_active {
-        theme.accent_primary
-    } else {
-        Color32::TRANSPARENT
-    };
-
-    let response = ui
-        .horizontal(|ui: &mut Ui| {
-            ui.painter().rect_filled(
-                ui.available_rect_before_wrap().shrink(2.0),
-                CornerRadius::same(8),
-                bg,
-            );
-            ui.label(egui::RichText::new(icon).size(18.0).color(if is_active {
-                theme.text_on_accent
-            } else {
-                theme.text_secondary
-            }));
-            if label_opacity > 0.01 {
-                ui.label(
-                    egui::RichText::new(label)
-                        .size(13.0)
-                        .color(theme.text_primary.linear_multiply(label_opacity)),
-                );
-            }
-            // Notification badge dot
-            if show_badge {
-                let (badge_rect, _) = ui.allocate_exact_size(Vec2::new(8.0, 8.0), egui::Sense::hover());
-                ui.painter().circle_filled(
-                    badge_rect.center(),
-                    4.0,
-                    Color32::from_rgb(255, 69, 58),
-                );
-            }
-        })
-        .response;
-
-    if response.interact(egui::Sense::click()).clicked() {
-        *current = page;
+    let cr = Rect::from_min_size(Pos2::new(rect.max.x - 28.0, rect.center().y - 9.0), Vec2::new(18.0, 18.0));
+    let cb = if value { Color32::from_rgba_unmultiplied(255, 255, 255, 25) } else { Color32::from_rgba_unmultiplied(255, 255, 255, 15) };
+    let cbo = if value { Color32::from_rgba_unmultiplied(255, 255, 255, 72) } else { Color32::from_rgba_unmultiplied(255, 255, 255, 36) };
+    ui.painter().rect_filled(cr, CornerRadius::same(4), cb);
+    ui.painter().rect_stroke(cr, CornerRadius::same(4), Stroke::new(1.5, cbo), egui::StrokeKind::Inside);
+    if value {
+        let check_rect = Rect::from_center_size(cr.center(), Vec2::new(14.0, 14.0));
+        icons::paint_check_icon(ui.painter(), check_rect, theme.text_primary);
     }
 
-    if response.hovered() {
-        ui.painter().rect_filled(
-            response.rect.shrink(2.0),
-            CornerRadius::same(8),
-            theme.glass_hover,
-        );
-    }
+    ui.allocate_space(Vec2::new(sw, 34.0));
+    (value, clicked)
 }
 
-/// iOS-style toggle switch. Returns true if the value changed.
-pub fn toggle_switch(ui: &mut Ui, label: &str, value: &mut bool, theme: &FortrustTheme) -> bool {
-    let green = Color32::from_rgb(92, 170, 111);
-    let gray = Color32::from_rgba_unmultiplied(120, 120, 130, 80);
-    let pill_w = 44.0;
-    let pill_h = 24.0;
-    let knob_r = 10.0;
-    let padding = 2.0;
+fn toggle_row_ui(ui: &mut egui::Ui, theme: &FortrustTheme, label: &str, mut value: bool, sx: f32, sw: f32) -> bool {
+    let y = ui.cursor().min.y;
+    let rect = Rect::from_min_size(Pos2::new(sx, y), Vec2::new(sw, 36.0));
+    ui.painter().text(Pos2::new(rect.min.x, rect.center().y), egui::Align2::LEFT_CENTER, label, egui::FontId::proportional(12.5), theme.text_secondary);
 
-    ui.horizontal(|ui| {
-        ui.add_space(4.0);
-        let resp = ui.allocate_response(Vec2::new(pill_w, pill_h), egui::Sense::click());
-        let rect = resp.rect;
-        let is_on = *value;
+    let tr = Rect::from_min_size(Pos2::new(rect.max.x - 48.0, rect.center().y - 11.0), Vec2::new(38.0, 22.0));
+    let bg = if value { theme.accent_primary } else { Color32::from_rgb(50, 57, 73) };
+    ui.painter().rect_filled(tr, CornerRadius::same(11), bg);
+    let kx = if value { tr.max.x - 19.0 } else { tr.min.x + 3.0 };
+    ui.painter().circle_filled(Pos2::new(kx + 8.0, tr.center().y), 8.0, Color32::WHITE);
 
-        // Pill background
-        let bg_color = if is_on { green } else { gray };
-        ui.painter().rect_filled(rect, CornerRadius::same(12), bg_color);
+    if ui.allocate_rect(rect, egui::Sense::click()).clicked() { value = !value; }
+    ui.allocate_space(Vec2::new(sw, 40.0));
+    value
+}
 
-        // Knob
-        let knob_x = if is_on {
-            rect.right() - padding - knob_r * 2.0
-        } else {
-            rect.left() + padding
-        };
-        let knob_center = egui::Pos2::new(knob_x + knob_r, rect.center().y);
-        ui.painter().circle_filled(knob_center, knob_r, Color32::WHITE);
+fn show_more_btn_ui(ui: &mut egui::Ui, theme: &FortrustTheme, label: &str, sx: f32, sw: f32) -> bool {
+    let y = ui.cursor().min.y;
+    let rect = Rect::from_min_size(Pos2::new(sx, y), Vec2::new(sw, 24.0));
+    ui.painter().text(Pos2::new(rect.min.x, rect.center().y), egui::Align2::LEFT_CENTER, label, egui::FontId::proportional(12.0), theme.accent_primary);
+    let clicked = ui.allocate_rect(rect, egui::Sense::click()).clicked();
+    ui.allocate_space(Vec2::new(sw, 30.0));
+    // If clicked, return the inverse of the current visual state
+    clicked
+}
 
-        if resp.clicked() {
-            *value = !*value;
-        }
-
-        ui.add_space(8.0);
-        ui.label(
-            egui::RichText::new(label)
-                .size(13.0)
-                .color(theme.text_primary),
-        );
-    })
-    .response
-    .clicked()
+fn add_ext_btn_ui(ui: &mut egui::Ui, theme: &FortrustTheme, sx: f32, sw: f32) {
+    let y = ui.cursor().min.y;
+    let rect = Rect::from_min_size(Pos2::new(sx, y), Vec2::new(sw, 30.0));
+    let hovered = ui.rect_contains_pointer(rect);
+    let bg = if hovered { theme.surface_card } else { theme.surface_deepest };
+    ui.painter().rect_filled(rect, CornerRadius::same(20), bg);
+    ui.painter().rect_stroke(rect, CornerRadius::same(20), Stroke::new(1.0, Color32::from_rgb(50, 57, 73)), egui::StrokeKind::Inside);
+    ui.painter().text(rect.center(), egui::Align2::CENTER_CENTER, "Add extension", egui::FontId::proportional(12.0), theme.text_primary);
+    let _ = ui.allocate_rect(rect, egui::Sense::click());
+    ui.allocate_space(Vec2::new(sw, 40.0));
 }

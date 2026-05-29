@@ -95,6 +95,34 @@ impl BincodeCodec {
         buffer.advance(total_len);
         Ok(Some((message, total_len)))
     }
+
+    pub fn read_raw_payload(
+        buffer: &mut BytesMut,
+    ) -> Result<Option<Vec<u8>>, CodecError> {
+        if buffer.len() < HEADER_SIZE {
+            return Ok(None);
+        }
+
+        let payload_len = u64::from_be_bytes([
+            buffer[0], buffer[1], buffer[2], buffer[3], buffer[4], buffer[5], buffer[6], buffer[7],
+        ]) as usize;
+
+        if payload_len > MAX_MESSAGE_SIZE {
+            return Err(CodecError::MessageTooLarge {
+                size: payload_len,
+                max: MAX_MESSAGE_SIZE,
+            });
+        }
+
+        let total_len = HEADER_SIZE + payload_len;
+        if buffer.len() < total_len {
+            return Ok(None);
+        }
+
+        let payload = buffer[HEADER_SIZE..total_len].to_vec();
+        buffer.advance(total_len);
+        Ok(Some(payload))
+    }
 }
 
 impl FramedMessage {

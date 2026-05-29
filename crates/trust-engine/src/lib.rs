@@ -8,7 +8,7 @@ use url::Url;
 pub use fortrust_layout::Rect as EngineRect;
 pub use fortrust_paint::{DisplayCommand, DisplayList};
 pub use fortrust_renderer::Viewport;
-pub use fortrust_style::Color;
+pub use fortrust_style::{BorderStyle, Color, OutlineStyle};
 
 pub const TRUST_ENGINE_NAME: &str = "Trust Engine";
 pub const TRUST_ENGINE_VERSION: &str = env!("CARGO_PKG_VERSION");
@@ -60,6 +60,7 @@ pub struct SecurityReport {
 }
 
 impl SecurityReport {
+    #[allow(clippy::too_many_arguments)]
     fn for_render(
         source: PageSource,
         body_bytes: usize,
@@ -723,6 +724,30 @@ mod tests {
         assert!(page.security.sandboxed_static_render);
         assert!(page.security.body_bytes > 0);
         assert!(page.security.display_commands > 0);
+    }
+
+    #[test]
+    fn renders_borders_through_full_pipeline() {
+        let page = TrustEngine::offline()
+            .render_html(
+                "trust://test",
+                r#"<div style="border: 3px solid #00ff00; width: 100px; height: 60px;">Green border</div>"#,
+                &[],
+                Viewport { width: 320.0, height: 200.0 },
+            )
+            .unwrap();
+
+        let has_border = page.rendered.display_list.commands().iter().any(|command| {
+            matches!(
+                command,
+                DisplayCommand::DrawBorder {
+                    top_width,
+                    top_color: Color { r: 0, g: 255, b: 0, a: 255 },
+                    ..
+                } if *top_width > 0.0
+            )
+        });
+        assert!(has_border, "Full pipeline: CSS border should produce DrawBorder command");
     }
 
     #[test]

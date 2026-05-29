@@ -215,6 +215,17 @@ impl TabManager {
         report
     }
 
+    pub fn reorder_tab(&mut self, id: TabId, new_index: usize) -> bool {
+        let Some(old_index) = self.tabs.iter().position(|tab| tab.id == id) else {
+            return false;
+        };
+        let new_index = new_index.min(self.tabs.len() - 1);
+        if old_index == new_index { return true; }
+        let tab = self.tabs.remove(old_index);
+        self.tabs.insert(new_index, tab);
+        true
+    }
+
     pub fn enforce_memory_policy(&mut self) {
         self.suspend_stale_background_tabs();
         self.limit_warm_tabs();

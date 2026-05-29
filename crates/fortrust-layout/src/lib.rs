@@ -321,6 +321,21 @@ fn layout_block_box(
         return 0.0;
     }
 
+    // Compute relative positioning offset (applied to rect after layout)
+    let (rel_dx, rel_dy) = if layout_box.style.position == fortrust_style::Position::Relative {
+        let cb_w = containing_block.map(|c| c.width).unwrap_or(available_width);
+        let cb_h = containing_block.map(|c| c.height).unwrap_or(available_width);
+        let left = layout_box.style.left.to_px(line_height_px, cb_w, 16.0);
+        let right = layout_box.style.right.to_px(line_height_px, cb_w, 16.0);
+        let top = layout_box.style.top.to_px(line_height_px, cb_h, 16.0);
+        let bottom = layout_box.style.bottom.to_px(line_height_px, cb_h, 16.0);
+        let dx = if left != 0.0 { left } else { -right };
+        let dy = if top != 0.0 { top } else { -bottom };
+        (dx, dy)
+    } else {
+        (0.0, 0.0)
+    };
+
     let content_width =
         box_width - layout_box.padding.horizontal() - layout_box.border.horizontal();
 
@@ -353,8 +368,8 @@ fn layout_block_box(
             .to_px(line_height_px, pb_width, 16.0)
             .max(line_height_px_if_leaf(layout_box, line_height_px));
         layout_box.rect = Rect {
-            x: used_x,
-            y,
+            x: used_x + rel_dx,
+            y: y + rel_dy,
             width: box_width,
             height,
         };
@@ -376,8 +391,8 @@ fn layout_block_box(
             line_height_px,
         );
         layout_box.rect = Rect {
-            x: used_x,
-            y,
+            x: used_x + rel_dx,
+            y: y + rel_dy,
             width: box_width,
             height: h,
         };
@@ -391,8 +406,8 @@ fn layout_block_box(
     if layout_box.kind == BoxKind::Inline {
         layout_inline_children(layout_box, child_x(layout_box, x), child_y, line_height_px);
         layout_box.rect = Rect {
-            x: used_x,
-            y,
+            x: used_x + rel_dx,
+            y: y + rel_dy,
             width: box_width,
             height: line_height_px,
         };
@@ -402,8 +417,8 @@ fn layout_block_box(
     if layout_box.kind == BoxKind::Replaced {
         let (rw, rh) = layout_box.replaced_size.unwrap_or((300.0, 150.0));
         layout_box.rect = Rect {
-            x: used_x,
-            y,
+            x: used_x + rel_dx,
+            y: y + rel_dy,
             width: rw,
             height: rh,
         };
@@ -488,8 +503,8 @@ fn layout_block_box(
         total_content_h
     };
     layout_box.rect = Rect {
-        x: used_x,
-        y,
+        x: used_x + rel_dx,
+        y: y + rel_dy,
         width: box_width,
         height: final_h,
     };
@@ -600,9 +615,14 @@ fn layout_inline_children(layout_box: &mut LayoutBox, x: f32, y: f32, line_heigh
 
 fn intrinsic_inline_width(layout_box: &LayoutBox, line_height_px: f32) -> f32 {
     if layout_box.kind == BoxKind::Text {
+        let font_size = layout_box.style.font_size.to_px(line_height_px, 1280.0, 16.0);
+        let letter_spacing = layout_box.style.letter_spacing.to_px(line_height_px, 1280.0, 16.0);
+        let word_spacing = layout_box.style.word_spacing.to_px(line_height_px, 1280.0, 16.0);
         text_width(
             layout_box.text.as_deref().unwrap_or_default(),
-            line_height_px,
+            font_size,
+            letter_spacing,
+            word_spacing,
         )
     } else if layout_box.kind == BoxKind::Replaced {
         layout_box
@@ -619,8 +639,17 @@ fn intrinsic_inline_width(layout_box: &LayoutBox, line_height_px: f32) -> f32 {
     }
 }
 
-fn text_width(text: &str, line_height_px: f32) -> f32 {
-    text.chars().count() as f32 * line_height_px * 0.5
+fn text_width(text: &str, font_size_px: f32, letter_spacing: f32, word_spacing: f32) -> f32 {
+    if text.is_empty() {
+        return 0.0;
+    }
+    let char_count = text.chars().count() as f32;
+    let word_count = text.split_whitespace().count().max(1) as f32;
+    // Average char width ≈ 0.55em for typical Latin text
+    let total_chars_width = char_count * font_size_px * 0.55;
+    let total_letter_spacing = char_count * letter_spacing;
+    let total_word_spacing = (word_count - 1.0) * word_spacing;
+    total_chars_width + total_letter_spacing + total_word_spacing
 }
 
 fn line_height_px_if_leaf(layout_box: &LayoutBox, line_height_px: f32) -> f32 {

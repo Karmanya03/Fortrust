@@ -1,7 +1,7 @@
 use fortrust_dom::{Document, DomArena, DomError, NodeRef, parse_html};
 use fortrust_layout::{LayoutConstraints, LayoutEngine, LayoutTree, Rect};
 use fortrust_paint::{DisplayList, PaintOptions, Painter};
-use fortrust_style::{StyleEngine, StyleError, Stylesheet};
+use fortrust_style::{Color, StyleEngine, StyleError, Stylesheet};
 
 #[derive(Debug, Clone, PartialEq)]
 pub enum RenderError {
@@ -73,6 +73,19 @@ impl StaticRenderer {
             style.add_stylesheet(Stylesheet::parse(css)?);
         }
 
+        // Determine viewport background: prefer html, then body, then transparent
+        let viewport_fill = document.first_element_by_tag("html")
+            .map(|n| style.compute_style(n, None))
+            .filter(|s| s.background_color.a > 0)
+            .map(|s| s.background_color)
+            .or_else(|| {
+                document.first_element_by_tag("body")
+                    .map(|n| style.compute_style(n, None))
+                    .filter(|s| s.background_color.a > 0)
+                    .map(|s| s.background_color)
+            })
+            .unwrap_or(Color::TRANSPARENT);
+
         let root = render_root(document).ok_or(RenderError::EmptyDocument)?;
         let layout = LayoutEngine::new(style)
             .layout(
@@ -84,6 +97,7 @@ impl StaticRenderer {
                 },
             )
             .ok_or(RenderError::EmptyDocument)?;
+
         let display_list = self.painter.paint(
             &layout,
             PaintOptions {
@@ -94,6 +108,7 @@ impl StaticRenderer {
                     height: viewport.height,
                 },
                 include_debug_borders: false,
+                viewport_fill,
             },
         );
 
@@ -218,5 +233,27 @@ mod tests {
                 ..
             } if text == "Styled"
         )));
+    }
+
+    #[test]
+    fn renders_borders_from_css() {
+        let page = StaticRenderer::new()
+            .render(
+                r#"<body><div style="border: 2px dashed #ff0000; width: 80px; height: 40px;">Box</div></body>"#,
+                &[],
+                Viewport {
+                    width: 320.0,
+                    height: 240.0,
+                },
+            )
+            .unwrap();
+
+        let has_border = page.display_list.commands().iter().any(|cmd| {
+            matches!(
+                cmd,
+                DisplayCommand::DrawBorder { top_width, .. } if *top_width > 0.0
+            )
+        });
+        assert!(has_border, "Expected DrawBorder command from CSS border property");
     }
 }

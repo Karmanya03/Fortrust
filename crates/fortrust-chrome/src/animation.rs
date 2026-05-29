@@ -1,9 +1,7 @@
-/// A single animated value that smoothly interpolates toward a target.
-/// Call `.tick(dt)` each frame, then use `.value()` as the current state.
 pub struct Animated {
     current: f32,
     target: f32,
-    speed: f32, // Higher = faster. Typical: 8.0 for snappy, 4.0 for smooth
+    speed: f32,
 }
 
 impl Animated {
@@ -19,16 +17,16 @@ impl Animated {
         self.target = target;
     }
 
-    /// Advance the animation by `dt` seconds. Returns true if still animating.
-    /// Use exponential decay (feel): current += (target - current) * (1 - e^(-speed*dt))
     pub fn tick(&mut self, dt: f32) -> bool {
         let delta = self.target - self.current;
         if delta.abs() < 0.001 {
             self.current = self.target;
             return false;
         }
-        // Exponential ease-out: feels physical, no overshoot
-        self.current += delta * (1.0 - (-self.speed * dt).exp());
+        // Custom cubic bezier approximation: ease-out quart
+        let t = (1.0 - (-self.speed * dt).exp()).min(1.0);
+        let eased = 1.0 - (1.0 - t).powf(3.5);
+        self.current += delta * eased;
         true
     }
 
@@ -41,17 +39,15 @@ impl Animated {
     }
 }
 
-/// Animates a tab's visual state (width, opacity, y-offset for slide-in)
 #[allow(dead_code)]
 pub struct TabAnimation {
-    pub width: Animated,   // 0.0 → 1.0 (proportion of full tab width)
-    pub opacity: Animated, // 0.0 → 1.0
-    pub slide_y: Animated, // Pixels offset from final position (slide-in from below)
+    pub width: Animated,
+    pub opacity: Animated,
+    pub slide_y: Animated,
 }
 
 #[allow(dead_code)]
 impl TabAnimation {
-    /// Creates an animation in the "opening" state (starts hidden, animates to visible)
     pub fn opening() -> Self {
         let mut anim = Self {
             width: Animated::new(0.0, 10.0),
@@ -64,7 +60,6 @@ impl TabAnimation {
         anim
     }
 
-    /// Triggers the "closing" animation. Check `is_closed()` to know when to remove the tab.
     pub fn begin_close(&mut self) {
         self.width.set_target(0.0);
         self.opacity.set_target(0.0);
@@ -81,40 +76,50 @@ impl TabAnimation {
     }
 }
 
-/// Sidebar expand/collapse animation
 pub struct SidebarAnimation {
-    pub width: Animated, // Between SIDEBAR_COLLAPSED_W and SIDEBAR_EXPANDED_W
+    pub overlay_offset: Animated,
 }
 
-pub const SIDEBAR_COLLAPSED_W: f32 = 52.0;
-pub const SIDEBAR_EXPANDED_W: f32 = 220.0;
+pub const SIDEBAR_COLLAPSED_W: f32 = 0.0;
+pub const SIDEBAR_EXPANDED_W: f32 = 386.0;
 
 impl SidebarAnimation {
     pub fn new() -> Self {
         Self {
-            width: Animated::new(SIDEBAR_COLLAPSED_W, 9.0),
+            overlay_offset: Animated::new(SIDEBAR_COLLAPSED_W, 9.0),
         }
     }
 
-    pub fn expand(&mut self) {
-        self.width.set_target(SIDEBAR_EXPANDED_W);
+    pub fn open(&mut self) {
+        self.overlay_offset.set_target(SIDEBAR_EXPANDED_W);
     }
 
-    pub fn collapse(&mut self) {
-        self.width.set_target(SIDEBAR_COLLAPSED_W);
+    pub fn close(&mut self) {
+        self.overlay_offset.set_target(SIDEBAR_COLLAPSED_W);
+    }
+
+    pub fn toggle(&mut self) {
+        if self.overlay_offset.value() < 1.0 {
+            self.open();
+        } else {
+            self.close();
+        }
+    }
+
+    pub fn is_open(&self) -> bool {
+        self.overlay_offset.value() > 1.0
     }
 
     pub fn tick(&mut self, dt: f32) {
-        self.width.tick(dt);
+        self.overlay_offset.tick(dt);
+    }
+
+    pub fn current_offset(&self) -> f32 {
+        self.overlay_offset.value()
     }
 
     pub fn current_width(&self) -> f32 {
-        self.width.value()
-    }
-
-    pub fn label_opacity(&self) -> f32 {
-        let t = (self.width.value() - SIDEBAR_COLLAPSED_W) / (SIDEBAR_EXPANDED_W - SIDEBAR_COLLAPSED_W);
-        ((t - 0.7) / 0.3).clamp(0.0, 1.0)
+        self.overlay_offset.value()
     }
 }
 
@@ -123,4 +128,3 @@ impl Default for SidebarAnimation {
         Self::new()
     }
 }
-
