@@ -139,6 +139,10 @@ impl JsRuntime {
         if self.registry.dom_bridge_enabled {
             bindings::dom_api::register(&mut self.context, document)?;
         }
+        // Expose `document.title` as a proper accessor that delegates to getTitle/setTitle.
+        let _ = self.eval(
+            "Object.defineProperty(document, 'title', { get() { return this.getTitle(); }, set(v) { this.setTitle(v); }, configurable: true, enumerable: true });",
+        );
         Ok(())
     }
 

@@ -122,6 +122,12 @@ dependencies = [
 ]
 
 [[package]]
+name = "anyhow"
+version = "1.0.102"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "7f202df86484c868dbad7eaa557ef785d5c66295e41b460ef922eca0723b842c"
+
+[[package]]
 name = "arboard"
 version = "3.6.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1128,6 +1134,7 @@ dependencies = [
  "eframe",
  "egui",
  "fortrust-core",
+ "fortrust-ipc",
  "fortrust-search",
  "fortrust-storage",
  "futures-util",
@@ -1166,12 +1173,12 @@ dependencies = [
 
 [[package]]
 name = "fortrust-ipc"
-version = "0.0.1"
+version = "0.1.0"
 dependencies = [
  "bincode",
  "bytes",
  "serde",
- "thiserror 2.0.18",
+ "thiserror 1.0.69",
  "tokio",
  "tracing",
 ]
@@ -1186,6 +1193,7 @@ dependencies = [
  "fortrust-core",
  "fortrust-dom",
  "fortrust-net",
+ "lazy_static",
  "serde",
  "serde_json",
  "thiserror 2.0.18",
@@ -1590,7 +1598,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "55d958c2f74b664487a2035fe1dadb032c48718a03b63f3ab0b8537db8549ed4"
 dependencies = [
  "log",
- "markup5ever",
+ "markup5ever 0.35.0",
  "match_token",
 ]
 
@@ -2226,6 +2234,20 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "62bb907fe88d54d8d9ce32a3cceab4218ed2f6b7d35617cafe9adf84e43919cb"
 dependencies = [
  "libc",
+]
+
+[[package]]
+name = "markup5ever"
+version = "0.14.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "c7a7213d12e1864c0f002f52c2923d4556935a43dec5e71355c2760e0f6e7a18"
+dependencies = [
+ "log",
+ "phf",
+ "phf_codegen",
+ "string_cache",
+ "string_cache_codegen",
+ "tendril",
 ]
 
 [[package]]
@@ -4182,8 +4204,9 @@ dependencies = [
 
 [[package]]
 name = "trust-engine"
-version = "0.0.1"
+version = "0.1.0"
 dependencies = [
+ "anyhow",
  "bytes",
  "fortrust-core",
  "fortrust-dom",
@@ -4195,7 +4218,11 @@ dependencies = [
  "fortrust-style",
  "futures-executor",
  "futures-util",
+ "html5ever",
  "http",
+ "markup5ever 0.14.1",
+ "percent-encoding",
+ "serde",
  "tracing",
  "url",
 ]

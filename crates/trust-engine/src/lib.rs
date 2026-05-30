@@ -1,3 +1,5 @@
+//! Trust engine facade and rendering orchestration.
+
 use fortrust_core::{PrivacyConfig, PrivacyEngine, RequestContext, ResourceType};
 use fortrust_dom::{DomArena, NodeRef, parse_html};
 use fortrust_net::{FetchSource, NetworkClient, NetworkError};
@@ -251,11 +253,11 @@ impl TrustEngine {
         external_images_blocked: usize,
     ) -> Result<EnginePage, EngineError> {
         let javascript_enabled = self.javascript_enabled && cfg!(feature = "javascript");
-        let rendered = if javascript_enabled {
-            render_with_javascript(html, author_css, viewport, &url)?
-        } else {
-            self.renderer.render(html, author_css, viewport)?
-        };
+        let (rendered, js_title_opt) = if javascript_enabled {
+                render_with_javascript(html, author_css, viewport, &url)?
+            } else {
+                (self.renderer.render(html, author_css, viewport)?, None)
+            };
         let security = SecurityReport::for_render(
             source,
             html.len(),
@@ -266,8 +268,11 @@ impl TrustEngine {
             external_images_loaded,
             external_images_blocked,
         );
+        let title = js_title_opt
+            .unwrap_or_else(|| title_from_html_or_url(html, &url));
+
         Ok(EnginePage {
-            title: title_from_html_or_url(html, &url),
+            title,
             url,
             rendered,
             security,
@@ -281,7 +286,7 @@ fn render_with_javascript(
     author_css: &[&str],
     viewport: Viewport,
     url: &str,
-) -> Result<fortrust_renderer::RenderedPage, EngineError> {
+) -> Result<(fortrust_renderer::RenderedPage, Option<String>), EngineError> {
     use fortrust_dom::DomArena;
     use fortrust_js::{EventLoop, JsRuntime, WebApiRegistry};
 
@@ -305,8 +310,15 @@ fn render_with_javascript(
         }
     }
 
+    // If scripts mutated the document title via our bindings, try to read it back.
+    let js_title = match js.eval("document.getTitle()") {
+        Ok(val) => val.to_string(js.context()).ok().map(|s| s.to_std_string_escaped()),
+        Err(_) => None,
+    };
+
     let renderer = fortrust_renderer::StaticRenderer::new();
-    Ok(renderer.render_document(&document, author_css, viewport)?)
+    let rendered = renderer.render_document(&document, author_css, viewport)?;
+    Ok((rendered, js_title))
 }
 
 #[cfg(not(feature = "javascript"))]

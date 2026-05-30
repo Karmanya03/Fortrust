@@ -39,6 +39,25 @@ impl FilterListProvider {
         }
     }
 
+    /// Load host-based blocklist entries from a hosts-format byte slice.
+    /// Lines starting with '#' are ignored. Each remaining non-empty token is treated as a blocked host.
+    pub fn load_hosts_from_bytes(&mut self, bytes: &[u8]) {
+        if let Ok(text) = std::str::from_utf8(bytes) {
+            for line in text.lines() {
+                let line = line.trim();
+                if line.is_empty() || line.starts_with('#') { continue; }
+                // hosts files often have: 0.0.0.0 domain.com
+                let parts: Vec<&str> = line.split_whitespace().collect();
+                if let Some(host) = parts.last() {
+                    let host = host.trim().trim_start_matches('.');
+                    if !host.is_empty() && !host.contains('/') && !host.contains(':') {
+                        self.host_based.insert(CompactString::from(host));
+                    }
+                }
+            }
+        }
+    }
+
     pub fn check_url(&self, url: &str, _source_url: &str, _resource_type: &str) -> BlockerDecision {
         if self.is_allowlisted(url) {
             return BlockerDecision::Allow;

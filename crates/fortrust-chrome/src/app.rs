@@ -1,6 +1,9 @@
 use std::collections::HashMap;
+use std::path::PathBuf;
 use std::sync::mpsc::{self, Receiver, Sender};
+use std::process::{Command, Stdio};
 use std::thread;
+use std::io::ErrorKind;
 use std::time::Duration;
 
 use chrono::Utc;
@@ -92,7 +95,7 @@ const SETTINGS_PRIVACY_GPC: &str = "chrome.privacy.global_privacy_control";
 const SETTINGS_PRIVACY_DNT: &str = "chrome.privacy.do_not_track";
 const SETTINGS_PRIVACY_FINGERPRINT: &str = "chrome.privacy.fingerprint_noise";
 
-#[derive(Debug, Default)]
+#[derive(Default)]
 struct TabPageState {
     page: Option<EnginePage>,
     load_error: Option<String>,
@@ -100,6 +103,7 @@ struct TabPageState {
     request_id: Option<u64>,
     history: Vec<String>,
     history_index: usize,
+    renderer_frame: Option<egui::TextureHandle>,
 }
 
 impl TabPageState {
@@ -150,6 +154,7 @@ impl TabPageState {
         self.load_error = None;
         self.loading_url = Some(url);
         self.request_id = Some(request_id);
+        self.renderer_frame = None;
     }
 
     fn finish_load(&mut self, request_id: u64, page: EnginePage) -> bool {
@@ -159,6 +164,7 @@ impl TabPageState {
         self.load_error = None;
         self.loading_url = None;
         self.request_id = None;
+        self.renderer_frame = None;
         true
     }
 
@@ -168,6 +174,7 @@ impl TabPageState {
         self.load_error = Some(error);
         self.loading_url = None;
         self.request_id = None;
+        self.renderer_frame = None;
         true
     }
 
@@ -176,6 +183,7 @@ impl TabPageState {
         self.load_error = None;
         self.loading_url = None;
         self.request_id = None;
+        self.renderer_frame = None;
     }
 }
 
@@ -183,6 +191,7 @@ struct EngineWorker {
     sender: Sender<EngineCommand>,
     receiver: Receiver<EngineEvent>,
     next_request_id: u64,
+    ipc_sender: Option<fortrust_ipc::MessageSender>,
 }
 
 enum EngineCommand {
@@ -192,12 +201,22 @@ enum EngineCommand {
 enum EngineEvent {
     Loaded { request_id: u64, page: Box<EnginePage> },
     Failed { request_id: u64, url: String, error: String },
+    RendererMsg { msg: fortrust_ipc::RendererToBrowser },
 }
 
 impl EngineWorker {
     fn spawn(privacy: PrivacyConfig) -> Self {
         let (command_sender, command_receiver) = mpsc::channel();
         let (event_sender, event_receiver) = mpsc::channel();
+
+        let ipc_sender = if let Some((sender, receiver)) = try_connect_external_renderer() {
+            spawn_renderer_event_forwarder(receiver, event_sender.clone());
+            sender
+        } else {
+            let (ipc_a, ipc_b) = fortrust_ipc::create_ipc_pair();
+            spawn_basic_renderer_loop(ipc_b.receiver().clone(), ipc_b.sender().clone());
+            ipc_a.sender().clone()
+        };
 
         thread::spawn(move || {
             let runtime = match tokio::runtime::Builder::new_current_thread()
@@ -226,15 +245,229 @@ impl EngineWorker {
             }
         });
 
-        Self { sender: command_sender, receiver: event_receiver, next_request_id: 1 }
+        Self { sender: command_sender, receiver: event_receiver, next_request_id: 1, ipc_sender: Some(ipc_sender) }
     }
 
     fn load(&mut self, url: String, viewport: Viewport) -> u64 {
         let request_id = self.next_request_id;
         self.next_request_id = self.next_request_id.saturating_add(1);
-        let _ = self.sender.send(EngineCommand::Load { request_id, url, viewport });
+        let url_clone = url.clone();
+        let _ = self.sender.send(EngineCommand::Load { request_id, url: url.clone(), viewport });
+        // Also send a navigation command to the renderer over IPC if available.
+        if let Some(sender) = &self.ipc_sender {
+            let sender = sender.clone();
+            let url_clone = url_clone;
+            let _ = std::thread::spawn(move || {
+                let rt = tokio::runtime::Builder::new_current_thread().enable_all().build();
+                if let Ok(rt) = rt {
+                    rt.block_on(async move {
+                        let _ = sender.send_browser_message(&fortrust_ipc::BrowserToRenderer::Navigate { url: url_clone }).await;
+                    });
+                }
+            });
+        }
         request_id
     }
+}
+
+fn try_connect_external_renderer() -> Option<(fortrust_ipc::MessageSender, fortrust_ipc::MessageReceiver)> {
+    // Try several times to spawn/connect to an external renderer process.
+    let renderer_path = match find_renderer_binary() {
+        Some(p) => p,
+        None => return None,
+    };
+
+    for attempt in 0..3 {
+        let listener = match std::net::TcpListener::bind(("127.0.0.1", 0)) {
+            Ok(l) => l,
+            Err(_) => return None,
+        };
+        if listener.set_nonblocking(true).is_err() { return None; }
+        let addr = match listener.local_addr() { Ok(a) => a, Err(_) => return None };
+
+        let addr_arg = format!("{}:{}", addr.ip(), addr.port());
+
+        tracing::info!(target: "fortrust.renderer", "spawning renderer attempt {} -> {}", attempt + 1, renderer_path.display());
+        let mut child = match Command::new(&renderer_path)
+            .arg("--ipc-connect")
+            .arg(&addr_arg)
+            .stdin(Stdio::null())
+            .stdout(Stdio::inherit())
+            .stderr(Stdio::inherit())
+            .spawn()
+        {
+            Ok(c) => c,
+            Err(e) => { tracing::warn!(target: "fortrust.renderer", "failed spawn: {e}"); continue; }
+        };
+
+        // Wait for the renderer to connect, or fail/exit early.
+        let deadline = std::time::Instant::now() + Duration::from_secs(6 + attempt * 2);
+        let mut accepted = None;
+        while std::time::Instant::now() < deadline {
+            // If the child exited early, break and retry.
+            match child.try_wait() {
+                Ok(Some(status)) => {
+                    tracing::warn!(target: "fortrust.renderer", "renderer exited early: {:?}", status);
+                    break;
+                }
+                Ok(None) => {}
+                Err(e) => { tracing::warn!(target: "fortrust.renderer", "child status check failed: {e}"); break; }
+            }
+
+            match listener.accept() {
+                Ok((sock, _)) => { accepted = Some(sock); break; }
+                Err(error) if error.kind() == ErrorKind::WouldBlock => thread::sleep(Duration::from_millis(40)),
+                Err(e) => { tracing::warn!(target: "fortrust.renderer", "accept error: {e}"); break; }
+            }
+        }
+
+        if accepted.is_none() {
+            // Try to kill the child process if it's still running
+            let _ = child.kill();
+            continue;
+        }
+
+        let sock = accepted.unwrap();
+        if sock.set_nonblocking(true).is_err() { let _ = child.kill(); continue; }
+        if let Ok(stream) = tokio::net::TcpStream::from_std(sock) {
+            return Some(fortrust_ipc::create_tcp_endpoint(stream));
+        }
+    }
+
+    None
+}
+
+fn find_renderer_binary() -> Option<PathBuf> {
+    let mut candidates = Vec::new();
+
+    if let Ok(path) = std::env::var("CARGO_BIN_EXE_renderer") {
+        candidates.push(PathBuf::from(path));
+    }
+
+    if let Ok(current_exe) = std::env::current_exe() {
+        if let Some(dir) = current_exe.parent() {
+            candidates.push(dir.join(if cfg!(windows) { "renderer.exe" } else { "renderer" }));
+            candidates.push(dir.join("renderer"));
+        }
+    }
+
+    if let Ok(current_dir) = std::env::current_dir() {
+        for profile in ["debug", "release"] {
+            candidates.push(current_dir.join("target").join(profile).join(if cfg!(windows) { "renderer.exe" } else { "renderer" }));
+        }
+    }
+
+    candidates.into_iter().find(|candidate| candidate.exists())
+}
+
+fn spawn_basic_renderer_loop(receiver: fortrust_ipc::MessageReceiver, sender: fortrust_ipc::MessageSender) {
+    thread::spawn(move || {
+        let rt = match tokio::runtime::Builder::new_current_thread().enable_all().build() {
+            Ok(runtime) => runtime,
+            Err(_) => return,
+        };
+
+        rt.block_on(async move {
+            loop {
+                match receiver.recv_browser_message().await {
+                    Ok(msg) => match msg {
+                        fortrust_ipc::BrowserToRenderer::Navigate { url } => {
+                            let reply = fortrust_ipc::RendererToBrowser::TitleChanged { title: url };
+                            let _ = sender.send_renderer_message(&reply).await;
+                        }
+                        fortrust_ipc::BrowserToRenderer::ExecuteScript { js } => {
+                            let reply = fortrust_ipc::RendererToBrowser::ConsoleMessage {
+                                level: "info".into(),
+                                message: format!("executed script: {js}"),
+                            };
+                            let _ = sender.send_renderer_message(&reply).await;
+                        }
+                        fortrust_ipc::BrowserToRenderer::Resize { width, height } => {
+                            let reply = fortrust_ipc::RendererToBrowser::LoadProgress {
+                                percent: 1.0,
+                                state: fortrust_ipc::LoadState::Loaded,
+                            };
+                            let _ = sender.send_renderer_message(&reply).await;
+                            let frame = generate_basic_frame(width, height, &format!("{}x{}", width, height));
+                            let _ = sender.send_renderer_message(&fortrust_ipc::RendererToBrowser::FrameReady {
+                                texture_data: frame,
+                                width,
+                                height,
+                                stride: width.saturating_mul(4),
+                            }).await;
+                        }
+                        fortrust_ipc::BrowserToRenderer::Shutdown => break,
+                        _ => {}
+                    },
+                    Err(_) => break,
+                }
+            }
+        });
+    });
+}
+
+fn spawn_renderer_event_forwarder(receiver: fortrust_ipc::MessageReceiver, event_sender: Sender<EngineEvent>) {
+    thread::spawn(move || {
+        let rt = match tokio::runtime::Builder::new_current_thread().enable_all().build() {
+            Ok(runtime) => runtime,
+            Err(_) => return,
+        };
+
+        rt.block_on(async move {
+            loop {
+                match receiver.recv_renderer_message().await {
+                    Ok(msg) => {
+                        let _ = event_sender.send(EngineEvent::RendererMsg { msg });
+                    }
+                    Err(_) => break,
+                }
+            }
+        });
+    });
+}
+
+fn generate_basic_frame(width: u32, height: u32, label: &str) -> Vec<u8> {
+    let width = width.max(1) as usize;
+    let height = height.max(1) as usize;
+    let mut pixels = vec![0u8; width * height * 4];
+
+    for y in 0..height {
+        for x in 0..width {
+            let idx = (y * width + x) * 4;
+            let t = y as f32 / height as f32;
+            pixels[idx] = (14.0 + 18.0 * t) as u8;
+            pixels[idx + 1] = (17.0 + 22.0 * t) as u8;
+            pixels[idx + 2] = (20.0 + 28.0 * t) as u8;
+            pixels[idx + 3] = 255;
+        }
+    }
+
+    let bar_height = (height as f32 * 0.16).max(24.0) as usize;
+    for y in 0..bar_height.min(height) {
+        for x in 0..width {
+            let idx = (y * width + x) * 4;
+            pixels[idx] = 28;
+            pixels[idx + 1] = 33;
+            pixels[idx + 2] = 40;
+            pixels[idx + 3] = 255;
+        }
+    }
+
+    let text_width = label.len().saturating_mul(7).min(width.saturating_sub(16));
+    let text_height = 12usize.min(height.saturating_sub(16));
+    let start_x = 8usize.min(width.saturating_sub(1));
+    let start_y = (bar_height / 2).saturating_sub(text_height / 2);
+    for y in 0..text_height {
+        for x in 0..text_width {
+            let idx = ((start_y + y).min(height - 1) * width + (start_x + x).min(width - 1)) * 4;
+            pixels[idx] = 77;
+            pixels[idx + 1] = 159;
+            pixels[idx + 2] = 255;
+            pixels[idx + 3] = 255;
+        }
+    }
+
+    pixels
 }
 
 fn drain_failed_worker(
@@ -404,6 +637,86 @@ impl FortrustApp {
     fn refresh_theme(&mut self, ctx: &Context) {
         self.theme = Self::theme_for_mode(&self.config.ui.theme, self.config.ui.glass_strength);
         apply_egui_style(ctx, &self.theme, &self.config.ui);
+    }
+
+    fn apply_renderer_message(&mut self, ctx: &Context, tab_id: TabId, msg: fortrust_ipc::RendererToBrowser) {
+        let is_active = self.active_tab_id() == Some(tab_id);
+
+        match msg {
+            fortrust_ipc::RendererToBrowser::TitleChanged { title }
+            | fortrust_ipc::RendererToBrowser::DocumentTitleChanged { title } => {
+                if let Some(tab) = self.tab_pages.get_mut(&tab_id) {
+                    if let Some(page) = tab.page.as_mut() {
+                        page.title = title.clone();
+                    }
+                    if let Some(current_url) = tab.current_url().map(str::to_owned) {
+                        self.tabs.navigate_tab(tab_id, current_url, title);
+                    }
+                }
+            }
+            fortrust_ipc::RendererToBrowser::UrlChanged { url } => {
+                if let Some(tab) = self.tab_pages.get_mut(&tab_id) {
+                    tab.replace_history(url.clone());
+                }
+                if is_active {
+                    self.omnibox.text = url;
+                }
+            }
+            fortrust_ipc::RendererToBrowser::LoadProgress { percent: _, state } => {
+                if matches!(state, fortrust_ipc::LoadState::Loaded) {
+                    if let Some(tab) = self.tab_pages.get_mut(&tab_id) {
+                        tab.loading_url = None;
+                    }
+                }
+            }
+            fortrust_ipc::RendererToBrowser::LoadComplete => {
+                if let Some(tab) = self.tab_pages.get_mut(&tab_id) {
+                    tab.loading_url = None;
+                }
+            }
+            fortrust_ipc::RendererToBrowser::FrameReady { texture_data, width, height, stride } => {
+                if let Some(rgba) = frame_bytes_to_rgba(&texture_data, width, height, stride) {
+                    let image = egui::ColorImage::from_rgba_unmultiplied([width as usize, height as usize], &rgba);
+                    let tex_name = format!("fortrust-renderer-frame-{}", tab_id.0);
+                    let texture = ctx.load_texture(&tex_name, image, egui::TextureOptions::LINEAR);
+                    if let Some(tab) = self.tab_pages.get_mut(&tab_id) {
+                        // Drop previous texture handle (frees GPU resource) before replacing
+                        if let Some(prev) = tab.renderer_frame.replace(texture) {
+                            drop(prev);
+                        }
+                    }
+                }
+            }
+            fortrust_ipc::RendererToBrowser::NavigationStart { url } => {
+                if let Some(tab) = self.tab_pages.get_mut(&tab_id) {
+                    tab.loading_url = Some(url);
+                }
+            }
+            fortrust_ipc::RendererToBrowser::NavigationError { url: _, error } => {
+                if let Some(tab) = self.tab_pages.get_mut(&tab_id) {
+                    tab.load_error = Some(error);
+                    tab.loading_url = None;
+                }
+            }
+            fortrust_ipc::RendererToBrowser::ConsoleMessage { level, message } => {
+                tracing::info!(target: "fortrust.renderer", level = %level, message = %message);
+            }
+            fortrust_ipc::RendererToBrowser::PrivacyEvent { event } => {
+                tracing::info!(target: "fortrust.renderer", ?event);
+            }
+            fortrust_ipc::RendererToBrowser::RendererCrashed { reason } => {
+                tracing::error!(target: "fortrust.renderer", %reason);
+            }
+            fortrust_ipc::RendererToBrowser::ShutdownAck
+            | fortrust_ipc::RendererToBrowser::FaviconUpdated { .. }
+            | fortrust_ipc::RendererToBrowser::Alert { .. }
+            | fortrust_ipc::RendererToBrowser::NewTabRequested { .. }
+            | fortrust_ipc::RendererToBrowser::DownloadRequested { .. }
+            | fortrust_ipc::RendererToBrowser::ScrollPosition { .. }
+            | fortrust_ipc::RendererToBrowser::MemoryUsage { .. } => {}
+        }
+
+        ctx.request_repaint();
     }
 
     fn motion_scale(&self) -> f32 {
@@ -615,6 +928,11 @@ impl FortrustApp {
                     let err_msg = error.clone();
                     let accepted = self.tab_state_mut(tab_id).fail_load(request_id, error);
                     if accepted { tracing::warn!("Load failed for {}: {}", url, err_msg); }
+                }
+                EngineEvent::RendererMsg { msg } => {
+                    if let Some(tab_id) = self.active_tab_id() {
+                        self.apply_renderer_message(ctx, tab_id, msg);
+                    }
                 }
             }
         }
@@ -1188,6 +1506,18 @@ impl FortrustApp {
             return;
         }
 
+        if let Some(texture) = self.tab_pages.get(&tab_id).and_then(|s| s.renderer_frame.as_ref()) {
+            let size = texture.size_vec2();
+            let (rect, _) = ui.allocate_exact_size(size, egui::Sense::hover());
+            ui.painter().image(
+                texture.id(),
+                rect,
+                Rect::from_min_max(Pos2::new(0.0, 0.0), Pos2::new(1.0, 1.0)),
+                Color32::WHITE,
+            );
+            return;
+        }
+
         let viewport = Viewport {
             width: ui.available_width().max(320.0),
             height: ui.available_height().max(240.0),
@@ -1453,6 +1783,36 @@ impl eframe::App for FortrustApp {
                 });
         }
     }
+
+}
+
+fn frame_bytes_to_rgba(texture_data: &[u8], width: u32, height: u32, stride: u32) -> Option<Vec<u8>> {
+    let width = width as usize;
+    let height = height as usize;
+    let stride = stride as usize;
+    let expected = width.checked_mul(height)?.checked_mul(4)?;
+
+    if stride == width.checked_mul(4)? && texture_data.len() == expected {
+        return Some(texture_data.to_vec());
+    }
+
+    if stride < width.checked_mul(4)? {
+        return None;
+    }
+
+    let mut rgba = vec![0u8; expected];
+    for row in 0..height {
+        let src_start = row.checked_mul(stride)?;
+        let src_end = src_start.checked_add(width.checked_mul(4)?)?;
+        let dst_start = row.checked_mul(width.checked_mul(4)?)?;
+        let dst_end = dst_start.checked_add(width.checked_mul(4)?)?;
+        if src_end > texture_data.len() || dst_end > rgba.len() {
+            return None;
+        }
+        rgba[dst_start..dst_end].copy_from_slice(&texture_data[src_start..src_end]);
+    }
+
+    Some(rgba)
 }
 
 fn apply_egui_style(ctx: &egui::Context, theme: &FortrustTheme, ui_config: &fortrust_core::UiConfig) {

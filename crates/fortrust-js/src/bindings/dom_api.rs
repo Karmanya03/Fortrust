@@ -4,6 +4,16 @@ use boa_engine::{
 };
 use fortrust_dom::Document;
 use tracing::debug;
+use std::collections::HashMap;
+use std::sync::Mutex;
+use crate::hooks;
+
+lazy_static::lazy_static! {
+    // Map document pointer address -> title string
+    static ref DOCUMENT_TITLES: Mutex<HashMap<usize, String>> = Mutex::new(HashMap::new());
+    // Per-node attribute overrides created by JS `setAttribute` calls.
+    static ref DOCUMENT_ATTR_OVERRIDES: Mutex<HashMap<usize, HashMap<String, String>>> = Mutex::new(HashMap::new());
+}
 
 pub fn register(context: &mut Context, document: &fortrust_dom::Document<'static>) -> JsResult<()> {
     let doc_obj = build_document_object(context, document)?;
@@ -114,6 +124,15 @@ fn build_document_object(
         })
     };
 
+    let initial_title = document
+        .first_element_by_tag("title")
+        .map(|n| n.text_content())
+        .unwrap_or_else(|| document.text_content())
+        .chars()
+        .take(80)
+        .collect::<String>();
+    let doc_ptr_usize = document as *const Document<'static> as usize;
+
     let obj = ObjectInitializer::new(context)
         .property(js_string!("title"), title_val, Attribute::all())
         .property(
@@ -143,6 +162,54 @@ fn build_document_object(
         .function(get_element_by_id_fn, js_string!("getElementById"), 1)
         .function(query_selector_fn, js_string!("querySelector"), 1)
         .function(create_element_fn, js_string!("createElement"), 1)
+        .function(
+            unsafe {
+                NativeFunction::from_closure(move |_this, _args, _ctx| {
+                    // getter for title
+                    let guard = DOCUMENT_TITLES.lock().unwrap();
+                    if let Some(title) = guard.get(&doc_ptr_usize) {
+                        Ok(JsValue::from(JsString::from(title.as_str())))
+                    } else {
+                        Ok(JsValue::from(JsString::from(initial_title.as_str())))
+                    }
+                })
+            },
+            js_string!("getTitle"),
+            0,
+        )
+        .function(
+            unsafe {
+                NativeFunction::from_closure(move |_this, args, ctx| {
+                    let new_title = args
+                        .first()
+                        .map(|v| v.to_string(ctx).map(|s| s.to_std_string_escaped()))
+                        .unwrap_or(Ok(String::new()))?;
+                    let mut guard = DOCUMENT_TITLES.lock().unwrap();
+                    guard.insert(doc_ptr_usize, new_title.clone());
+                        // notify host about title change
+                        hooks::notify_title_changed(new_title.clone());
+                    Ok(JsValue::undefined())
+                })
+            },
+            js_string!("setTitle"),
+            1,
+        )
+        .function(
+            unsafe {
+                NativeFunction::from_closure(move |_this, args, ctx| {
+                    // dispatchEvent(name)
+                    let name = args
+                        .first()
+                        .map(|v| v.to_string(ctx).map(|s| s.to_std_string_escaped()))
+                        .unwrap_or(Ok(String::new()))?;
+                    if name.is_empty() { return Ok(JsValue::undefined()); }
+                    hooks::notify_event(name, String::new());
+                    Ok(JsValue::undefined())
+                })
+            },
+            js_string!("dispatchEvent"),
+            1,
+        )
         .build();
 
     Ok(JsValue::from(obj))
@@ -201,6 +268,8 @@ fn wrap_element(context: &mut Context, node: fortrust_dom::NodeRef<'_>) -> JsRes
 
     let text_str = node.text_content();
 
+    let node_ptr_usize = node as *const fortrust_dom::Node<'_> as usize;
+
     let obj = ObjectInitializer::new(context)
         .property(
             js_string!("tagName"),
@@ -227,6 +296,32 @@ fn wrap_element(context: &mut Context, node: fortrust_dom::NodeRef<'_>) -> JsRes
             js_string!("textContent"),
             JsString::from(text_str),
             Attribute::all(),
+        )
+        .property(js_string!("__node_ptr"), JsValue::from(node_ptr_usize as f64), Attribute::all())
+        .function(
+            unsafe {
+                NativeFunction::from_closure(move |_this, args, ctx| {
+                    // setAttribute(name, value)
+                    let name = args
+                        .get(0)
+                        .map(|v| v.to_string(ctx).map(|s| s.to_std_string_escaped()))
+                        .unwrap_or(Ok(String::new()))?;
+                    let value = args
+                        .get(1)
+                        .map(|v| v.to_string(ctx).map(|s| s.to_std_string_escaped()))
+                        .unwrap_or(Ok(String::new()))?;
+                    if name.is_empty() { return Ok(JsValue::undefined()); }
+                    let node_ptr = node_ptr_usize as *const fortrust_dom::Node<'static>;
+                    let node_ref: &fortrust_dom::Node<'static> = unsafe { &*node_ptr };
+                    // Store attribute override in external map (DOM internal fields are private).
+                    let mut map = DOCUMENT_ATTR_OVERRIDES.lock().unwrap();
+                    let node_map = map.entry(node_ptr_usize).or_insert_with(HashMap::new);
+                    node_map.insert(name, value);
+                    Ok(JsValue::undefined())
+                })
+            },
+            js_string!("setAttribute"),
+            2,
         )
         .build();
 

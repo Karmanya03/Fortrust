@@ -6,14 +6,15 @@ use fortrust_ipc::{BincodeCodec, BrowserToRenderer, RendererToBrowser};
 use fortrust_js::{EventLoop, JsRuntime, WebApiRegistry, new_shared_runtime};
 use fortrust_layout::{LayoutConstraints, LayoutEngine};
 use fortrust_net::NetworkClient;
-use fortrust_paint::{PaintOptions, Painter};
-use fortrust_renderer::StaticRenderer;
+use fortrust_paint::{DisplayCommand, PaintOptions, Painter};
+use fortrust_renderer::{RenderedPage, StaticRenderer};
 use fortrust_style::{StyleEngine, Stylesheet};
 use tracing::{debug, error, info, warn};
 
 struct RendererInstance {
     tab_id: TabId,
     url: String,
+    last_page: Option<RenderedPage>,
     dom_arena: DomArena,
     js_runtime: Option<fortrust_js::SharedJsRuntime>,
     event_loop: Option<EventLoop>,
@@ -28,6 +29,7 @@ impl RendererInstance {
         Self {
             tab_id,
             url: String::new(),
+            last_page: None,
             dom_arena: DomArena::new(),
             js_runtime: None,
             event_loop: None,
@@ -38,7 +40,7 @@ impl RendererInstance {
         }
     }
 
-    fn navigate(&mut self, url: &str, html: &str) -> RendererToBrowser {
+    fn navigate(&mut self, url: &str, html: &str) -> Vec<RendererToBrowser> {
         self.url = url.to_owned();
         self.dom_arena = DomArena::new();
 
@@ -51,53 +53,234 @@ impl RendererInstance {
             html.to_owned()
         };
 
-        match fortrust_dom::parse_html(&self.dom_arena, &html_source) {
-            Ok(document) => {
-                let _viewport = LayoutConstraints {
-                    viewport_width: self.width as f32,
-                    viewport_height: self.height as f32,
-                    containing_block: None,
-                };
+        let mut events = vec![
+            RendererToBrowser::NavigationStart { url: url.to_owned() },
+            RendererToBrowser::LoadProgress { percent: 0.15, state: fortrust_ipc::LoadState::Parsing },
+        ];
 
-                let _style_engine = StyleEngine::new();
-                if let Some(title_node) = document.first_element_by_tag("title") {
-                    let title = title_node.text_content();
-                    return RendererToBrowser::TitleChanged { title };
-                }
-
-                match self.renderer.render(
-                    &html_source,
-                    &[],
-                    fortrust_renderer::Viewport {
-                        width: self.width as f32,
-                        height: self.height as f32,
-                    },
-                ) {
-                    Ok(page) => {
-                        let title = if page.text_content.len() > 80 {
-                            page.text_content[..80].to_owned()
-                        } else {
-                            page.text_content
-                        };
-                        RendererToBrowser::TitleChanged { title }
-                    }
-                    Err(error) => RendererToBrowser::NavigationError {
-                        url: url.to_owned(),
-                        error: format!("Render failed: {error:?}"),
-                    },
-                }
+        let document = match fortrust_dom::parse_html(&self.dom_arena, &html_source) {
+            Ok(document) => document,
+            Err(error) => {
+                events.push(RendererToBrowser::NavigationError {
+                    url: url.to_owned(),
+                    error: format!("Parse failed: {error:?}"),
+                });
+                return events;
             }
-            Err(error) => RendererToBrowser::NavigationError {
-                url: url.to_owned(),
-                error: format!("Parse failed: {error:?}"),
+        };
+
+        events.push(RendererToBrowser::LoadProgress { percent: 0.45, state: fortrust_ipc::LoadState::Layout });
+
+        let rendered = match self.renderer.render(
+            &html_source,
+            &[],
+            fortrust_renderer::Viewport {
+                width: self.width as f32,
+                height: self.height as f32,
             },
-        }
+        ) {
+            Ok(page) => page,
+            Err(error) => {
+                events.push(RendererToBrowser::NavigationError {
+                    url: url.to_owned(),
+                    error: format!("Render failed: {error:?}"),
+                });
+                return events;
+            }
+        };
+
+        self.last_page = Some(rendered.clone());
+        events.push(RendererToBrowser::LoadProgress { percent: 0.8, state: fortrust_ipc::LoadState::Painting });
+
+        let title = document
+            .first_element_by_tag("title")
+            .map(|title_node| title_node.text_content())
+            .filter(|title| !title.trim().is_empty())
+            .unwrap_or_else(|| {
+                if rendered.text_content.len() > 80 {
+                    rendered.text_content[..80].to_owned()
+                } else {
+                    rendered.text_content.clone()
+                }
+            });
+
+        let frame = render_page_frame(&rendered, self.width, self.height, &title);
+        events.push(RendererToBrowser::TitleChanged { title });
+        events.push(RendererToBrowser::FrameReady {
+            texture_data: frame,
+            width: self.width,
+            height: self.height,
+            stride: self.width.saturating_mul(4),
+        });
+        events.push(RendererToBrowser::LoadProgress { percent: 1.0, state: fortrust_ipc::LoadState::Loaded });
+        events.push(RendererToBrowser::LoadComplete);
+        events
     }
 
     fn resize(&mut self, width: u32, height: u32) {
         self.width = width;
         self.height = height;
     }
+}
+
+fn render_page_frame(page: &RenderedPage, width: u32, height: u32, title: &str) -> Vec<u8> {
+    let width = width.max(1) as usize;
+    let height = height.max(1) as usize;
+    let mut pixels = vec![0u8; width * height * 4];
+
+    for y in 0..height {
+        let t = y as f32 / height as f32;
+        for x in 0..width {
+            let idx = (y * width + x) * 4;
+            pixels[idx] = (13.0 + 20.0 * t) as u8;
+            pixels[idx + 1] = (16.0 + 24.0 * t) as u8;
+            pixels[idx + 2] = (20.0 + 30.0 * t) as u8;
+            pixels[idx + 3] = 255;
+        }
+    }
+
+    let mut clip_stack = vec![fortrust_layout::Rect { x: 0.0, y: 0.0, width: width as f32, height: height as f32 }];
+
+    for command in page.display_list.commands() {
+        match command {
+            DisplayCommand::ClipPush(rect) => {
+                let next = intersect_rect(*clip_stack.last().unwrap(), *rect);
+                clip_stack.push(next);
+            }
+            DisplayCommand::ClipPop => {
+                if clip_stack.len() > 1 {
+                    clip_stack.pop();
+                }
+            }
+            DisplayCommand::FillRect { rect, color } => {
+                paint_rect(&mut pixels, width, height, clip_stack.last().copied().unwrap(), *rect, color_to_rgba(*color));
+            }
+            DisplayCommand::DrawBorder { rect, top_width, right_width, bottom_width, left_width, top_color, right_color, bottom_color, left_color, .. } => {
+                let clip = clip_stack.last().copied().unwrap();
+                paint_rect(&mut pixels, width, height, clip, fortrust_layout::Rect { x: rect.x, y: rect.y, width: rect.width, height: *top_width }, color_to_rgba(*top_color));
+                paint_rect(&mut pixels, width, height, clip, fortrust_layout::Rect { x: rect.x, y: rect.y + rect.height - *bottom_width, width: rect.width, height: *bottom_width }, color_to_rgba(*bottom_color));
+                paint_rect(&mut pixels, width, height, clip, fortrust_layout::Rect { x: rect.x, y: rect.y, width: *left_width, height: rect.height }, color_to_rgba(*left_color));
+                paint_rect(&mut pixels, width, height, clip, fortrust_layout::Rect { x: rect.x + rect.width - *right_width, y: rect.y, width: *right_width, height: rect.height }, color_to_rgba(*right_color));
+            }
+            DisplayCommand::DrawBoxShadow { rect, offset_x, offset_y, blur, color, .. } => {
+                let shadow_rect = fortrust_layout::Rect { x: rect.x + *offset_x, y: rect.y + *offset_y, width: rect.width + blur * 0.25, height: rect.height + blur * 0.25 };
+                paint_rect(&mut pixels, width, height, clip_stack.last().copied().unwrap(), shadow_rect, color_to_rgba(*color));
+            }
+            DisplayCommand::DrawOutline { rect, width: outline_width, color, .. } => {
+                let clip = clip_stack.last().copied().unwrap();
+                let outer = fortrust_layout::Rect { x: rect.x - *outline_width, y: rect.y - *outline_width, width: rect.width + *outline_width * 2.0, height: rect.height + *outline_width * 2.0 };
+                paint_rect(&mut pixels, width, height, clip, outer, color_to_rgba(*color));
+            }
+            DisplayCommand::DrawText { rect, text, color, .. } => {
+                let clip = clip_stack.last().copied().unwrap();
+                paint_text_block(&mut pixels, width, height, clip, *rect, text, color_to_rgba(*color));
+            }
+        }
+    }
+
+    let header = format!("{title}  •  {} commands", page.display_list.len());
+    paint_title_banner(&mut pixels, width, height, &header);
+    pixels
+}
+
+fn generate_status_frame(width: u32, height: u32, label: &str) -> Vec<u8> {
+    let width = width.max(1) as usize;
+    let height = height.max(1) as usize;
+    let mut pixels = vec![0u8; width * height * 4];
+
+    for y in 0..height {
+        let t = y as f32 / height as f32;
+        for x in 0..width {
+            let idx = (y * width + x) * 4;
+            pixels[idx] = (14.0 + 16.0 * t) as u8;
+            pixels[idx + 1] = (17.0 + 20.0 * t) as u8;
+            pixels[idx + 2] = (22.0 + 26.0 * t) as u8;
+            pixels[idx + 3] = 255;
+        }
+    }
+
+    paint_title_banner(&mut pixels, width, height, label);
+    pixels
+}
+
+fn paint_title_banner(pixels: &mut [u8], width: usize, height: usize, label: &str) {
+    let banner_height = (height as f32 * 0.14).max(24.0) as usize;
+    for y in 0..banner_height.min(height) {
+        for x in 0..width {
+            let idx = (y * width + x) * 4;
+            pixels[idx] = 28;
+            pixels[idx + 1] = 33;
+            pixels[idx + 2] = 40;
+            pixels[idx + 3] = 255;
+        }
+    }
+
+    let text_width = label.len().saturating_mul(7).min(width.saturating_sub(16));
+    let start_x = 8usize.min(width.saturating_sub(1));
+    let start_y = (banner_height / 2).saturating_sub(6);
+    for y in 0..12.min(height) {
+        for x in 0..text_width {
+            let idx = ((start_y + y).min(height.saturating_sub(1)) * width + (start_x + x).min(width.saturating_sub(1))) * 4;
+            pixels[idx] = 77;
+            pixels[idx + 1] = 159;
+            pixels[idx + 2] = 255;
+            pixels[idx + 3] = 255;
+        }
+    }
+}
+
+fn paint_rect(pixels: &mut [u8], width: usize, height: usize, clip: fortrust_layout::Rect, rect: fortrust_layout::Rect, rgba: [u8; 4]) {
+    let x0 = rect.x.max(clip.x).floor().max(0.0) as usize;
+    let y0 = rect.y.max(clip.y).floor().max(0.0) as usize;
+    let x1 = (rect.x + rect.width).min(clip.x + clip.width).ceil().max(0.0) as usize;
+    let y1 = (rect.y + rect.height).min(clip.y + clip.height).ceil().max(0.0) as usize;
+
+    for y in y0.min(height)..y1.min(height) {
+        for x in x0.min(width)..x1.min(width) {
+            let idx = (y * width + x) * 4;
+            blend_rgba(&mut pixels[idx..idx + 4], rgba);
+        }
+    }
+}
+
+fn paint_text_block(pixels: &mut [u8], width: usize, height: usize, clip: fortrust_layout::Rect, rect: fortrust_layout::Rect, text: &str, rgba: [u8; 4]) {
+    let char_width = (rect.width / text.chars().count().max(1) as f32).max(4.0);
+    for (index, _) in text.chars().enumerate() {
+        let char_rect = fortrust_layout::Rect {
+            x: rect.x + index as f32 * char_width,
+            y: rect.y,
+            width: (char_width * 0.72).max(3.0),
+            height: rect.height.max(8.0),
+        };
+        paint_rect(pixels, width, height, clip, char_rect, rgba);
+    }
+}
+
+fn intersect_rect(a: fortrust_layout::Rect, b: fortrust_layout::Rect) -> fortrust_layout::Rect {
+    let x1 = a.x.max(b.x);
+    let y1 = a.y.max(b.y);
+    let x2 = (a.x + a.width).min(b.x + b.width);
+    let y2 = (a.y + a.height).min(b.y + b.height);
+    if x2 <= x1 || y2 <= y1 {
+        return fortrust_layout::Rect { x: 0.0, y: 0.0, width: 0.0, height: 0.0 };
+    }
+    fortrust_layout::Rect { x: x1, y: y1, width: x2 - x1, height: y2 - y1 }
+}
+
+fn color_to_rgba(color: fortrust_style::Color) -> [u8; 4] {
+    [color.r, color.g, color.b, color.a]
+}
+
+fn blend_rgba(dst: &mut [u8], src: [u8; 4]) {
+    let alpha = src[3] as f32 / 255.0;
+    if alpha <= 0.0 {
+        return;
+    }
+    let inverse = 1.0 - alpha;
+    dst[0] = (src[0] as f32 * alpha + dst[0] as f32 * inverse) as u8;
+    dst[1] = (src[1] as f32 * alpha + dst[1] as f32 * inverse) as u8;
+    dst[2] = (src[2] as f32 * alpha + dst[2] as f32 * inverse) as u8;
+    dst[3] = 255;
 }
 
 async fn handle_renderer_commands() {
@@ -133,7 +316,110 @@ async fn main() {
         .and_then(|h| h.parse::<u32>().ok())
         .unwrap_or(720);
 
-    let _renderer = RendererInstance::new(tab_id, width, height);
+    // If the renderer is started with `--ipc-connect <ADDR>` then connect to the parent and speak IPC.
+    if let Some(pos) = args.iter().position(|a| a == "--ipc-connect") {
+        if let Some(addr) = args.get(pos + 1) {
+            info!("Renderer connecting to {addr}");
+            if let Ok(stream) = tokio::net::TcpStream::connect(addr).await {
+                let (sender, receiver) = fortrust_ipc::create_tcp_endpoint(stream);
+
+                // Forward JS document title changes from the in-process JS runtime
+                // to the browser via the IPC sender.
+                {
+                    use std::sync::Arc;
+                    let sender_clone = sender.clone();
+                    fortrust_js::hooks::set_title_handler(Some(Arc::new(move |title: String| {
+                        let s = sender_clone.clone();
+                        // spawn a tokio task to send the IPC message asynchronously
+                        tokio::spawn(async move {
+                            let _ = s.send_renderer_message(&fortrust_ipc::RendererToBrowser::DocumentTitleChanged {
+                                title: title.clone(),
+                            }).await;
+                        });
+                    })));
+                }
+
+                let _renderer_thread = std::thread::spawn(move || {
+                    let rt = match tokio::runtime::Builder::new_current_thread().enable_all().build() {
+                        Ok(runtime) => runtime,
+                        Err(_) => return,
+                    };
+
+                    rt.block_on(async move {
+                        let mut renderer = RendererInstance::new(tab_id, width, height);
+                        loop {
+                            match receiver.recv_browser_message().await {
+                                Ok(msg) => {
+                                    let responses = match msg {
+                                        fortrust_ipc::BrowserToRenderer::Navigate { url } => renderer.navigate(&url, ""),
+                                        fortrust_ipc::BrowserToRenderer::ExecuteScript { js } => vec![
+                                            fortrust_ipc::RendererToBrowser::ConsoleMessage {
+                                                level: "info".into(),
+                                                message: format!("executed script: {js}"),
+                                            },
+                                        ],
+                                        fortrust_ipc::BrowserToRenderer::Resize { width, height } => {
+                                            renderer.resize(width, height);
+                                            let frame = if let Some(page) = renderer.last_page.as_ref() {
+                                                render_page_frame(page, width, height, &renderer.url)
+                                            } else {
+                                                generate_status_frame(width, height, &format!("{} x {}", width, height))
+                                            };
+                                            vec![
+                                                fortrust_ipc::RendererToBrowser::LoadProgress {
+                                                    percent: 1.0,
+                                                    state: fortrust_ipc::LoadState::Loaded,
+                                                },
+                                                fortrust_ipc::RendererToBrowser::FrameReady {
+                                                    texture_data: frame,
+                                                    width,
+                                                    height,
+                                                    stride: width.saturating_mul(4),
+                                                },
+                                            ]
+                                        }
+                                        fortrust_ipc::BrowserToRenderer::Reload => {
+                                            if renderer.url.is_empty() {
+                                                vec![fortrust_ipc::RendererToBrowser::NavigationError {
+                                                    url: String::new(),
+                                                    error: "no page loaded to reload".into(),
+                                                }]
+                                            } else {
+                                                let current_url = renderer.url.clone();
+                                                renderer.navigate(&current_url, "")
+                                            }
+                                        }
+                                        fortrust_ipc::BrowserToRenderer::Shutdown => {
+                                            let _ = sender.send_renderer_message(&fortrust_ipc::RendererToBrowser::ShutdownAck).await;
+                                            break;
+                                        }
+                                        fortrust_ipc::BrowserToRenderer::GoBack
+                                        | fortrust_ipc::BrowserToRenderer::GoForward
+                                        | fortrust_ipc::BrowserToRenderer::Stop
+                                        | fortrust_ipc::BrowserToRenderer::KeyEvent { .. }
+                                        | fortrust_ipc::BrowserToRenderer::MouseEvent { .. }
+                                        | fortrust_ipc::BrowserToRenderer::ZoomChange { .. }
+                                        | fortrust_ipc::BrowserToRenderer::ScrollTo { .. }
+                                        | fortrust_ipc::BrowserToRenderer::SetPrivacySettings { .. } => vec![
+                                            fortrust_ipc::RendererToBrowser::ConsoleMessage {
+                                                level: "debug".into(),
+                                                message: "input event received".into(),
+                                            },
+                                        ],
+                                    };
+
+                                    for response in responses {
+                                        let _ = sender.send_renderer_message(&response).await;
+                                    }
+                                }
+                                Err(_) => break,
+                            }
+                        }
+                    });
+                });
+            }
+        }
+    }
 
     if let Some(url) = args
         .iter()
