@@ -34,6 +34,8 @@ pub struct RenderedPage {
     pub display_list: DisplayList,
     pub text_content: String,
     pub parse_error_count: usize,
+    /// CSS injected by cosmetic filtering rules (ad blocking element hiding, etc.)
+    pub injected_css: Vec<String>,
 }
 
 #[derive(Debug, Clone, Default)]
@@ -56,13 +58,14 @@ impl StaticRenderer {
     ) -> Result<RenderedPage, RenderError> {
         let arena = DomArena::new();
         let document = parse_html(&arena, html)?;
-        self.render_document(&document, author_css, viewport)
+        self.render_document(&document, author_css, &[], viewport)
     }
 
     pub fn render_document(
         &self,
         document: &Document<'_>,
         author_css: &[&str],
+        cosmetic_css: &[&str],
         viewport: Viewport,
     ) -> Result<RenderedPage, RenderError> {
         let mut style = StyleEngine::new();
@@ -70,6 +73,9 @@ impl StaticRenderer {
             style.add_stylesheet(Stylesheet::parse(&embedded_css)?);
         }
         for css in author_css {
+            style.add_stylesheet(Stylesheet::parse(css)?);
+        }
+        for css in cosmetic_css {
             style.add_stylesheet(Stylesheet::parse(css)?);
         }
 
@@ -117,6 +123,7 @@ impl StaticRenderer {
             display_list,
             text_content: document.text_content(),
             parse_error_count: document.parse_errors.len(),
+            injected_css: cosmetic_css.iter().map(|&s| s.to_owned()).collect(),
         })
     }
 }

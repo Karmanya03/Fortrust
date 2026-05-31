@@ -3,6 +3,18 @@ use adblock::lists::{FilterSet, ParseOptions};
 use adblock::request::Request;
 use url::Url;
 
+#[derive(Debug, Clone, Default)]
+pub struct CosmeticResources {
+    /// CSS rules for hiding elements (e.g., ".ad-banner { display: none !important }")
+    pub hide_selectors: Vec<String>,
+    /// Procedural cosmetic filter scriptlets
+    pub procedural_actions: Vec<String>,
+    /// JavaScript to be injected for cosmetic purposes
+    pub injected_script: Option<String>,
+    /// Whether generic hide rules are disabled
+    pub generichide: bool,
+}
+
 #[derive(Debug, Clone)]
 pub struct PrivacySettings {
     pub block_ads: bool,
@@ -75,6 +87,31 @@ impl PrivacyFilter {
         };
         let result = self.adblock_engine.check_network_request(&req);
         result.matched && result.exception.is_none()
+    }
+
+    /// Get cosmetic filtering resources (CSS hide selectors, scriptlets) for a given URL.
+    /// These hide ad placeholders, cookie banners, etc. using `##` selector rules from filter lists.
+    /// Returns CSS rules like `.ad-banner { display: none !important }` for each hide selector.
+    pub fn get_cosmetic_resources(&self, url: &str) -> CosmeticResources {
+        if !self.settings.block_ads && !self.settings.block_trackers {
+            return CosmeticResources::default();
+        }
+        let resources = self.adblock_engine.url_cosmetic_resources(url);
+        let hide_selectors: Vec<String> = resources
+            .hide_selectors
+            .iter()
+            .map(|sel| format!("{sel} {{ display: none !important; }}"))
+            .collect();
+        CosmeticResources {
+            hide_selectors,
+            procedural_actions: resources
+                .procedural_actions
+                .iter()
+                .map(|a| format!("{a} {{ display: none !important; }}"))
+                .collect(),
+            injected_script: Some(resources.injected_script.clone()).filter(|s| !s.is_empty()),
+            generichide: resources.generichide,
+        }
     }
 
     pub fn strip_tracking_params(&self, url: &mut Url) {

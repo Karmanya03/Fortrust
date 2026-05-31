@@ -1,6 +1,7 @@
 use compact_str::CompactString;
 
 use crate::config::PerformanceConfig;
+use crate::WorkspaceId;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct TabId(pub u64);
@@ -35,6 +36,7 @@ pub struct Tab {
     pub status: TabStatus,
     pub pinned: bool,
     pub private: bool,
+    pub workspace_id: Option<WorkspaceId>,
     pub last_active_tick: u64,
     pub privacy_blocks: u32,
 }
@@ -96,6 +98,7 @@ impl TabManager {
             },
             pinned: false,
             private,
+            workspace_id: None,
             last_active_tick: self.tick,
             privacy_blocks: 0,
         });
@@ -176,6 +179,10 @@ impl TabManager {
 
     pub fn tabs(&self) -> &[Tab] {
         &self.tabs
+    }
+
+    pub fn tabs_mut(&mut self) -> &mut [Tab] {
+        &mut self.tabs
     }
 
     pub fn active_id(&self) -> Option<TabId> {

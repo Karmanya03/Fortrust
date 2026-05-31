@@ -317,8 +317,8 @@ async fn main() {
         .unwrap_or(720);
 
     // If the renderer is started with `--ipc-connect <ADDR>` then connect to the parent and speak IPC.
-    if let Some(pos) = args.iter().position(|a| a == "--ipc-connect") {
-        if let Some(addr) = args.get(pos + 1) {
+    if let Some(pos) = args.iter().position(|a| a == "--ipc-connect")
+        && let Some(addr) = args.get(pos + 1) {
             info!("Renderer connecting to {addr}");
             if let Ok(stream) = tokio::net::TcpStream::connect(addr).await {
                 let (sender, receiver) = fortrust_ipc::create_tcp_endpoint(stream);
@@ -328,7 +328,7 @@ async fn main() {
                 {
                     use std::sync::Arc;
                     let sender_clone = sender.clone();
-                    fortrust_js::hooks::set_title_handler(Some(Arc::new(move |title: String| {
+                    fortrust_js::set_title_handler(Some(Arc::new(move |title: String| {
                         let s = sender_clone.clone();
                         // spawn a tokio task to send the IPC message asynchronously
                         tokio::spawn(async move {
@@ -337,6 +337,21 @@ async fn main() {
                             }).await;
                         });
                     })));
+                }
+                // Forward JS-dispatched events to the browser as console messages (level="event").
+                {
+                    use std::sync::Arc;
+                    let sender_clone = sender.clone();
+                    fortrust_js::set_event_handler(Some(Arc::new(move |name: String, detail: String| {
+                            let s = sender_clone.clone();
+                            tokio::spawn(async move {
+                                let _ = s.send_renderer_message(&fortrust_ipc::RendererToBrowser::DomEvent {
+                                    origin: String::new(),
+                                    name: name.clone(),
+                                    detail: detail.clone(),
+                                }).await;
+                            });
+                        })));
                 }
 
                 let _renderer_thread = std::thread::spawn(move || {
@@ -347,78 +362,72 @@ async fn main() {
 
                     rt.block_on(async move {
                         let mut renderer = RendererInstance::new(tab_id, width, height);
-                        loop {
-                            match receiver.recv_browser_message().await {
-                                Ok(msg) => {
-                                    let responses = match msg {
-                                        fortrust_ipc::BrowserToRenderer::Navigate { url } => renderer.navigate(&url, ""),
-                                        fortrust_ipc::BrowserToRenderer::ExecuteScript { js } => vec![
-                                            fortrust_ipc::RendererToBrowser::ConsoleMessage {
-                                                level: "info".into(),
-                                                message: format!("executed script: {js}"),
-                                            },
-                                        ],
-                                        fortrust_ipc::BrowserToRenderer::Resize { width, height } => {
-                                            renderer.resize(width, height);
-                                            let frame = if let Some(page) = renderer.last_page.as_ref() {
-                                                render_page_frame(page, width, height, &renderer.url)
-                                            } else {
-                                                generate_status_frame(width, height, &format!("{} x {}", width, height))
-                                            };
-                                            vec![
-                                                fortrust_ipc::RendererToBrowser::LoadProgress {
-                                                    percent: 1.0,
-                                                    state: fortrust_ipc::LoadState::Loaded,
-                                                },
-                                                fortrust_ipc::RendererToBrowser::FrameReady {
-                                                    texture_data: frame,
-                                                    width,
-                                                    height,
-                                                    stride: width.saturating_mul(4),
-                                                },
-                                            ]
-                                        }
-                                        fortrust_ipc::BrowserToRenderer::Reload => {
-                                            if renderer.url.is_empty() {
-                                                vec![fortrust_ipc::RendererToBrowser::NavigationError {
-                                                    url: String::new(),
-                                                    error: "no page loaded to reload".into(),
-                                                }]
-                                            } else {
-                                                let current_url = renderer.url.clone();
-                                                renderer.navigate(&current_url, "")
-                                            }
-                                        }
-                                        fortrust_ipc::BrowserToRenderer::Shutdown => {
-                                            let _ = sender.send_renderer_message(&fortrust_ipc::RendererToBrowser::ShutdownAck).await;
-                                            break;
-                                        }
-                                        fortrust_ipc::BrowserToRenderer::GoBack
-                                        | fortrust_ipc::BrowserToRenderer::GoForward
-                                        | fortrust_ipc::BrowserToRenderer::Stop
-                                        | fortrust_ipc::BrowserToRenderer::KeyEvent { .. }
-                                        | fortrust_ipc::BrowserToRenderer::MouseEvent { .. }
-                                        | fortrust_ipc::BrowserToRenderer::ZoomChange { .. }
-                                        | fortrust_ipc::BrowserToRenderer::ScrollTo { .. }
-                                        | fortrust_ipc::BrowserToRenderer::SetPrivacySettings { .. } => vec![
-                                            fortrust_ipc::RendererToBrowser::ConsoleMessage {
-                                                level: "debug".into(),
-                                                message: "input event received".into(),
-                                            },
-                                        ],
+                        while let Ok(msg) = receiver.recv_browser_message().await {
+                            let responses = match msg {
+                                fortrust_ipc::BrowserToRenderer::Navigate { url } => renderer.navigate(&url, ""),
+                                fortrust_ipc::BrowserToRenderer::ExecuteScript { js } => vec![
+                                    fortrust_ipc::RendererToBrowser::ConsoleMessage {
+                                        level: "info".into(),
+                                        message: format!("executed script: {js}"),
+                                    },
+                                ],
+                                fortrust_ipc::BrowserToRenderer::Resize { width, height } => {
+                                    renderer.resize(width, height);
+                                    let frame = if let Some(page) = renderer.last_page.as_ref() {
+                                        render_page_frame(page, width, height, &renderer.url)
+                                    } else {
+                                        generate_status_frame(width, height, &format!("{} x {}", width, height))
                                     };
-
-                                    for response in responses {
-                                        let _ = sender.send_renderer_message(&response).await;
+                                    vec![
+                                        fortrust_ipc::RendererToBrowser::LoadProgress {
+                                            percent: 1.0,
+                                            state: fortrust_ipc::LoadState::Loaded,
+                                        },
+                                        fortrust_ipc::RendererToBrowser::FrameReady {
+                                            texture_data: frame,
+                                            width,
+                                            height,
+                                            stride: width.saturating_mul(4),
+                                        },
+                                    ]
+                                }
+                                fortrust_ipc::BrowserToRenderer::Reload => {
+                                    if renderer.url.is_empty() {
+                                        vec![fortrust_ipc::RendererToBrowser::NavigationError {
+                                            url: String::new(),
+                                            error: "no page loaded to reload".into(),
+                                        }]
+                                    } else {
+                                        let current_url = renderer.url.clone();
+                                        renderer.navigate(&current_url, "")
                                     }
                                 }
-                                Err(_) => break,
+                                fortrust_ipc::BrowserToRenderer::Shutdown => {
+                                    let _ = sender.send_renderer_message(&fortrust_ipc::RendererToBrowser::ShutdownAck).await;
+                                    break;
+                                }
+                                fortrust_ipc::BrowserToRenderer::GoBack
+                                | fortrust_ipc::BrowserToRenderer::GoForward
+                                | fortrust_ipc::BrowserToRenderer::Stop
+                                | fortrust_ipc::BrowserToRenderer::KeyEvent { .. }
+                                | fortrust_ipc::BrowserToRenderer::MouseEvent { .. }
+                                | fortrust_ipc::BrowserToRenderer::ZoomChange { .. }
+                                | fortrust_ipc::BrowserToRenderer::ScrollTo { .. }
+                                | fortrust_ipc::BrowserToRenderer::SetPrivacySettings { .. } => vec![
+                                    fortrust_ipc::RendererToBrowser::ConsoleMessage {
+                                        level: "debug".into(),
+                                        message: "input event received".into(),
+                                    },
+                                ],
+                            };
+
+                            for response in responses {
+                                let _ = sender.send_renderer_message(&response).await;
                             }
                         }
                     });
                 });
             }
-        }
     }
 
     if let Some(url) = args

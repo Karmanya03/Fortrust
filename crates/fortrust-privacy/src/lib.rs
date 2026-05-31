@@ -5,7 +5,7 @@ pub mod csp;
 pub mod fingerprint;
 pub mod https_upgrade;
 
-pub use adblock_engine::{PrivacyFilter, PrivacySettings};
+pub use adblock_engine::{CosmeticResources, PrivacyFilter, PrivacySettings};
 pub use blocker::{AdBlocker, BlockerDecision, FilterListProvider, RequestClassifier};
 pub use cookie_policy::{CookiePolicy, SameSitePolicy};
 pub use csp::{CspDirective, CspPolicy, CspSource, PolicyDirective};
@@ -23,6 +23,7 @@ pub struct PrivacyStats {
     pub third_party_cookies_blocked: u64,
     pub scripts_blocked: u64,
     pub data_saved_bytes: u64,
+    pub cosmetic_elements_hidden: u64,
     pub session_start: SystemTime,
 }
 
@@ -36,6 +37,7 @@ impl Default for PrivacyStats {
             third_party_cookies_blocked: 0,
             scripts_blocked: 0,
             data_saved_bytes: 0,
+            cosmetic_elements_hidden: 0,
             session_start: SystemTime::now(),
         }
     }
@@ -70,14 +72,24 @@ pub struct PrivacyManager {
 
 impl PrivacyManager {
     pub fn new() -> Self {
-        Self {
+        let mut pm = Self {
             ad_blocker: AdBlocker::new(),
             fingerprint_guard: FingerprintGuard::new(),
             https_upgrader: HttpsUpgrader::new(),
             cookie_policy: CookiePolicy::BlockThirdParty,
             stats: PrivacyStats::default(),
             csp_enabled: true,
+        };
+
+        // Load embedded default hosts-format blocklist if present.
+        // This is a small sample embedded list; in production this should be replaced with a curated list.
+        #[allow(clippy::expect_used)]
+        {
+            const BYTES: &[u8] = include_bytes!("../../../assets/blocklists/hosts_default.txt");
+            pm.ad_blocker.load_hosts_from_bytes(BYTES);
         }
+
+        pm
     }
 
     pub fn should_block_request(
@@ -117,6 +129,14 @@ impl PrivacyManager {
             return true;
         }
         policy.allows(directive, resource_url)
+    }
+
+    pub fn get_cosmetic_resources(&mut self, url: &str) -> CosmeticResources {
+        let filter = PrivacyFilter::load();
+        let resources = filter.get_cosmetic_resources(url);
+        let total = resources.hide_selectors.len() + resources.procedural_actions.len();
+        self.stats.cosmetic_elements_hidden += total as u64;
+        resources
     }
 
     pub fn reset_stats(&mut self) {

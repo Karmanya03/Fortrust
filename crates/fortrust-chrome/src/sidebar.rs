@@ -1,6 +1,6 @@
 use crate::{animation::SidebarAnimation, icons, theme::FortrustTheme};
 use egui::{self, Color32, CornerRadius, Pos2, Rect, Stroke, Vec2};
-use fortrust_core::BrowserConfig;
+use fortrust_core::{BrowserConfig, WorkspaceId, WorkspaceManager};
 use fortrust_storage::StorageDatabase;
 
 #[derive(Debug, Clone, PartialEq)]
@@ -185,15 +185,16 @@ impl SidebarState {
         resp.clicked()
     }
 
-    pub fn render_overlay(&mut self, ui: &mut egui::Ui, theme: &FortrustTheme, anim: &mut SidebarAnimation, config: &mut BrowserConfig, storage: Option<&StorageDatabase>, downloads: &[crate::download::DownloadEntry]) -> Option<String> {
+    #[allow(clippy::too_many_arguments)]
+    pub fn render_overlay(&mut self, ui: &mut egui::Ui, theme: &FortrustTheme, anim: &mut SidebarAnimation, config: &mut BrowserConfig, storage: Option<&StorageDatabase>, downloads: &[crate::download::DownloadEntry], workspaces: &mut WorkspaceManager) -> Option<String> {
         let offset = anim.current_offset();
         if offset < 1.0 { return None; }
 
         let area = ui.max_rect();
         let sbr = Rect::from_min_size(Pos2::new(area.min.x, area.min.y), Vec2::new(offset, area.height()));
 
-        ui.painter().rect_filled(sbr, CornerRadius::ZERO, Color32::from_rgb(24, 28, 34));
-        ui.painter().rect_stroke(sbr, CornerRadius::ZERO, Stroke::new(1.0, Color32::from_rgb(39, 45, 56)), egui::StrokeKind::Inside);
+        ui.painter().rect_filled(sbr, CornerRadius::ZERO, theme.surface_sidebar);
+        ui.painter().rect_stroke(sbr, CornerRadius::ZERO, Stroke::new(1.0, theme.border_subtle), egui::StrokeKind::Inside);
 
         // Gradient shadow on sidebar right edge
         let shadow_right = sbr.right();
@@ -210,8 +211,8 @@ impl SidebarState {
         let sx = sbr.min.x + 18.0;
 
         // Header
-        ui.painter().rect_filled(Rect::from_min_size(Pos2::new(sbr.min.x, sbr.min.y), Vec2::new(sbr.width(), 44.0)), CornerRadius::ZERO, Color32::from_rgb(24, 28, 34));
-        ui.painter().line_segment([Pos2::new(sbr.min.x, sbr.min.y + 44.0), Pos2::new(sbr.max.x, sbr.min.y + 44.0)], Stroke::new(1.0, Color32::from_rgb(39, 45, 56)));
+        ui.painter().rect_filled(Rect::from_min_size(Pos2::new(sbr.min.x, sbr.min.y), Vec2::new(sbr.width(), 44.0)), CornerRadius::ZERO, theme.surface_sidebar);
+        ui.painter().line_segment([Pos2::new(sbr.min.x, sbr.min.y + 44.0), Pos2::new(sbr.max.x, sbr.min.y + 44.0)], Stroke::new(1.0, theme.border_subtle));
 
         ui.painter().text(Pos2::new(sx, sbr.min.y + 16.0), egui::Align2::LEFT_TOP, self.section.title(), egui::FontId::proportional(13.5), theme.text_primary);
 
@@ -241,6 +242,9 @@ impl SidebarState {
                     SidebarSection::Setup => {
                         section_label_ui(ui, theme, "Workspaces", sx, sw);
                         self.workspaces_enabled = toggle_row_ui(ui, theme, "", self.workspaces_enabled, sx, sw);
+                        if self.workspaces_enabled {
+                            render_workspace_list_ui(ui, theme, workspaces, sx, sw);
+                        }
 
                         section_label_ui(ui, theme, "Mindfulness Features", sx, sw);
                         self.boosts_enabled = icon_check_row_ui(ui, theme, "Boosts", self.boosts_enabled, sx, sw, icons::paint_sun_icon);
@@ -546,7 +550,7 @@ fn toggle_row_ui(ui: &mut egui::Ui, theme: &FortrustTheme, label: &str, mut valu
     ui.painter().text(Pos2::new(rect.min.x, rect.center().y), egui::Align2::LEFT_CENTER, label, egui::FontId::proportional(12.5), theme.text_secondary);
 
     let tr = Rect::from_min_size(Pos2::new(rect.max.x - 48.0, rect.center().y - 11.0), Vec2::new(38.0, 22.0));
-    let bg = if value { theme.accent_primary } else { Color32::from_rgb(50, 57, 73) };
+    let bg = if value { theme.accent_primary } else { theme.border_strong };
     ui.painter().rect_filled(tr, CornerRadius::same(11), bg);
     let kx = if value { tr.max.x - 19.0 } else { tr.min.x + 3.0 };
     ui.painter().circle_filled(Pos2::new(kx + 8.0, tr.center().y), 8.0, Color32::WHITE);
@@ -572,8 +576,90 @@ fn add_ext_btn_ui(ui: &mut egui::Ui, theme: &FortrustTheme, sx: f32, sw: f32) {
     let hovered = ui.rect_contains_pointer(rect);
     let bg = if hovered { theme.surface_card } else { theme.surface_deepest };
     ui.painter().rect_filled(rect, CornerRadius::same(20), bg);
-    ui.painter().rect_stroke(rect, CornerRadius::same(20), Stroke::new(1.0, Color32::from_rgb(50, 57, 73)), egui::StrokeKind::Inside);
+    ui.painter().rect_stroke(rect, CornerRadius::same(20), Stroke::new(1.0, theme.border_strong), egui::StrokeKind::Inside);
     ui.painter().text(rect.center(), egui::Align2::CENTER_CENTER, "Add extension", egui::FontId::proportional(12.0), theme.text_primary);
     let _ = ui.allocate_rect(rect, egui::Sense::click());
     ui.allocate_space(Vec2::new(sw, 40.0));
+}
+
+fn render_workspace_list_ui(ui: &mut egui::Ui, theme: &FortrustTheme, workspaces: &mut WorkspaceManager, sx: f32, sw: f32) {
+    let active_id = workspaces.active();
+    let ws_list: Vec<_> = workspaces
+        .all()
+        .iter()
+        .map(|ws| (ws.id, ws.name.to_string(), ws.color_hex.to_string(), ws.tab_ids.len()))
+        .collect();
+    let has_multiple = ws_list.len() > 1;
+
+    for (ws_id, name, color_hex, tab_count) in &ws_list {
+        let y = ui.cursor().min.y;
+        let is_active = *ws_id == active_id;
+        let rect = Rect::from_min_size(Pos2::new(sx, y), Vec2::new(sw, 30.0));
+
+        let bg = if is_active {
+            theme.accent_primary.gamma_multiply(0.15)
+        } else if ui.rect_contains_pointer(rect) {
+            theme.surface_card
+        } else {
+            Color32::TRANSPARENT
+        };
+        ui.painter().rect_filled(rect, CornerRadius::same(6), bg);
+
+        // Color dot
+        let dot_color = parse_hex_color(color_hex).unwrap_or(theme.accent_primary);
+        ui.painter().circle_filled(Pos2::new(sx + 8.0, rect.center().y), 4.0, dot_color);
+
+        // Name
+        ui.painter().text(Pos2::new(sx + 20.0, rect.center().y), egui::Align2::LEFT_CENTER, name.as_str(), egui::FontId::proportional(12.0), theme.text_primary);
+
+        // Tab count
+        let count_label = format!("{tab_count} tabs");
+        ui.painter().text(Pos2::new(rect.right() - 4.0, rect.center().y), egui::Align2::RIGHT_CENTER, &count_label, egui::FontId::proportional(10.0), theme.text_muted);
+
+        if ui.allocate_rect(rect, egui::Sense::click()).clicked() && !is_active {
+            workspaces.activate(*ws_id);
+        }
+        ui.allocate_space(Vec2::new(sw, 32.0));
+    }
+
+    if has_multiple {
+        // Delete workspace button
+        let y = ui.cursor().min.y;
+        let rect = Rect::from_min_size(Pos2::new(sx, y), Vec2::new(sw, 24.0));
+        if ui.rect_contains_pointer(rect) {
+            ui.painter().rect_filled(rect, CornerRadius::same(4), theme.glass_hover);
+        }
+        ui.painter().text(rect.center(), egui::Align2::CENTER_CENTER, "Remove workspace", egui::FontId::proportional(11.0), theme.accent_danger);
+        if ui.allocate_rect(rect, egui::Sense::click()).clicked() {
+            let ids: Vec<WorkspaceId> = ws_list.iter().filter(|(id, _, _, _)| *id != WorkspaceId(1)).map(|(id, _, _, _)| *id).collect();
+            for id in ids {
+                workspaces.delete(id);
+            }
+        }
+    }
+
+    // Add workspace button
+    let y = ui.cursor().min.y;
+    let rect = Rect::from_min_size(Pos2::new(sx, y), Vec2::new(sw, 24.0));
+    if ui.rect_contains_pointer(rect) {
+        ui.painter().rect_filled(rect, CornerRadius::same(4), theme.glass_hover);
+    }
+    ui.painter().text(rect.center(), egui::Align2::CENTER_CENTER, "+ New workspace", egui::FontId::proportional(11.0), theme.accent_primary);
+    if ui.allocate_rect(rect, egui::Sense::click()).clicked() {
+        let count = workspaces.all().len();
+        workspaces.create(format!("Workspace {}", count + 1), "#4d9fff");
+    }
+    ui.allocate_space(Vec2::new(sw, 36.0));
+}
+
+fn parse_hex_color(hex: &str) -> Option<Color32> {
+    let hex = hex.trim_start_matches('#');
+    if hex.len() == 6 {
+        let r = u8::from_str_radix(&hex[0..2], 16).ok()?;
+        let g = u8::from_str_radix(&hex[2..4], 16).ok()?;
+        let b = u8::from_str_radix(&hex[4..6], 16).ok()?;
+        Some(Color32::from_rgb(r, g, b))
+    } else {
+        None
+    }
 }

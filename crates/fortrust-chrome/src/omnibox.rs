@@ -91,7 +91,7 @@ impl OmniboxState {
         let border_color = if self.focused {
             theme.accent_primary
         } else {
-            Color32::from_rgba_unmultiplied(50, 57, 73, 200)
+            theme.border_strong
         };
 
         // Determine suggestion dropdown position based on address bar rect

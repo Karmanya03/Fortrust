@@ -59,6 +59,7 @@ pub struct SecurityReport {
     pub external_stylesheets_blocked: usize,
     pub external_images_loaded: usize,
     pub external_images_blocked: usize,
+    pub cosmetic_stylesheets_injected: usize,
 }
 
 impl SecurityReport {
@@ -89,6 +90,7 @@ impl SecurityReport {
             external_stylesheets_blocked,
             external_images_loaded,
             external_images_blocked,
+            cosmetic_stylesheets_injected: rendered.injected_css.len(),
         }
     }
 }
@@ -183,6 +185,30 @@ impl TrustEngine {
             url,
             html,
             author_css,
+            &[],
+            viewport,
+            PageSource::Offline,
+            0,
+            0,
+            0,
+            0,
+        )
+    }
+
+    pub fn render_html_with_cosmetic(
+        &self,
+        url: impl Into<String>,
+        html: &str,
+        author_css: &[&str],
+        cosmetic_css: &[&str],
+        viewport: Viewport,
+    ) -> Result<EnginePage, EngineError> {
+        let url = url.into();
+        self.build_page(
+            url,
+            html,
+            author_css,
+            cosmetic_css,
             viewport,
             PageSource::Offline,
             0,
@@ -199,13 +225,22 @@ impl TrustEngine {
     ) -> Result<EnginePage, EngineError> {
         let url = url.into();
         let html = internal_html(&url);
-        self.build_page(url, &html, &[], viewport, PageSource::Internal, 0, 0, 0, 0)
+        self.build_page(url, &html, &[], &[], viewport, PageSource::Internal, 0, 0, 0, 0)
     }
 
     pub async fn load_url(
         &mut self,
         url: impl Into<String>,
         viewport: Viewport,
+    ) -> Result<EnginePage, EngineError> {
+        self.load_url_with_cosmetic(url, viewport, &[]).await
+    }
+
+    pub async fn load_url_with_cosmetic(
+        &mut self,
+        url: impl Into<String>,
+        viewport: Viewport,
+        cosmetic_css: &[&str],
     ) -> Result<EnginePage, EngineError> {
         let url = url.into();
         let Some(network) = &mut self.network else {
@@ -230,6 +265,7 @@ impl TrustEngine {
             page_url,
             html,
             &author_css_refs,
+            cosmetic_css,
             viewport,
             response.source.into(),
             author_css.len(),
@@ -245,6 +281,7 @@ impl TrustEngine {
         url: String,
         html: &str,
         author_css: &[&str],
+        cosmetic_css: &[&str],
         viewport: Viewport,
         source: PageSource,
         external_stylesheets_loaded: usize,
@@ -254,9 +291,10 @@ impl TrustEngine {
     ) -> Result<EnginePage, EngineError> {
         let javascript_enabled = self.javascript_enabled && cfg!(feature = "javascript");
         let (rendered, js_title_opt) = if javascript_enabled {
-                render_with_javascript(html, author_css, viewport, &url)?
+                render_with_javascript(html, author_css, cosmetic_css, viewport, &url)?
             } else {
-                (self.renderer.render(html, author_css, viewport)?, None)
+                let all_css = [author_css, cosmetic_css].concat();
+                (self.renderer.render(html, &all_css, viewport)?, None)
             };
         let security = SecurityReport::for_render(
             source,
@@ -284,6 +322,7 @@ impl TrustEngine {
 fn render_with_javascript(
     html: &str,
     author_css: &[&str],
+    cosmetic_css: &[&str],
     viewport: Viewport,
     url: &str,
 ) -> Result<(fortrust_renderer::RenderedPage, Option<String>), EngineError> {
@@ -317,7 +356,7 @@ fn render_with_javascript(
     };
 
     let renderer = fortrust_renderer::StaticRenderer::new();
-    let rendered = renderer.render_document(&document, author_css, viewport)?;
+    let rendered = renderer.render_document(&document, author_css, cosmetic_css, viewport)?;
     Ok((rendered, js_title))
 }
 
@@ -325,6 +364,7 @@ fn render_with_javascript(
 fn render_with_javascript(
     _html: &str,
     _author_css: &[&str],
+    _cosmetic_css: &[&str],
     _viewport: Viewport,
     _url: &str,
 ) -> Result<fortrust_renderer::RenderedPage, EngineError> {

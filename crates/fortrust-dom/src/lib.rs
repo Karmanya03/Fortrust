@@ -106,6 +106,23 @@ impl<'arena> Node<'arena> {
             _ => None,
         }
     }
+
+    pub fn append_child(&'arena self, child: NodeRef<'arena>) {
+        // detach child from its current parent
+        if let Some(parent) = child.parent() {
+            parent
+                .children
+                .borrow_mut()
+                .retain(|c| !std::ptr::eq(*c, child));
+        }
+        child.parent.set(Some(self));
+        self.children.borrow_mut().push(child);
+    }
+
+    pub fn remove_child(&'arena self, child: NodeRef<'arena>) {
+        self.children.borrow_mut().retain(|c| !std::ptr::eq(*c, child));
+        child.parent.set(None);
+    }
 }
 
 #[derive(Debug)]
@@ -153,6 +170,23 @@ impl ElementData<'_> {
 
     pub fn attrs(&self) -> SmallVec<[(CompactString, CompactString); 4]> {
         self.attrs.borrow().clone()
+    }
+    
+    pub fn set_attr(&self, name: &str, value: &str) {
+        let mut attrs = self.attrs.borrow_mut();
+        let name_cs = CompactString::from(name);
+        for (key, val) in attrs.iter_mut() {
+            if key.eq_ignore_ascii_case(name) {
+                *val = CompactString::from(value);
+                return;
+            }
+        }
+        attrs.push((name_cs, CompactString::from(value)));
+    }
+
+    pub fn remove_attr(&self, name: &str) {
+        let mut attrs = self.attrs.borrow_mut();
+        attrs.retain(|(k, _)| !k.eq_ignore_ascii_case(name));
     }
 }
 

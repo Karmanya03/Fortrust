@@ -137,6 +137,11 @@ pub enum RendererToBrowser {
     DocumentTitleChanged {
         title: String,
     },
+    DomEvent {
+        origin: String,
+        name: String,
+        detail: String,
+    },
     ScrollPosition {
         x: f64,
         y: f64,

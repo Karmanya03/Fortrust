@@ -10,7 +10,7 @@ use chrono::Utc;
 use eframe::egui::{self, Color32, Context, CornerRadius, Frame, Margin, Pos2, Rect, Stroke, Vec2};
 use fortrust_core::{
     BlockReason, BrowserConfig, PrivacyConfig, PrivacyEngine, RequestContext, ResourceType, TabId,
-    TabManager,
+    TabManager, WorkspaceManager,
 };
 use fortrust_storage::{HistoryEntry, StorageDatabase, SettingValue};
 use trust_engine::{Color, DisplayCommand, EnginePage, EngineRect, TrustEngine, Viewport};
@@ -70,6 +70,9 @@ pub struct FortrustApp {
     // Download manager
     download_manager: DownloadManager,
     download_dir: String,
+
+    // Workspace management
+    workspaces: WorkspaceManager,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -256,7 +259,6 @@ impl EngineWorker {
         // Also send a navigation command to the renderer over IPC if available.
         if let Some(sender) = &self.ipc_sender {
             let sender = sender.clone();
-            let url_clone = url_clone;
             let _ = std::thread::spawn(move || {
                 let rt = tokio::runtime::Builder::new_current_thread().enable_all().build();
                 if let Ok(rt) = rt {
@@ -272,10 +274,7 @@ impl EngineWorker {
 
 fn try_connect_external_renderer() -> Option<(fortrust_ipc::MessageSender, fortrust_ipc::MessageReceiver)> {
     // Try several times to spawn/connect to an external renderer process.
-    let renderer_path = match find_renderer_binary() {
-        Some(p) => p,
-        None => return None,
-    };
+    let renderer_path = find_renderer_binary()?;
 
     for attempt in 0..3 {
         let listener = match std::net::TcpListener::bind(("127.0.0.1", 0)) {
@@ -344,11 +343,10 @@ fn find_renderer_binary() -> Option<PathBuf> {
         candidates.push(PathBuf::from(path));
     }
 
-    if let Ok(current_exe) = std::env::current_exe() {
-        if let Some(dir) = current_exe.parent() {
+    if let Ok(current_exe) = std::env::current_exe()
+        && let Some(dir) = current_exe.parent() {
             candidates.push(dir.join(if cfg!(windows) { "renderer.exe" } else { "renderer" }));
             candidates.push(dir.join("renderer"));
-        }
     }
 
     if let Ok(current_dir) = std::env::current_dir() {
@@ -368,10 +366,9 @@ fn spawn_basic_renderer_loop(receiver: fortrust_ipc::MessageReceiver, sender: fo
         };
 
         rt.block_on(async move {
-            loop {
-                match receiver.recv_browser_message().await {
-                    Ok(msg) => match msg {
-                        fortrust_ipc::BrowserToRenderer::Navigate { url } => {
+            while let Ok(msg) = receiver.recv_browser_message().await {
+                match msg {
+                    fortrust_ipc::BrowserToRenderer::Navigate { url } => {
                             let reply = fortrust_ipc::RendererToBrowser::TitleChanged { title: url };
                             let _ = sender.send_renderer_message(&reply).await;
                         }
@@ -398,9 +395,7 @@ fn spawn_basic_renderer_loop(receiver: fortrust_ipc::MessageReceiver, sender: fo
                         }
                         fortrust_ipc::BrowserToRenderer::Shutdown => break,
                         _ => {}
-                    },
-                    Err(_) => break,
-                }
+                    }
             }
         });
     });
@@ -414,13 +409,8 @@ fn spawn_renderer_event_forwarder(receiver: fortrust_ipc::MessageReceiver, event
         };
 
         rt.block_on(async move {
-            loop {
-                match receiver.recv_renderer_message().await {
-                    Ok(msg) => {
-                        let _ = event_sender.send(EngineEvent::RendererMsg { msg });
-                    }
-                    Err(_) => break,
-                }
+            while let Ok(msg) = receiver.recv_renderer_message().await {
+                let _ = event_sender.send(EngineEvent::RendererMsg { msg });
             }
         });
     });
@@ -532,6 +522,8 @@ impl FortrustApp {
             page_info_open: false,
             download_manager: DownloadManager::new(),
             download_dir: default_download_dir(),
+
+            workspaces: WorkspaceManager::default(),
         };
 
         // Restore persisted download state and auto-resume pending downloads
@@ -663,10 +655,9 @@ impl FortrustApp {
                 }
             }
             fortrust_ipc::RendererToBrowser::LoadProgress { percent: _, state } => {
-                if matches!(state, fortrust_ipc::LoadState::Loaded) {
-                    if let Some(tab) = self.tab_pages.get_mut(&tab_id) {
+                if matches!(state, fortrust_ipc::LoadState::Loaded)
+                    && let Some(tab) = self.tab_pages.get_mut(&tab_id) {
                         tab.loading_url = None;
-                    }
                 }
             }
             fortrust_ipc::RendererToBrowser::LoadComplete => {
@@ -701,6 +692,10 @@ impl FortrustApp {
             fortrust_ipc::RendererToBrowser::ConsoleMessage { level, message } => {
                 tracing::info!(target: "fortrust.renderer", level = %level, message = %message);
             }
+            fortrust_ipc::RendererToBrowser::DomEvent { origin: _, name, detail } => {
+                // Structured DOM event forwarded from renderer.
+                self.handle_js_event(ctx, tab_id, &name, &detail);
+            }
             fortrust_ipc::RendererToBrowser::PrivacyEvent { event } => {
                 tracing::info!(target: "fortrust.renderer", ?event);
             }
@@ -717,6 +712,30 @@ impl FortrustApp {
         }
 
         ctx.request_repaint();
+    }
+
+    fn handle_js_event(&mut self, ctx: &Context, tab_id: TabId, name: &str, detail: &str) {
+        tracing::info!(target: "fortrust.renderer", "JS event received: {} -> {}", name, detail);
+
+        // Handle some common event names emitted from JS
+        match name.to_ascii_lowercase().as_str() {
+            "title" | "settitle" | "document.title" => {
+                if let Some(tab) = self.tab_pages.get_mut(&tab_id) {
+                    if let Some(page) = tab.page.as_mut() {
+                        page.title = detail.to_owned();
+                    }
+                    // Update tab manager display title if URL known
+                    if let Some(current_url) = tab.current_url().map(str::to_owned) {
+                        self.tabs.navigate_tab(tab_id, current_url, detail.to_owned());
+                    }
+                }
+                ctx.request_repaint();
+            }
+            _ => {
+                // For now, just log and surface to page console via tracing; later we can forward structured IPC.
+                tracing::info!(target: "fortrust.renderer", "Unhandled JS event: {} -> {}", name, detail);
+            }
+        }
     }
 
     fn motion_scale(&self) -> f32 {
@@ -870,6 +889,11 @@ impl FortrustApp {
 
     fn open_new_tab(&mut self) {
         let id = self.tabs.open_tab("fortrust://start", "Speed Dial", false);
+        let ws_id = self.workspaces.active();
+        self.workspaces.add_tab(ws_id, id);
+        if let Some(tab) = self.tabs.tabs_mut().iter_mut().find(|t| t.id == id) {
+            tab.workspace_id = Some(ws_id);
+        }
         self.tab_pages.insert(id, TabPageState::new("fortrust://start"));
         self.omnibox.text = "fortrust://start".to_owned();
         self.needs_new_tab = true;
@@ -1001,7 +1025,7 @@ impl FortrustApp {
                             if selected {
                                 ui.painter().rect_filled(tab_rect, CornerRadius::same(6), self.theme.surface_deepest);
                             } else if ui.rect_contains_pointer(tab_rect) {
-                                ui.painter().rect_filled(tab_rect, CornerRadius::same(6), Color32::from_rgba_unmultiplied(255, 255, 255, 12));
+                                ui.painter().rect_filled(tab_rect, CornerRadius::same(6), self.theme.surface_hover);
                             }
 
                             let is_speed_dial = tab.url.starts_with("fortrust://start");
@@ -1051,7 +1075,7 @@ impl FortrustApp {
                             if ui.rect_contains_pointer(tab_rect) {
                                 let close_rect = Rect::from_min_size(Pos2::new(tab_rect.max.x - 19.0, tab_rect.center().y - 7.5), Vec2::new(15.0, 15.0));
                                 let close_hovered = ui.rect_contains_pointer(close_rect);
-                                if close_hovered { ui.painter().rect_filled(close_rect, CornerRadius::same(3), Color32::from_rgba_unmultiplied(255, 255, 255, 20)); }
+                                if close_hovered { ui.painter().rect_filled(close_rect, CornerRadius::same(3), self.theme.glass_hover); }
                                 icons::paint_close_icon(ui.painter(), close_rect, self.theme.text_muted);
                                 if ui.allocate_rect(close_rect, egui::Sense::click()).clicked() { closed = Some(tab.id); }
                             }
@@ -1088,8 +1112,8 @@ impl FortrustApp {
                             Pos2::new(pointer_x - ghost_w / 2.0, 6.0),
                             Vec2::new(ghost_w, 27.0),
                         );
-                        ui.painter().rect_filled(ghost_rect, CornerRadius::same(6), Color32::from_rgba_unmultiplied(79, 158, 255, 40));
-                        ui.painter().rect_stroke(ghost_rect, CornerRadius::same(6), Stroke::new(1.0, Color32::from_rgba_unmultiplied(79, 158, 255, 80)), egui::StrokeKind::Inside);
+                        ui.painter().rect_filled(ghost_rect, CornerRadius::same(6), Color32::from_rgba_unmultiplied(self.theme.accent_primary.r(), self.theme.accent_primary.g(), self.theme.accent_primary.b(), 40));
+                        ui.painter().rect_stroke(ghost_rect, CornerRadius::same(6), Stroke::new(1.0, Color32::from_rgba_unmultiplied(self.theme.accent_primary.r(), self.theme.accent_primary.g(), self.theme.accent_primary.b(), 80)), egui::StrokeKind::Inside);
                         if let Some(tab) = self.tabs.tabs().iter().find(|t| t.id == drag_id) {
                             ui.painter().text(
                                 Pos2::new(ghost_rect.center().x, ghost_rect.center().y),
@@ -1197,8 +1221,10 @@ impl FortrustApp {
                 let mut action: Option<&str> = None;
 
                 let frame = egui::Frame {
-                    fill: Color32::from_rgb(30, 34, 42),
-                    stroke: egui::Stroke::new(1.0, Color32::from_rgb(50, 57, 73)),
+                    fill: self.theme.surface_sidebar,
+                    stroke: egui::Stroke::new(1.0, self.theme.border_strong),
+                    corner_radius: egui::CornerRadius::same(8),
+                    inner_margin: egui::Margin::same(4),
                     ..Default::default()
                 };
                 frame.show(ui, |ui| {
@@ -1400,7 +1426,7 @@ impl FortrustApp {
                 // Render sidebar overlay
                 let old_theme = self.config.ui.theme.clone();
                 let downloads_entries = self.download_manager.all_downloads();
-                if let Some(url) = self.sidebar_state.render_overlay(ui, &self.theme, &mut self.sidebar_anim, &mut self.config, self.storage.as_ref(), &downloads_entries) {
+                if let Some(url) = self.sidebar_state.render_overlay(ui, &self.theme, &mut self.sidebar_anim, &mut self.config, self.storage.as_ref(), &downloads_entries, &mut self.workspaces) {
                     navigate = Some(url);
                 }
                 // Process pending download actions from sidebar

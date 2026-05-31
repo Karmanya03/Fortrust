@@ -9,7 +9,7 @@ crate-type = ["rlib"]
 [dependencies]
 serde = { version = "1", features = ["derive"] }
 bincode = { version = "2", features = ["serde", "derive"] }
-tokio = { version = "1", features = ["sync", "rt-multi-thread", "time", "net", "io-util"] }
+tokio = { version = "1", features = ["macros", "sync", "rt-multi-thread", "time", "net", "io-util"] }
 bytes = "1"
 thiserror = "1"
 tracing = "0.1"

@@ -13,6 +13,8 @@ lazy_static::lazy_static! {
     static ref DOCUMENT_TITLES: Mutex<HashMap<usize, String>> = Mutex::new(HashMap::new());
     // Per-node attribute overrides created by JS `setAttribute` calls.
     static ref DOCUMENT_ATTR_OVERRIDES: Mutex<HashMap<usize, HashMap<String, String>>> = Mutex::new(HashMap::new());
+    // Map of node_ptr -> list of event names registered by JS via addEventListener
+    static ref DOCUMENT_EVENT_LISTENERS: Mutex<HashMap<usize, Vec<String>>> = Mutex::new(HashMap::new());
 }
 
 pub fn register(context: &mut Context, document: &fortrust_dom::Document<'static>) -> JsResult<()> {
@@ -203,7 +205,11 @@ fn build_document_object(
                         .map(|v| v.to_string(ctx).map(|s| s.to_std_string_escaped()))
                         .unwrap_or(Ok(String::new()))?;
                     if name.is_empty() { return Ok(JsValue::undefined()); }
-                    hooks::notify_event(name, String::new());
+                    // Notify host about dispatched event.
+                    hooks::notify_event(name.clone(), String::new());
+                    // Also record that an event was dispatched; if listeners are registered on the document, log for now.
+                    let mut guard = DOCUMENT_EVENT_LISTENERS.lock().unwrap();
+                    let _ = guard.entry(doc_ptr_usize).or_default();
                     Ok(JsValue::undefined())
                 })
             },
@@ -303,7 +309,7 @@ fn wrap_element(context: &mut Context, node: fortrust_dom::NodeRef<'_>) -> JsRes
                 NativeFunction::from_closure(move |_this, args, ctx| {
                     // setAttribute(name, value)
                     let name = args
-                        .get(0)
+                        .first()
                         .map(|v| v.to_string(ctx).map(|s| s.to_std_string_escaped()))
                         .unwrap_or(Ok(String::new()))?;
                     let value = args
@@ -312,15 +318,35 @@ fn wrap_element(context: &mut Context, node: fortrust_dom::NodeRef<'_>) -> JsRes
                         .unwrap_or(Ok(String::new()))?;
                     if name.is_empty() { return Ok(JsValue::undefined()); }
                     let node_ptr = node_ptr_usize as *const fortrust_dom::Node<'static>;
-                    let node_ref: &fortrust_dom::Node<'static> = unsafe { &*node_ptr };
-                    // Store attribute override in external map (DOM internal fields are private).
-                    let mut map = DOCUMENT_ATTR_OVERRIDES.lock().unwrap();
-                    let node_map = map.entry(node_ptr_usize).or_insert_with(HashMap::new);
-                    node_map.insert(name, value);
+                    let node_ref: &fortrust_dom::Node<'static> = &*node_ptr;
+                    // Mutate the arena-backed element attributes directly.
+                    if let Some(el) = node_ref.as_element() {
+                        el.set_attr(&name, &value);
+                    }
                     Ok(JsValue::undefined())
                 })
             },
             js_string!("setAttribute"),
+            2,
+        )
+        .function(
+            unsafe {
+                NativeFunction::from_closure(move |_this, args, ctx| {
+                    // addEventListener(name, callback) - we only record the event name on the Rust side for now
+                    let name = args
+                        .first()
+                        .map(|v| v.to_string(ctx).map(|s| s.to_std_string_escaped()))
+                        .unwrap_or(Ok(String::new()))?;
+                    if name.is_empty() { return Ok(JsValue::undefined()); }
+                    let mut guard = DOCUMENT_EVENT_LISTENERS.lock().unwrap();
+                    let entry = guard.entry(node_ptr_usize).or_default();
+                    if !entry.iter().any(|n| n.eq_ignore_ascii_case(&name)) {
+                        entry.push(name);
+                    }
+                    Ok(JsValue::undefined())
+                })
+            },
+            js_string!("addEventListener"),
             2,
         )
         .build();

@@ -158,6 +158,11 @@ impl AdBlocker {
         }
     }
 
+    /// Load host-based blocklist entries from a hosts-format byte slice into the internal filters.
+    pub fn load_hosts_from_bytes(&mut self, bytes: &[u8]) {
+        self.filters.load_hosts_from_bytes(bytes);
+    }
+
     pub fn should_block(
         &self,
         url: &str,
