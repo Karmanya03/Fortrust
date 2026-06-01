@@ -43,7 +43,7 @@ impl OmniboxState {
         self.suggestions.push(SuggestionItem {
             kind: SuggestionKind::Search,
             text: format!("Search for \"{}\"", self.text.trim()),
-            url: format!("https://duckduckgo.com/?q={}", urlencoding::encode(self.text.trim())),
+            url: private_search_url(self.text.trim()),
         });
 
         // Add matching history/bookmarks
@@ -277,6 +277,10 @@ fn normalize_input(input: &str) -> String {
     } else if trimmed.contains('.') && !trimmed.contains(' ') {
         format!("https://{}", trimmed)
     } else {
-        format!("https://duckduckgo.com/?q={}", urlencoding::encode(trimmed))
+        private_search_url(trimmed)
     }
+}
+
+fn private_search_url(query: &str) -> String {
+    format!("fortrust://search?q={}", urlencoding::encode(query.trim()))
 }

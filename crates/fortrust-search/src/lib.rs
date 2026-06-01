@@ -16,7 +16,11 @@ pub struct SearchConfig {
 impl Default for SearchConfig {
     fn default() -> Self {
         Self {
-            enabled_backends: vec![SearchBackend::DuckDuckGo, SearchBackend::BraveSearch],
+            enabled_backends: vec![
+                SearchBackend::DuckDuckGo,
+                SearchBackend::Stract,
+                SearchBackend::Wikipedia,
+            ],
             max_results: 10,
             safe_search: SafeSearchMode::Moderate,
             language: "en-US".to_owned(),
@@ -25,7 +29,7 @@ impl Default for SearchConfig {
     }
 }
 
-#[derive(Clone, PartialEq)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub enum SearchBackend {
     BraveSearch,
     Mojeek,
@@ -53,26 +57,37 @@ pub struct SearchResult {
 impl FortrustSearch {
     pub async fn new(config: SearchConfig) -> Self {
         let client = reqwest::Client::builder()
-            .user_agent("Fortrust/1.0 (+https://fortrust.browser)")
+            .user_agent("FortrustSearch/1.0")
             .timeout(std::time::Duration::from_secs(5))
+            .redirect(reqwest::redirect::Policy::limited(3))
+            .pool_idle_timeout(std::time::Duration::from_secs(10))
             .build()
             .unwrap();
         Self { client, config }
     }
 
     pub async fn search(&self, query: &str) -> Vec<SearchResult> {
+        let query = query.trim();
+        if query.is_empty() {
+            return Vec::new();
+        }
+
         let mut join_set = JoinSet::new();
 
         for backend in &self.config.enabled_backends {
             let client = self.client.clone();
-            let query = query.to_string();
+            let query = query.to_owned();
             let backend = backend.clone();
             let max = self.config.max_results;
+            let safe_search = self.config.safe_search;
+            let language = self.config.language.clone();
 
             join_set.spawn(async move {
                 match backend {
                     SearchBackend::BraveSearch => fetch_brave(&client, &query, max).await,
-                    SearchBackend::DuckDuckGo => fetch_ddg(&client, &query, max).await,
+                    SearchBackend::DuckDuckGo => {
+                        fetch_ddg(&client, &query, max, safe_search, &language).await
+                    }
                     SearchBackend::Mojeek => fetch_mojeek(&client, &query, max).await,
                     SearchBackend::Stract => fetch_stract(&client, &query, max).await,
                     SearchBackend::Wikipedia => fetch_wikipedia(&client, &query).await,
@@ -96,15 +111,31 @@ impl FortrustSearch {
     }
 }
 
-async fn fetch_ddg(client: &reqwest::Client, query: &str, max: usize) -> Vec<SearchResult> {
+async fn fetch_ddg(
+    client: &reqwest::Client,
+    query: &str,
+    max: usize,
+    safe_search: SafeSearchMode,
+    language: &str,
+) -> Vec<SearchResult> {
+    let kp = match safe_search {
+        SafeSearchMode::Off => "-2",
+        SafeSearchMode::Moderate => "-1",
+        SafeSearchMode::Strict => "1",
+    };
     let url = format!(
-        "https://html.duckduckgo.com/html/?q={}&kp=-1&kl=wt-wt",
-        urlencoding::encode(query)
+        "https://html.duckduckgo.com/html/?q={}&kp={}&kl={}",
+        urlencoding::encode(query),
+        kp,
+        ddg_region(language)
     );
 
     let Ok(resp) = client
         .get(&url)
-        .header("Accept-Language", "en-US,en;q=0.9")
+        .header("Accept-Language", language)
+        .header("DNT", "1")
+        .header("Sec-GPC", "1")
+        .header("Cache-Control", "no-store")
         .send()
         .await
     else {
@@ -120,26 +151,24 @@ async fn fetch_ddg(client: &reqwest::Client, query: &str, max: usize) -> Vec<Sea
 fn parse_ddg_html(html: &str, max: usize) -> Vec<SearchResult> {
     let mut results = Vec::new();
 
-    // Simple regex-based DDG HTML parsing
-    // In production, use html5ever for proper parsing
-    for chunk in html.split("<h2 class=\"result__title\">").skip(1) {
+    for chunk in html.split("result__title").skip(1) {
         if results.len() >= max {
             break;
         }
 
-        let title = chunk
-            .split('>')
-            .nth(1)
-            .and_then(|s| s.split('<').next())
-            .unwrap_or("")
-            .to_owned();
+        let Some(anchor_start) = chunk.find("<a") else {
+            continue;
+        };
+        let anchor = &chunk[anchor_start..];
+        let Some(url) = extract_attr(anchor, "href") else {
+            continue;
+        };
+        let Some(title_html) = between(anchor, ">", "</a>") else {
+            continue;
+        };
 
-        let url = chunk
-            .split("href=\"")
-            .nth(1)
-            .and_then(|s| s.split('\"').next())
-            .unwrap_or("")
-            .to_owned();
+        let title = html_unescape(&strip_tags(title_html)).trim().to_owned();
+        let url = unwrap_ddg_redirect(&html_unescape(&url));
 
         let snippet = chunk
             .split("class=\"result__snippet\">")
@@ -148,10 +177,10 @@ fn parse_ddg_html(html: &str, max: usize) -> Vec<SearchResult> {
             .map(|s| s.trim().to_owned())
             .unwrap_or_default();
 
-        if !title.is_empty() {
+        if !title.is_empty() && is_http_url(&url) {
             results.push(SearchResult {
                 title,
-                url: html_unescape(&url),
+                url,
                 snippet: html_unescape(&snippet),
                 source_backend: SearchBackend::DuckDuckGo,
                 relevance_score: 0.6,
@@ -163,6 +192,14 @@ fn parse_ddg_html(html: &str, max: usize) -> Vec<SearchResult> {
 }
 
 async fn fetch_brave(client: &reqwest::Client, query: &str, max: usize) -> Vec<SearchResult> {
+    let Ok(token) = std::env::var("BRAVE_SEARCH_API_KEY") else {
+        return Vec::new();
+    };
+    let token = token.trim();
+    if token.is_empty() {
+        return Vec::new();
+    }
+
     let url = format!(
         "https://api.search.brave.com/res/v1/web/search?q={}&count={}&safesearch=off",
         urlencoding::encode(query),
@@ -172,7 +209,9 @@ async fn fetch_brave(client: &reqwest::Client, query: &str, max: usize) -> Vec<S
     let Ok(resp) = client
         .get(&url)
         .header("Accept", "application/json")
-        .header("X-Subscription-Token", "")
+        .header("DNT", "1")
+        .header("Sec-GPC", "1")
+        .header("X-Subscription-Token", token)
         .send()
         .await
     else {
@@ -209,7 +248,13 @@ async fn fetch_mojeek(client: &reqwest::Client, query: &str, max: usize) -> Vec<
         max
     );
 
-    let Ok(resp) = client.get(&url).send().await else {
+    let Ok(resp) = client
+        .get(&url)
+        .header("DNT", "1")
+        .header("Sec-GPC", "1")
+        .send()
+        .await
+    else {
         return vec![];
     };
     let Ok(json) = resp.json::<serde_json::Value>().await else {
@@ -242,7 +287,13 @@ async fn fetch_stract(client: &reqwest::Client, query: &str, max: usize) -> Vec<
         max
     );
 
-    let Ok(resp) = client.get(&url).send().await else {
+    let Ok(resp) = client
+        .get(&url)
+        .header("DNT", "1")
+        .header("Sec-GPC", "1")
+        .send()
+        .await
+    else {
         return vec![];
     };
     let Ok(json) = resp.json::<serde_json::Value>().await else {
@@ -276,7 +327,9 @@ async fn fetch_wikipedia(client: &reqwest::Client, query: &str) -> Vec<SearchRes
 
     let Ok(resp) = client
         .get(&url)
-        .header("User-Agent", "Fortrust/1.0")
+        .header("User-Agent", "FortrustSearch/1.0")
+        .header("DNT", "1")
+        .header("Sec-GPC", "1")
         .send()
         .await
     else {
@@ -328,6 +381,64 @@ fn normalize_url_for_dedup(url: &str) -> String {
     s.replace("://www.", "://").to_lowercase()
 }
 
+fn ddg_region(language: &str) -> &'static str {
+    match language.to_ascii_lowercase().as_str() {
+        "en-us" => "us-en",
+        "en-gb" => "uk-en",
+        "en-ca" => "ca-en",
+        "en-au" => "au-en",
+        _ => "wt-wt",
+    }
+}
+
+fn extract_attr(fragment: &str, attr: &str) -> Option<String> {
+    let needle = format!("{attr}=\"");
+    fragment
+        .split(&needle)
+        .nth(1)
+        .and_then(|s| s.split('"').next())
+        .map(str::to_owned)
+}
+
+fn between<'a>(input: &'a str, start: &str, end: &str) -> Option<&'a str> {
+    let start_idx = input.find(start)? + start.len();
+    let end_idx = input[start_idx..].find(end)? + start_idx;
+    Some(&input[start_idx..end_idx])
+}
+
+fn strip_tags(input: &str) -> String {
+    let mut output = String::with_capacity(input.len());
+    let mut in_tag = false;
+    for ch in input.chars() {
+        match ch {
+            '<' => in_tag = true,
+            '>' => in_tag = false,
+            _ if !in_tag => output.push(ch),
+            _ => {}
+        }
+    }
+    output
+}
+
+fn unwrap_ddg_redirect(url: &str) -> String {
+    if let Ok(parsed) = url::Url::parse(url)
+        && parsed.domain().is_some_and(|domain| domain.ends_with("duckduckgo.com"))
+        && parsed.path().contains("/l/")
+        && let Some(value) = parsed
+            .query_pairs()
+            .find_map(|(key, value)| (key == "uddg").then(|| value.into_owned()))
+    {
+        return value;
+    }
+    url.to_owned()
+}
+
+fn is_http_url(url: &str) -> bool {
+    url::Url::parse(url)
+        .map(|url| matches!(url.scheme(), "http" | "https"))
+        .unwrap_or(false)
+}
+
 fn rank_results(results: &mut [SearchResult]) {
     let mut url_counts: std::collections::HashMap<String, u32> = std::collections::HashMap::new();
     for r in results.iter() {
@@ -355,4 +466,35 @@ fn html_unescape(input: &str) -> String {
         .replace("&#39;", "'")
         .replace("&#x27;", "'")
         .replace("&#x2F;", "/")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn ddg_parser_strips_markup_and_unwraps_redirects() {
+        let html = r#"
+        <h2 class="result__title">
+          <a class="result__a" href="https://duckduckgo.com/l/?uddg=https%3A%2F%2Fexample.com%2Fprivate%3Fq%3Done&amp;rut=abc">
+            Fortrust <b>Privacy</b>
+          </a>
+        </h2>
+        <a class="result__snippet">Private &amp; secure result.</a>
+        "#;
+
+        let results = parse_ddg_html(html, 10);
+        assert_eq!(results.len(), 1);
+        assert_eq!(results[0].title, "Fortrust Privacy");
+        assert_eq!(results[0].url, "https://example.com/private?q=one");
+        assert_eq!(results[0].snippet, "Private & secure result.");
+    }
+
+    #[test]
+    fn search_config_uses_no_key_backends_by_default() {
+        let config = SearchConfig::default();
+        assert!(config.enabled_backends.contains(&SearchBackend::DuckDuckGo));
+        assert!(config.enabled_backends.contains(&SearchBackend::Wikipedia));
+        assert!(!config.enabled_backends.contains(&SearchBackend::BraveSearch));
+    }
 }

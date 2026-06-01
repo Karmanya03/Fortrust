@@ -1,3 +1,4 @@
+use fortrust_core::ImageRegistry;
 use fortrust_layout::{BoxKind, LayoutBox, LayoutTree, Rect};
 use fortrust_style::{BorderStyle, Color, FontWeight, Length, OutlineStyle};
 
@@ -13,6 +14,19 @@ pub enum DisplayCommand {
         color: Color,
         font_size_px: f32,
         font_weight: FontWeight,
+    },
+    /// Render a decoded image into the given rect, preserving aspect ratio and
+    /// centered. The `image_id` indexes into the `ImageRegistry` carried on the
+    /// `RenderedPage`. The `natural` size is the image's original pixel
+    /// dimensions. The `alt` string is empty for successfully loaded images
+    /// (the image itself is shown) or carries the alt-text fallback for
+    /// `<img>` elements without a usable decoded payload.
+    DrawImage {
+        rect: Rect,
+        image_id: u32,
+        natural_width: u32,
+        natural_height: u32,
+        alt: String,
     },
     DrawBorder {
         rect: Rect,
@@ -111,7 +125,7 @@ impl Painter {
         Self
     }
 
-    pub fn paint(&self, tree: &LayoutTree, options: PaintOptions) -> DisplayList {
+    pub fn paint(&self, tree: &LayoutTree, images: &ImageRegistry, options: PaintOptions) -> DisplayList {
         let mut list = DisplayList::new();
         // Fill viewport background if set (propagated from html/body)
         if options.viewport_fill.a > 0 {
@@ -121,13 +135,17 @@ impl Painter {
             });
         }
         list.push(DisplayCommand::ClipPush(options.viewport));
-        paint_box(&tree.root, &mut list, options);
+        paint_box(&tree.root, images, &mut list, options);
+        // Positioned children are rendered on top of the regular flow.
+        for child in &tree.positioned_children {
+            paint_box(child, images, &mut list, options);
+        }
         list.push(DisplayCommand::ClipPop);
         list
     }
 }
 
-fn paint_box(layout_box: &LayoutBox, list: &mut DisplayList, options: PaintOptions) {
+fn paint_box(layout_box: &LayoutBox, images: &ImageRegistry, list: &mut DisplayList, options: PaintOptions) {
     let visible = is_visible_rect(layout_box.rect);
 
     if visible {
@@ -205,24 +223,39 @@ fn paint_box(layout_box: &LayoutBox, list: &mut DisplayList, options: PaintOptio
     }
 
     if layout_box.kind == BoxKind::Replaced {
-        let placeholder = layout_box
-            .text
-            .as_deref()
-            .filter(|text| !text.is_empty())
-            .map(|alt| format!("[image: {alt}]"))
-            .unwrap_or_else(|| "[image]".to_owned());
+        if let Some(image_id) = layout_box.image_ref
+            && let Some(img) = images.get(image_id)
+        {
+            list.push(DisplayCommand::DrawImage {
+                rect: layout_box.rect,
+                image_id,
+                natural_width: img.width,
+                natural_height: img.height,
+                alt: layout_box.text.clone().unwrap_or_default(),
+            });
+        } else {
+            // No decoded image available — fall back to the alt-text placeholder
+            // so the layout is still understandable. Try to use a small font
+            // that fits inside the box.
+            let placeholder = layout_box
+                .text
+                .as_deref()
+                .filter(|text| !text.is_empty())
+                .map(|alt| format!("[image: {alt}]"))
+                .unwrap_or_else(|| "[image]".to_owned());
 
-        list.push(DisplayCommand::DrawText {
-            rect: layout_box.rect,
-            text: placeholder,
-            color: layout_box.style.color,
-            font_size_px: font_size_px(layout_box.style.font_size).min(layout_box.rect.height),
-            font_weight: layout_box.style.font_weight,
-        });
+            list.push(DisplayCommand::DrawText {
+                rect: layout_box.rect,
+                text: placeholder,
+                color: layout_box.style.color,
+                font_size_px: font_size_px(layout_box.style.font_size).min(layout_box.rect.height),
+                font_weight: layout_box.style.font_weight,
+            });
+        }
     }
 
     for child in &layout_box.children {
-        paint_box(child, list, options);
+        paint_box(child, images, list, options);
     }
 }
 
@@ -294,10 +327,11 @@ mod tests {
                     viewport_height: 240.0,
                     containing_block: None,
                 },
+                &ImageRegistry::new(),
             )
             .unwrap();
 
-        let list = Painter::new().paint(&tree, PaintOptions::viewport(320.0, 240.0));
+        let list = Painter::new().paint(&tree, &ImageRegistry::new(), PaintOptions::viewport(320.0, 240.0));
         let commands = list.commands();
         let fill_index = commands
             .iter()
@@ -324,10 +358,11 @@ mod tests {
                     viewport_height: 240.0,
                     containing_block: None,
                 },
+                &ImageRegistry::new(),
             )
             .unwrap();
 
-        let list = Painter::new().paint(&tree, PaintOptions::viewport(320.0, 240.0));
+        let list = Painter::new().paint(&tree, &ImageRegistry::new(), PaintOptions::viewport(320.0, 240.0));
         let text = list
             .commands()
             .iter()
@@ -360,10 +395,11 @@ mod tests {
                     viewport_height: 240.0,
                     containing_block: None,
                 },
+                &ImageRegistry::new(),
             )
             .unwrap();
 
-        let list = Painter::new().paint(&tree, PaintOptions::viewport(320.0, 240.0));
+        let list = Painter::new().paint(&tree, &ImageRegistry::new(), PaintOptions::viewport(320.0, 240.0));
         assert!(list.commands().iter().any(|command| matches!(
             command,
             DisplayCommand::DrawText { text, .. } if text.contains("image")
@@ -383,10 +419,11 @@ mod tests {
                     viewport_height: 80.0,
                     containing_block: None,
                 },
+                &ImageRegistry::new(),
             )
             .unwrap();
 
-        let list = Painter::new().paint(&tree, PaintOptions::viewport(100.0, 80.0));
+        let list = Painter::new().paint(&tree, &ImageRegistry::new(), PaintOptions::viewport(100.0, 80.0));
         assert!(matches!(
             list.commands().first(),
             Some(DisplayCommand::ClipPush(Rect {
@@ -414,12 +451,14 @@ mod tests {
                     viewport_height: 100.0,
                     containing_block: None,
                 },
+                &ImageRegistry::new(),
             )
             .unwrap();
 
-        let plain = Painter::new().paint(&tree, PaintOptions::viewport(160.0, 100.0));
+        let plain = Painter::new().paint(&tree, &ImageRegistry::new(), PaintOptions::viewport(160.0, 100.0));
         let debug = Painter::new().paint(
             &tree,
+            &ImageRegistry::new(),
             PaintOptions {
                 viewport: Rect {
                     x: 0.0,
@@ -452,10 +491,11 @@ mod tests {
                     viewport_height: 240.0,
                     containing_block: None,
                 },
+                &ImageRegistry::new(),
             )
             .unwrap();
 
-        let list = Painter::new().paint(&tree, PaintOptions::viewport(320.0, 240.0));
+        let list = Painter::new().paint(&tree, &ImageRegistry::new(), PaintOptions::viewport(320.0, 240.0));
         let border_commands: Vec<_> = list
             .commands()
             .iter()
@@ -500,10 +540,11 @@ mod tests {
                     viewport_height: 100.0,
                     containing_block: None,
                 },
+                &ImageRegistry::new(),
             )
             .unwrap();
 
-        let list = Painter::new().paint(&tree, PaintOptions::viewport(160.0, 100.0));
+        let list = Painter::new().paint(&tree, &ImageRegistry::new(), PaintOptions::viewport(160.0, 100.0));
         assert!(list.commands().iter().any(|command| matches!(
             command,
             DisplayCommand::FillRect {

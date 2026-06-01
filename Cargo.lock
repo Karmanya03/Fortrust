@@ -1135,6 +1135,7 @@ dependencies = [
  "egui",
  "fortrust-core",
  "fortrust-ipc",
+ "fortrust-privacy",
  "fortrust-search",
  "fortrust-storage",
  "futures-util",
@@ -1156,6 +1157,7 @@ version = "0.0.1"
 dependencies = [
  "ahash",
  "compact_str",
+ "fortrust-privacy",
  "serde",
  "smallvec",
  "url",
@@ -1206,6 +1208,7 @@ dependencies = [
 name = "fortrust-layout"
 version = "0.0.1"
 dependencies = [
+ "fortrust-core",
  "fortrust-dom",
  "fortrust-style",
  "smallvec",
@@ -1217,6 +1220,7 @@ version = "0.0.1"
 dependencies = [
  "bytes",
  "fortrust-core",
+ "fortrust-ipc",
  "futures-util",
  "http",
  "reqwest",
@@ -1230,6 +1234,7 @@ dependencies = [
 name = "fortrust-paint"
 version = "0.0.1"
 dependencies = [
+ "fortrust-core",
  "fortrust-dom",
  "fortrust-layout",
  "fortrust-style",
@@ -1255,6 +1260,7 @@ dependencies = [
 name = "fortrust-renderer"
 version = "0.0.1"
 dependencies = [
+ "fortrust-core",
  "fortrust-dom",
  "fortrust-layout",
  "fortrust-paint",
@@ -2411,6 +2417,7 @@ dependencies = [
 name = "netproc"
 version = "0.0.1"
 dependencies = [
+ "bytes",
  "fortrust-core",
  "fortrust-ipc",
  "fortrust-net",
@@ -4220,6 +4227,7 @@ dependencies = [
  "futures-util",
  "html5ever",
  "http",
+ "image 0.24.9",
  "markup5ever 0.14.1",
  "percent-encoding",
  "serde",

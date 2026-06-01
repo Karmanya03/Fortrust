@@ -105,6 +105,13 @@ impl SidebarState {
         let rect = ui.available_rect_before_wrap();
         ui.painter().rect_filled(rect, CornerRadius::ZERO, theme.surface_rail);
 
+        // Auto-hide: when the rail is closed and the user hovers over it,
+        // automatically open the sidebar. This is the classic browser-sidebar
+        // "peek on hover" behavior.
+        if self.auto_hide && !anim.is_open() && ui.rect_contains_pointer(rect) {
+            anim.open();
+        }
+
         let rail_left = rect.min.x;
         let mut y = rect.min.y + 8.0;
 
@@ -192,6 +199,20 @@ impl SidebarState {
 
         let area = ui.max_rect();
         let sbr = Rect::from_min_size(Pos2::new(area.min.x, area.min.y), Vec2::new(offset, area.height()));
+
+        // Click-outside-to-close: a transparent scrim over the area to the
+        // right of the sidebar. Clicking it dismisses the sidebar (and the
+        // caller should consume the click so it doesn't navigate).
+        let scrim = Rect::from_min_size(
+            Pos2::new(sbr.max.x, sbr.min.y),
+            Vec2::new((area.max.x - sbr.max.x).max(0.0), area.height()),
+        );
+        if scrim.width() > 0.0 {
+            let resp = ui.allocate_rect(scrim, egui::Sense::click());
+            if resp.clicked() {
+                anim.close();
+            }
+        }
 
         ui.painter().rect_filled(sbr, CornerRadius::ZERO, theme.surface_sidebar);
         ui.painter().rect_stroke(sbr, CornerRadius::ZERO, Stroke::new(1.0, theme.border_subtle), egui::StrokeKind::Inside);

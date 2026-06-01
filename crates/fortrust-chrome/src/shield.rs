@@ -1,3 +1,5 @@
+use std::collections::HashMap;
+
 use crate::{icons, theme::FortrustTheme};
 use egui::{self, Color32, CornerRadius, Pos2, Rect, Ui, Vec2};
 
@@ -9,6 +11,10 @@ pub struct ShieldState {
     pub https_upgraded: bool,
     pub popup_open: bool,
     pub popup_opacity: f32,
+    /// Per-site shield on/off overrides. Key = site hostname (e.g. "example.com").
+    pub site_overrides: HashMap<String, bool>,
+    /// The site currently displayed in the active tab.
+    pub current_site: String,
 }
 
 impl Default for ShieldState {
@@ -21,14 +27,32 @@ impl Default for ShieldState {
             https_upgraded: true,
             popup_open: false,
             popup_opacity: 0.0,
+            site_overrides: HashMap::new(),
+            current_site: String::new(),
         }
     }
 }
 
 impl ShieldState {
+    /// Returns whether shields are enabled for the given site.
+    /// Falls back to `enabled` if no override exists.
+    pub fn is_enabled_for(&self, site: &str) -> bool {
+        self.site_overrides.get(site).copied().unwrap_or(self.enabled)
+    }
+
+    /// Sets shields on/off for a specific site.
+    pub fn set_for_site(&mut self, site: &str, on: bool) {
+        if on == self.enabled {
+            self.site_overrides.remove(site);
+        } else {
+            self.site_overrides.insert(site.to_owned(), on);
+        }
+    }
+
     pub fn render_button(&mut self, ui: &mut Ui, theme: &FortrustTheme) {
         let total_blocked = self.ads_blocked + self.trackers_blocked;
-        let color = if !self.enabled {
+        let shield_on = self.is_enabled_for(&self.current_site);
+        let color = if !shield_on {
             theme.accent_shield_off
         } else if total_blocked == 0 {
             theme.accent_shield_warn
@@ -105,7 +129,8 @@ impl ShieldState {
                         Pos2::new(ui.cursor().min.x, ui.cursor().min.y + 2.0),
                         Vec2::new(16.0, 16.0),
                     );
-                    icons::paint_shield_icon_rect(ui.painter(), icon_rect, if self.enabled { theme.accent_shield } else { theme.accent_shield_off });
+                    let shield_on = self.is_enabled_for(&self.current_site);
+                    icons::paint_shield_icon_rect(ui.painter(), icon_rect, if shield_on { theme.accent_shield } else { theme.accent_shield_off });
                     ui.allocate_space(Vec2::new(18.0, 18.0));
                     ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                         let close_btn = ui.add(
@@ -131,9 +156,15 @@ impl ShieldState {
                             .color(theme.text_primary)
                             .size(13.0),
                     );
+                    let site = self.current_site.clone();
                     ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                        let enabled = self.enabled;
-                        ui.toggle_value(&mut self.enabled, if enabled { "ON" } else { "OFF" });
+                        let mut shield_on = self.is_enabled_for(&site);
+                        let label = if shield_on { "ON" } else { "OFF" };
+                        let resp = ui.toggle_value(&mut shield_on, label);
+                        if resp.clicked() {
+                            self.set_for_site(&site, shield_on);
+                            self.enabled = shield_on;
+                        }
                     });
                 });
 

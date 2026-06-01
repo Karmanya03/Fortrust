@@ -1,9 +1,10 @@
 use std::sync::Arc;
 
+use bytes::BytesMut;
 use fortrust_core::{PrivacyConfig, PrivacyEngine, RequestContext, ResourceType};
 use fortrust_ipc::{BincodeCodec, NetProcessCommand, NetProcessEvent};
 use fortrust_net::NetworkClient;
-use tokio::io::{AsyncReadExt, BufReader};
+use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::sync::Mutex;
 use tracing::{debug, error, info, warn};
 use tracing_subscriber::EnvFilter;
@@ -51,30 +52,38 @@ async fn main() {
 }
 
 async fn handle_connection(stream: tokio::net::TcpStream, network: Arc<Mutex<NetworkClient>>) {
-    use tokio::io::AsyncWriteExt;
-
     let (reader, mut writer) = stream.into_split();
-    let mut reader = BufReader::new(reader);
-    let mut buf = Vec::new();
+    let mut reader = tokio::io::BufReader::new(reader);
+    let mut buf = BytesMut::with_capacity(4096);
+    let mut need_data = true;
 
     loop {
-        buf.clear();
-        match reader.read(&mut buf).await {
-            Ok(0) => break,
-            Ok(_) => {}
-            Err(error) => {
-                warn!("Read error: {error}");
+        if need_data {
+            buf.reserve(4096);
+            if reader.read_buf(&mut buf).await.is_err() || buf.is_empty() {
                 break;
             }
         }
 
-        if buf.is_empty() {
-            continue;
-        }
-
-        let Ok(command) = BincodeCodec::decode::<NetProcessCommand>(&buf) else {
-            warn!("Failed to decode command");
-            continue;
+        let command = match BincodeCodec::read_raw_payload(&mut buf) {
+            Ok(Some(payload)) => {
+                need_data = false;
+                match BincodeCodec::decode::<NetProcessCommand>(&payload) {
+                    Ok(cmd) => cmd,
+                    Err(_) => {
+                        warn!("Failed to decode command from payload, skipping");
+                        continue;
+                    }
+                }
+            }
+            Ok(None) => {
+                need_data = true;
+                continue;
+            }
+            Err(_) => {
+                warn!("Payload read error");
+                break;
+            }
         };
 
         match command {
@@ -101,6 +110,7 @@ async fn handle_connection(stream: tokio::net::TcpStream, network: Arc<Mutex<Net
                     url,
                     top_level_url,
                     resource_type,
+                    referrer_policy: None,
                 };
 
                 let mut net = network.lock().await;

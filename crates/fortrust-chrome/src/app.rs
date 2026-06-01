@@ -12,6 +12,8 @@ use fortrust_core::{
     BlockReason, BrowserConfig, PrivacyConfig, PrivacyEngine, RequestContext, ResourceType, TabId,
     TabManager, WorkspaceManager,
 };
+use fortrust_privacy::PrivacyFilter;
+use fortrust_search::{FortrustSearch, SearchConfig, SearchResult};
 use fortrust_storage::{HistoryEntry, StorageDatabase, SettingValue};
 use trust_engine::{Color, DisplayCommand, EnginePage, EngineRect, TrustEngine, Viewport};
 
@@ -31,6 +33,7 @@ pub struct FortrustApp {
     config: BrowserConfig,
     tabs: TabManager,
     privacy: PrivacyEngine,
+    privacy_filter: Option<PrivacyFilter>,
     internal_engine: TrustEngine,
     engine_worker: EngineWorker,
     storage: Option<StorageDatabase>,
@@ -60,6 +63,10 @@ pub struct FortrustApp {
     // Tab drag-and-drop
     drag_tab_id: Option<TabId>,
     drag_cursor_x: f32,
+
+    /// egui texture cache for decoded page images. Keyed by image URL so the
+    /// same `<img>` doesn't re-upload its pixels on every frame.
+    image_textures: HashMap<String, egui::TextureHandle>,
 
     // Context menu state
     context_menu: Option<(egui::Pos2, TabId)>,
@@ -107,6 +114,8 @@ struct TabPageState {
     history: Vec<String>,
     history_index: usize,
     renderer_frame: Option<egui::TextureHandle>,
+    search_query: Option<String>,
+    search_results: Option<Vec<SearchResult>>,
 }
 
 impl TabPageState {
@@ -158,6 +167,18 @@ impl TabPageState {
         self.loading_url = Some(url);
         self.request_id = Some(request_id);
         self.renderer_frame = None;
+        self.search_query = None;
+        self.search_results = None;
+    }
+
+    fn begin_search(&mut self, url: String, query: String, request_id: u64) {
+        self.page = None;
+        self.load_error = None;
+        self.loading_url = Some(url);
+        self.request_id = Some(request_id);
+        self.renderer_frame = None;
+        self.search_query = Some(query);
+        self.search_results = None;
     }
 
     fn finish_load(&mut self, request_id: u64, page: EnginePage) -> bool {
@@ -181,12 +202,25 @@ impl TabPageState {
         true
     }
 
+    fn finish_search(&mut self, request_id: u64, results: Vec<SearchResult>) -> bool {
+        if self.request_id != Some(request_id) { return false; }
+        self.page = None;
+        self.load_error = None;
+        self.loading_url = None;
+        self.request_id = None;
+        self.renderer_frame = None;
+        self.search_results = Some(results);
+        true
+    }
+
     fn clear_document(&mut self) {
         self.page = None;
         self.load_error = None;
         self.loading_url = None;
         self.request_id = None;
         self.renderer_frame = None;
+        self.search_query = None;
+        self.search_results = None;
     }
 }
 
@@ -194,32 +228,48 @@ struct EngineWorker {
     sender: Sender<EngineCommand>,
     receiver: Receiver<EngineEvent>,
     next_request_id: u64,
-    ipc_sender: Option<fortrust_ipc::MessageSender>,
+    /// Used to pass into per-tab forwarders so they can deliver `EngineEvent::RendererMsg`
+    /// events tagged with the correct `tab_id`.
+    event_sender: Sender<EngineEvent>,
+    /// Per-tab renderer subprocesses. Each tab gets its own dedicated renderer for
+    /// process isolation (one tab crashing does not affect other tabs).
+    tab_renderers: HashMap<TabId, TabRendererEntry>,
+    /// Fallback in-process renderer sender used when no subprocess is available.
+    fallback_renderer: Option<fortrust_ipc::MessageSender>,
+}
+
+struct TabRendererEntry {
+    sender: fortrust_ipc::MessageSender,
+    child: std::process::Child,
 }
 
 enum EngineCommand {
-    Load { request_id: u64, url: String, viewport: Viewport },
+    Load { request_id: u64, url: String, viewport: Viewport, cosmetic_css: Vec<String> },
+    Search { request_id: u64, query: String },
 }
 
 enum EngineEvent {
     Loaded { request_id: u64, page: Box<EnginePage> },
+    SearchLoaded { request_id: u64, query: String, results: Vec<SearchResult> },
     Failed { request_id: u64, url: String, error: String },
-    RendererMsg { msg: fortrust_ipc::RendererToBrowser },
+    RendererMsg { tab_id: TabId, msg: fortrust_ipc::RendererToBrowser },
 }
 
 impl EngineWorker {
     fn spawn(privacy: PrivacyConfig) -> Self {
         let (command_sender, command_receiver) = mpsc::channel();
         let (event_sender, event_receiver) = mpsc::channel();
+        let event_sender_for_worker = event_sender.clone();
 
-        let ipc_sender = if let Some((sender, receiver)) = try_connect_external_renderer() {
-            spawn_renderer_event_forwarder(receiver, event_sender.clone());
-            sender
-        } else {
+        // Set up a fallback in-process renderer for cases where the subprocess is unavailable.
+        let fallback_renderer = {
             let (ipc_a, ipc_b) = fortrust_ipc::create_ipc_pair();
             spawn_basic_renderer_loop(ipc_b.receiver().clone(), ipc_b.sender().clone());
-            ipc_a.sender().clone()
+            Some(ipc_a.sender().clone())
         };
+
+        // Try to find and connect to the external netproc process
+        let netproc_addr = try_spawn_netproc();
 
         thread::spawn(move || {
             let runtime = match tokio::runtime::Builder::new_current_thread()
@@ -229,111 +279,216 @@ impl EngineWorker {
                 Err(e) => { drain_failed_worker(command_receiver, event_sender, e.to_string()); return; }
             };
 
-            let mut engine = match TrustEngine::secure_networked(privacy) {
-                Ok(e) => e,
-                Err(e) => { drain_failed_worker(command_receiver, event_sender, format!("{e:?}")); return; }
+            // Build the engine with netproc if available
+            let mut engine = if let Some(ref addr) = netproc_addr {
+                match runtime.block_on(trust_engine::TrustEngine::with_netproc_async(privacy.clone(), addr)) {
+                    Ok(engine) => engine,
+                    Err(_) => {
+                        match TrustEngine::secure_networked(privacy.clone()) {
+                            Ok(e) => e,
+                            Err(e) => { drain_failed_worker(command_receiver, event_sender, format!("{e:?}")); return; }
+                        }
+                    }
+                }
+            } else {
+                match TrustEngine::secure_networked(privacy) {
+                    Ok(e) => e,
+                    Err(e) => { drain_failed_worker(command_receiver, event_sender, format!("{e:?}")); return; }
+                }
             };
+            let search = runtime.block_on(FortrustSearch::new(SearchConfig::default()));
 
             while let Ok(command) = command_receiver.recv() {
                 match command {
-                    EngineCommand::Load { request_id, url, viewport } => {
-                        let result = runtime.block_on(engine.load_url(url.clone(), viewport));
+                    EngineCommand::Load { request_id, url, viewport, cosmetic_css } => {
+                        let cosmetic_refs: Vec<&str> = cosmetic_css.iter().map(String::as_str).collect();
+                        let result = runtime.block_on(engine.load_url_with_cosmetic(url.clone(), viewport, &cosmetic_refs));
                         let event = match result {
                             Ok(page) => EngineEvent::Loaded { request_id, page: Box::new(page) },
                             Err(e) => EngineEvent::Failed { request_id, url, error: format!("{e:?}") },
                         };
                         let _ = event_sender.send(event);
                     }
+                    EngineCommand::Search { request_id, query } => {
+                        let results = runtime.block_on(search.search(&query));
+                        let _ = event_sender.send(EngineEvent::SearchLoaded {
+                            request_id,
+                            query,
+                            results,
+                        });
+                    }
                 }
             }
         });
 
-        Self { sender: command_sender, receiver: event_receiver, next_request_id: 1, ipc_sender: Some(ipc_sender) }
+        Self {
+            sender: command_sender,
+            receiver: event_receiver,
+            next_request_id: 1,
+            event_sender: event_sender_for_worker,
+            tab_renderers: HashMap::new(),
+            fallback_renderer,
+        }
     }
 
-    fn load(&mut self, url: String, viewport: Viewport) -> u64 {
+    fn load(&mut self, tab_id: TabId, url: String, viewport: Viewport, cosmetic_css: Vec<String>) -> u64 {
         let request_id = self.next_request_id;
         self.next_request_id = self.next_request_id.saturating_add(1);
         let url_clone = url.clone();
-        let _ = self.sender.send(EngineCommand::Load { request_id, url: url.clone(), viewport });
-        // Also send a navigation command to the renderer over IPC if available.
-        if let Some(sender) = &self.ipc_sender {
-            let sender = sender.clone();
+        let _ = self.sender.send(EngineCommand::Load { request_id, url: url.clone(), viewport, cosmetic_css });
+
+        // Send navigation to the renderer for this tab (per-tab renderer subprocess)
+        let sender = self.ensure_renderer_for_tab(tab_id, viewport);
+        let _ = std::thread::spawn(move || {
+            let rt = tokio::runtime::Builder::new_current_thread().enable_all().build();
+            if let Ok(rt) = rt {
+                rt.block_on(async move {
+                    let _ = sender.send_browser_message(&fortrust_ipc::BrowserToRenderer::Navigate { url: url_clone }).await;
+                });
+            }
+        });
+
+        request_id
+    }
+
+    /// Get or spawn a renderer subprocess for the given tab.
+    /// Returns the `MessageSender` to send commands to that tab's renderer.
+    fn ensure_renderer_for_tab(&mut self, tab_id: TabId, viewport: Viewport) -> fortrust_ipc::MessageSender {
+        if let Some(entry) = self.tab_renderers.get(&tab_id) {
+            return entry.sender.clone();
+        }
+        // Try to spawn a new renderer subprocess for this tab
+        if let Some((sender, receiver, child)) = try_spawn_renderer_for_tab(tab_id, viewport) {
+            spawn_tab_renderer_event_forwarder(tab_id, receiver, self.event_sender.clone());
+            let entry = TabRendererEntry { sender: sender.clone(), child };
+            self.tab_renderers.insert(tab_id, entry);
+            sender
+        } else if let Some(ref fb) = self.fallback_renderer {
+            // Subprocess unavailable — fall back to the shared in-process renderer
+            fb.clone()
+        } else {
+            unreachable!("fallback_renderer should always be Some")
+        }
+    }
+
+    /// Shut down the renderer subprocess for the given tab (e.g. when the tab is closed).
+    fn close_tab_renderer(&mut self, tab_id: TabId) {
+        if let Some(mut entry) = self.tab_renderers.remove(&tab_id) {
+            let sender = entry.sender.clone();
             let _ = std::thread::spawn(move || {
                 let rt = tokio::runtime::Builder::new_current_thread().enable_all().build();
                 if let Ok(rt) = rt {
                     rt.block_on(async move {
-                        let _ = sender.send_browser_message(&fortrust_ipc::BrowserToRenderer::Navigate { url: url_clone }).await;
+                        let _ = sender.send_browser_message(&fortrust_ipc::BrowserToRenderer::Shutdown).await;
                     });
                 }
             });
+            let _ = entry.child.kill();
+            let _ = entry.child.wait();
+            tracing::info!(target: "fortrust.renderer", "renderer for tab {tab_id:?} shut down");
         }
+    }
+
+    fn search(&mut self, query: String) -> u64 {
+        let request_id = self.next_request_id;
+        self.next_request_id = self.next_request_id.saturating_add(1);
+        let _ = self.sender.send(EngineCommand::Search { request_id, query });
         request_id
     }
 }
 
-fn try_connect_external_renderer() -> Option<(fortrust_ipc::MessageSender, fortrust_ipc::MessageReceiver)> {
-    // Try several times to spawn/connect to an external renderer process.
-    let renderer_path = find_renderer_binary()?;
+fn try_spawn_netproc() -> Option<String> {
+    let netproc_path = find_netproc_binary()?;
+    tracing::info!(target: "fortrust.netproc", "spawning netproc from {}", netproc_path.display());
 
-    for attempt in 0..3 {
-        let listener = match std::net::TcpListener::bind(("127.0.0.1", 0)) {
-            Ok(l) => l,
-            Err(_) => return None,
-        };
-        if listener.set_nonblocking(true).is_err() { return None; }
-        let addr = match listener.local_addr() { Ok(a) => a, Err(_) => return None };
+    let mut child = match Command::new(&netproc_path)
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::piped())
+        .spawn()
+    {
+        Ok(c) => c,
+        Err(e) => {
+            tracing::warn!(target: "fortrust.netproc", "failed to spawn netproc: {e}");
+            return None;
+        }
+    };
 
-        let addr_arg = format!("{}:{}", addr.ip(), addr.port());
-
-        tracing::info!(target: "fortrust.renderer", "spawning renderer attempt {} -> {}", attempt + 1, renderer_path.display());
-        let mut child = match Command::new(&renderer_path)
-            .arg("--ipc-connect")
-            .arg(&addr_arg)
-            .stdin(Stdio::null())
-            .stdout(Stdio::inherit())
-            .stderr(Stdio::inherit())
-            .spawn()
-        {
-            Ok(c) => c,
-            Err(e) => { tracing::warn!(target: "fortrust.renderer", "failed spawn: {e}"); continue; }
-        };
-
-        // Wait for the renderer to connect, or fail/exit early.
-        let deadline = std::time::Instant::now() + Duration::from_secs(6 + attempt * 2);
-        let mut accepted = None;
-        while std::time::Instant::now() < deadline {
-            // If the child exited early, break and retry.
-            match child.try_wait() {
-                Ok(Some(status)) => {
-                    tracing::warn!(target: "fortrust.renderer", "renderer exited early: {:?}", status);
-                    break;
+    // Read stderr in a separate thread to collect the NETPROC_ADDR line
+    let (addr_tx, addr_rx) = mpsc::channel();
+    if let Some(stderr) = child.stderr.take() {
+        thread::spawn(move || {
+            use std::io::Read;
+            let mut reader = stderr;
+            let mut output = String::new();
+            let mut buf = [0u8; 4096];
+            loop {
+                match reader.read(&mut buf) {
+                    Ok(0) => break,
+                    Ok(n) => {
+                        output.push_str(&String::from_utf8_lossy(&buf[..n]));
+                        if let Some(pos) = output.find("NETPROC_ADDR=") {
+                            let addr_start = pos + "NETPROC_ADDR=".len();
+                            let addr_end = output[addr_start..].find('\n')
+                                .map(|end| addr_start + end)
+                                .unwrap_or(output.len());
+                            let _ = addr_tx.send(output[addr_start..addr_end].trim().to_owned());
+                            return;
+                        }
+                    }
+                    Err(_) => break,
                 }
-                Ok(None) => {}
-                Err(e) => { tracing::warn!(target: "fortrust.renderer", "child status check failed: {e}"); break; }
             }
+        });
+    }
 
-            match listener.accept() {
-                Ok((sock, _)) => { accepted = Some(sock); break; }
-                Err(error) if error.kind() == ErrorKind::WouldBlock => thread::sleep(Duration::from_millis(40)),
-                Err(e) => { tracing::warn!(target: "fortrust.renderer", "accept error: {e}"); break; }
+    // Wait for the address with a timeout
+    let deadline = std::time::Instant::now() + Duration::from_secs(8);
+    let mut addr_result = None;
+    while std::time::Instant::now() < deadline {
+        match child.try_wait() {
+            Ok(Some(status)) => {
+                tracing::warn!(target: "fortrust.netproc", "netproc exited early: {status:?}");
+                break;
+            }
+            Ok(None) => {}
+            Err(e) => {
+                tracing::warn!(target: "fortrust.netproc", "netproc status check failed: {e}");
+                break;
             }
         }
-
-        if accepted.is_none() {
-            // Try to kill the child process if it's still running
-            let _ = child.kill();
-            continue;
+        if let Ok(addr) = addr_rx.try_recv() {
+            addr_result = Some(addr);
+            break;
         }
+        thread::sleep(Duration::from_millis(30));
+    }
 
-        let sock = accepted.unwrap();
-        if sock.set_nonblocking(true).is_err() { let _ = child.kill(); continue; }
-        if let Ok(stream) = tokio::net::TcpStream::from_std(sock) {
-            return Some(fortrust_ipc::create_tcp_endpoint(stream));
+    let addr = addr_result?;
+    tracing::info!(target: "fortrust.netproc", "netproc running at {addr}");
+    Some(addr)
+}
+
+fn find_netproc_binary() -> Option<PathBuf> {
+    let mut candidates = Vec::new();
+
+    if let Ok(path) = std::env::var("CARGO_BIN_EXE_netproc") {
+        candidates.push(PathBuf::from(path));
+    }
+
+    if let Ok(current_exe) = std::env::current_exe()
+        && let Some(dir) = current_exe.parent() {
+            candidates.push(dir.join(if cfg!(windows) { "netproc.exe" } else { "netproc" }));
+            candidates.push(dir.join("netproc"));
+    }
+
+    if let Ok(current_dir) = std::env::current_dir() {
+        for profile in ["debug", "release"] {
+            candidates.push(current_dir.join("target").join(profile).join(if cfg!(windows) { "netproc.exe" } else { "netproc" }));
         }
     }
 
-    None
+    candidates.into_iter().find(|candidate| candidate.exists())
 }
 
 fn find_renderer_binary() -> Option<PathBuf> {
@@ -401,19 +556,106 @@ fn spawn_basic_renderer_loop(receiver: fortrust_ipc::MessageReceiver, sender: fo
     });
 }
 
-fn spawn_renderer_event_forwarder(receiver: fortrust_ipc::MessageReceiver, event_sender: Sender<EngineEvent>) {
+/// Per-tab renderer event forwarder. Tags every received message with the tab's id
+/// so the browser can dispatch it to the correct tab state.
+fn spawn_tab_renderer_event_forwarder(
+    tab_id: TabId,
+    receiver: fortrust_ipc::MessageReceiver,
+    event_sender: Sender<EngineEvent>,
+) {
     thread::spawn(move || {
         let rt = match tokio::runtime::Builder::new_current_thread().enable_all().build() {
             Ok(runtime) => runtime,
             Err(_) => return,
         };
-
         rt.block_on(async move {
             while let Ok(msg) = receiver.recv_renderer_message().await {
-                let _ = event_sender.send(EngineEvent::RendererMsg { msg });
+                let _ = event_sender.send(EngineEvent::RendererMsg { tab_id, msg });
             }
+            // Keep runtime alive
+            std::future::pending::<()>().await;
         });
     });
+}
+
+/// Try to spawn a per-tab renderer subprocess and return a connected IPC endpoint.
+fn try_spawn_renderer_for_tab(
+    tab_id: TabId,
+    viewport: Viewport,
+) -> Option<(fortrust_ipc::MessageSender, fortrust_ipc::MessageReceiver, std::process::Child)> {
+    let renderer_path = find_renderer_binary()?;
+
+    for attempt in 0..2 {
+        let listener = match std::net::TcpListener::bind(("127.0.0.1", 0)) {
+            Ok(l) => l,
+            Err(_) => return None,
+        };
+        if listener.set_nonblocking(true).is_err() { return None; }
+        let addr = match listener.local_addr() { Ok(a) => a, Err(_) => return None };
+        let addr_arg = format!("{}:{}", addr.ip(), addr.port());
+
+        let width = viewport.width as u32;
+        let height = viewport.height as u32;
+
+        tracing::info!(target: "fortrust.renderer", "spawning renderer for tab {tab_id:?} attempt {}", attempt + 1);
+        let mut child = match Command::new(&renderer_path)
+            .arg("--ipc-connect")
+            .arg(&addr_arg)
+            .arg("--tab-id")
+            .arg(format!("{}", tab_id.0))
+            .arg("--width")
+            .arg(format!("{width}"))
+            .arg("--height")
+            .arg(format!("{height}"))
+            .stdin(Stdio::null())
+            .stdout(Stdio::inherit())
+            .stderr(Stdio::inherit())
+            .spawn()
+        {
+            Ok(c) => c,
+            Err(e) => { tracing::warn!(target: "fortrust.renderer", "failed spawn for tab {tab_id:?}: {e}"); continue; }
+        };
+
+        let deadline = std::time::Instant::now() + Duration::from_secs(4 + attempt * 2);
+        let mut accepted = None;
+        while std::time::Instant::now() < deadline {
+            match child.try_wait() {
+                Ok(Some(status)) => {
+                    tracing::warn!(target: "fortrust.renderer", "renderer for tab {tab_id:?} exited early: {status:?}");
+                    break;
+                }
+                Ok(None) => {}
+                Err(_) => break,
+            }
+            match listener.accept() {
+                Ok((sock, _)) => { accepted = Some(sock); break; }
+                Err(error) if error.kind() == ErrorKind::WouldBlock => thread::sleep(Duration::from_millis(40)),
+                Err(_) => break,
+            }
+        }
+
+        let Some(sock) = accepted else { let _ = child.kill(); continue; };
+        if sock.set_nonblocking(true).is_err() { let _ = child.kill(); continue; }
+
+        let (tx, rx) = std::sync::mpsc::channel();
+        thread::spawn(move || {
+            let runtime = match tokio::runtime::Builder::new_current_thread().enable_all().build() {
+                Ok(r) => r,
+                Err(_) => { let _ = tx.send(None); return; }
+            };
+            let result = runtime.block_on(async {
+                let Ok(stream) = tokio::net::TcpStream::from_std(sock) else { return None };
+                Some(fortrust_ipc::create_tcp_endpoint(stream))
+            });
+            let _ = tx.send(result);
+            runtime.block_on(std::future::pending::<()>());
+        });
+        if let Ok(Some((sender, receiver))) = rx.recv() {
+            tracing::info!(target: "fortrust.renderer", "renderer for tab {tab_id:?} connected");
+            return Some((sender, receiver, child));
+        }
+    }
+    None
 }
 
 fn generate_basic_frame(width: u32, height: u32, label: &str) -> Vec<u8> {
@@ -466,8 +708,18 @@ fn drain_failed_worker(
     error: String,
 ) {
     while let Ok(command) = command_receiver.recv() {
-        let EngineCommand::Load { request_id, url, .. } = command;
-        let _ = event_sender.send(EngineEvent::Failed { request_id, url, error: error.clone() });
+        match command {
+            EngineCommand::Load { request_id, url, .. } => {
+                let _ = event_sender.send(EngineEvent::Failed { request_id, url, error: error.clone() });
+            }
+            EngineCommand::Search { request_id, query } => {
+                let _ = event_sender.send(EngineEvent::Failed {
+                    request_id,
+                    url: private_search_url(&query),
+                    error: error.clone(),
+                });
+            }
+        }
     }
 }
 
@@ -488,8 +740,15 @@ impl FortrustApp {
             speed_dial.load_persisted_tiles(s);
         }
 
+        let privacy_filter = if config.privacy.block_ads || config.privacy.block_trackers {
+            Some(PrivacyFilter::load())
+        } else {
+            None
+        };
+
         let mut app = Self {
             privacy: PrivacyEngine::new(config.privacy.clone()),
+            privacy_filter,
             internal_engine: TrustEngine::offline(),
             engine_worker: EngineWorker::spawn(config.privacy.clone()),
             storage,
@@ -518,6 +777,9 @@ impl FortrustApp {
 
             drag_tab_id: None,
             drag_cursor_x: 0.0,
+
+            image_textures: HashMap::new(),
+
             context_menu: None,
             page_info_open: false,
             download_manager: DownloadManager::new(),
@@ -530,6 +792,12 @@ impl FortrustApp {
         if let Some(ref s) = app.storage {
             app.download_manager.load_state_from_settings(&s.settings);
             app.download_manager.resume_all_paused(&app.download_dir);
+        }
+
+        // Set a safe pixels_per_point baseline to guard against 0 scale factors
+        let ppp = creation_context.egui_ctx.pixels_per_point();
+        if ppp <= 0.0 || !ppp.is_finite() {
+            creation_context.egui_ctx.set_pixels_per_point(1.0);
         }
 
         app
@@ -666,6 +934,7 @@ impl FortrustApp {
                 }
             }
             fortrust_ipc::RendererToBrowser::FrameReady { texture_data, width, height, stride } => {
+                if width == 0 || height == 0 || stride == 0 { return; }
                 if let Some(rgba) = frame_bytes_to_rgba(&texture_data, width, height, stride) {
                     let image = egui::ColorImage::from_rgba_unmultiplied([width as usize, height as usize], &rgba);
                     let tex_name = format!("fortrust-renderer-frame-{}", tab_id.0);
@@ -748,6 +1017,20 @@ impl FortrustApp {
         self.engine_worker = EngineWorker::spawn(self.config.privacy.clone());
     }
 
+    fn sync_shield_stats(&mut self) {
+        let stats = self.privacy.stats();
+        self.shield.ads_blocked = stats.ads_blocked as u32;
+        self.shield.trackers_blocked = stats.trackers_blocked as u32;
+        self.shield.fingerprint_attempts = stats.fingerprint_attempts_blocked as u32;
+        self.shield.https_upgraded = stats.https_upgrades > 0;
+
+        // Update current site for per-site shield toggles
+        if let Some(url_str) = self.active_state().and_then(|s| s.current_url()).or_else(|| self.tabs.active_tab().map(|t| t.url.as_str())) {
+            let site = extract_hostname(url_str);
+            self.shield.current_site = site;
+        }
+    }
+
     fn open_storage() -> Option<StorageDatabase> {
         let base = if cfg!(target_os = "windows") {
             std::env::var("APPDATA").ok().map(|p| format!("{p}\\Fortrust"))
@@ -807,18 +1090,42 @@ impl FortrustApp {
     fn navigate_input(&mut self, input: String, history_mode: HistoryMode) {
         let target = normalize_input(&input);
         let top_level = self.tabs.active_tab().map(|tab| tab.url.to_string());
-        let decision = self.privacy.inspect(&RequestContext {
-            url: target,
-            top_level_url: top_level,
-            resource_type: ResourceType::Document,
-        });
 
-        match decision.blocked {
-            Some(reason) => self.show_blocked_page(decision.original_url, reason, history_mode),
-            None => {
-                let effective = decision.effective_url.unwrap_or(decision.original_url);
-                self.commit_navigation(effective, history_mode);
+        // Respect per-site shield toggle — skip all blocking when shields are off
+        let shield_site = extract_hostname(&target);
+        if self.shield.is_enabled_for(&shield_site) {
+            // Check against adblock-rust engine first (comprehensive blocking)
+            let source_url = top_level.as_deref().unwrap_or("");
+            if let Some(ref filter) = self.privacy_filter {
+                if filter.should_block(&target, source_url, "document") {
+                    self.shield.ads_blocked = self.shield.ads_blocked.saturating_add(1);
+                    self.show_blocked_page(target, BlockReason::AdDomain, history_mode);
+                    return;
+                }
             }
+
+            let decision = self.privacy.inspect(&RequestContext {
+                url: target,
+                top_level_url: top_level,
+                resource_type: ResourceType::Document,
+                referrer_policy: None,
+            });
+
+            match decision.blocked {
+                Some(reason) => self.show_blocked_page(decision.original_url, reason, history_mode),
+                None => {
+                    let effective = decision.effective_url.unwrap_or(decision.original_url);
+                    self.commit_navigation(effective, history_mode);
+                }
+            }
+        } else {
+            // Shields off — navigate directly without any blocking
+            let effective = if target.starts_with("https://") || target.starts_with("http://") {
+                target
+            } else {
+                format!("https://{}", target)
+            };
+            self.commit_navigation(effective, history_mode);
         }
     }
 
@@ -848,14 +1155,26 @@ impl FortrustApp {
             HistoryMode::Replace => state.replace_history(url.clone()),
         }
 
+        if let Some(query) = search_query_from_url(&url) {
+            let request_id = self.engine_worker.search(query.clone());
+            self.request_owner.insert(request_id, tab_id);
+            self.tab_state_mut(tab_id).begin_search(url, query, request_id);
+            return;
+        }
+
         if url.starts_with("fortrust://") || url.starts_with("about:") {
             state.clear_document();
             return;
         }
 
-        let request_id = self.engine_worker.load(url.clone(), Viewport {
+        let cosmetic_css = self.privacy_filter.as_ref()
+            .map(|f| f.get_cosmetic_resources(&url))
+            .map(|r| r.hide_selectors)
+            .unwrap_or_default();
+
+        let request_id = self.engine_worker.load(tab_id, url.clone(), Viewport {
             width: 1180.0, height: 760.0,
-        });
+        }, cosmetic_css);
         self.request_owner.insert(request_id, tab_id);
         self.tab_state_mut(tab_id).begin_load(url, request_id);
     }
@@ -900,6 +1219,7 @@ impl FortrustApp {
     }
 
     fn close_tab(&mut self, id: TabId) {
+        self.engine_worker.close_tab_renderer(id);
         self.tabs.close_tab(id);
         self.tab_pages.remove(&id);
         self.request_owner.retain(|_, owner| *owner != id);
@@ -947,16 +1267,25 @@ impl FortrustApp {
                         self.total_memory_mb = memory_estimate;
                     }
                 }
+                EngineEvent::SearchLoaded { request_id, query, results } => {
+                    let Some(tab_id) = self.request_owner.remove(&request_id) else { continue; };
+                    let count = results.len();
+                    let accepted = self.tab_state_mut(tab_id).finish_search(request_id, results);
+                    if accepted {
+                        let url = private_search_url(&query);
+                        self.tabs.navigate_tab(tab_id, url.clone(), format!("Search: {query}"));
+                        if self.active_tab_id() == Some(tab_id) { self.omnibox.text = url; }
+                        self.total_memory_mb = (count as f32 * 0.04).max(0.15);
+                    }
+                }
                 EngineEvent::Failed { request_id, url, error } => {
                     let Some(tab_id) = self.request_owner.remove(&request_id) else { continue; };
                     let err_msg = error.clone();
                     let accepted = self.tab_state_mut(tab_id).fail_load(request_id, error);
                     if accepted { tracing::warn!("Load failed for {}: {}", url, err_msg); }
                 }
-                EngineEvent::RendererMsg { msg } => {
-                    if let Some(tab_id) = self.active_tab_id() {
-                        self.apply_renderer_message(ctx, tab_id, msg);
-                    }
+                EngineEvent::RendererMsg { tab_id, msg } => {
+                    self.apply_renderer_message(ctx, tab_id, msg);
                 }
             }
         }
@@ -1468,6 +1797,8 @@ impl FortrustApp {
                 if active_url == "fortrust://start" {
                     self.speed_dial.ads_blocked = self.shield.ads_blocked;
                     self.speed_dial.trackers_blocked = self.shield.trackers_blocked;
+                    self.speed_dial.fingerprint_attempts = self.shield.fingerprint_attempts;
+                    self.speed_dial.https_upgrades = u64::from(self.shield.https_upgraded);
                     self.speed_dial.tab_count = self.tabs.tabs().len();
                     self.speed_dial.blocked_requests = self.shield.ads_blocked as u64 + self.shield.trackers_blocked as u64;
                     self.speed_dial.doh_enabled = self.config.privacy.https_only_mode;
@@ -1478,8 +1809,10 @@ impl FortrustApp {
                     }
                 } else if active_url == "fortrust://blocked" {
                     self.render_blocked_page(ui);
+                } else if active_url.starts_with("fortrust://search") {
+                    navigate = self.render_search_page(ui, &active_url);
                 } else {
-                    self.render_web_content(ui, &active_url);
+                    self.render_web_content(ctx, ui, &active_url);
                 }
             });
 
@@ -1510,7 +1843,222 @@ impl FortrustApp {
         });
     }
 
-    fn render_web_content(&mut self, ui: &mut egui::Ui, url: &str) {
+    fn render_search_page(&mut self, ui: &mut egui::Ui, url: &str) -> Option<String> {
+        let tab_id = self.active_tab_id()?;
+        let query = self.tab_pages
+            .get(&tab_id)
+            .and_then(|state| state.search_query.clone())
+            .or_else(|| search_query_from_url(url))
+            .unwrap_or_default();
+        let is_loading = self.tab_pages
+            .get(&tab_id)
+            .and_then(|state| state.loading_url.as_deref())
+            == Some(url);
+        let results = self.tab_pages
+            .get(&tab_id)
+            .and_then(|state| state.search_results.clone());
+        let load_error = self.tab_pages
+            .get(&tab_id)
+            .and_then(|state| state.load_error.clone());
+
+        let rect = ui.max_rect();
+        ui.painter().rect_filled(rect, CornerRadius::ZERO, self.theme.surface_deepest);
+        self.paint_search_aura(ui, rect);
+
+        let mut navigate = None;
+        let content_w = ui.available_width().min(880.0);
+        let left = ui.max_rect().center().x - content_w / 2.0;
+        let top = ui.cursor().min.y + 32.0;
+        let content_rect = Rect::from_min_size(
+            Pos2::new(left, top),
+            Vec2::new(content_w, (ui.available_height() - 48.0).max(240.0)),
+        );
+
+        let mut content_ui = ui.new_child(
+            egui::UiBuilder::new()
+                .max_rect(content_rect)
+                .layout(egui::Layout::top_down(egui::Align::Min)),
+        );
+
+        content_ui.label(
+            egui::RichText::new("Fortrust Search")
+                .size(28.0)
+                .strong()
+                .color(self.theme.text_primary),
+        );
+        content_ui.add_space(4.0);
+        content_ui.label(
+            egui::RichText::new("Private metasearch with no local search history write, GPC/DNT headers, and native result rendering.")
+                .size(12.0)
+                .color(self.theme.text_secondary),
+        );
+        content_ui.add_space(16.0);
+
+        let status_rect = Rect::from_min_size(
+            content_ui.cursor().min,
+            Vec2::new(content_w, 48.0),
+        );
+        content_ui.painter().rect_filled(status_rect, CornerRadius::same(14), self.theme.glass_bg);
+        content_ui.painter().rect_stroke(
+            status_rect,
+            CornerRadius::same(14),
+            Stroke::new(1.0, self.theme.glass_border),
+            egui::StrokeKind::Inside,
+        );
+        icons::paint_search_icon(
+            content_ui.painter(),
+            Pos2::new(status_rect.min.x + 24.0, status_rect.center().y),
+            18.0,
+            self.theme.accent_primary,
+        );
+        content_ui.painter().text(
+            Pos2::new(status_rect.min.x + 46.0, status_rect.center().y),
+            egui::Align2::LEFT_CENTER,
+            if query.is_empty() { "Search is ready".to_owned() } else { query.clone() },
+            egui::FontId::proportional(15.0),
+            self.theme.text_primary,
+        );
+        let privacy_text = if is_loading { "Searching privately..." } else { "Trackers stripped before result navigation" };
+        content_ui.painter().text(
+            Pos2::new(status_rect.max.x - 14.0, status_rect.center().y),
+            egui::Align2::RIGHT_CENTER,
+            privacy_text,
+            egui::FontId::proportional(11.5),
+            self.theme.text_muted,
+        );
+        content_ui.allocate_space(Vec2::new(content_w, 58.0));
+
+        if let Some(error) = load_error {
+            content_ui.colored_label(self.theme.accent_shield_warn, format!("Search failed: {error}"));
+            return None;
+        }
+
+        if is_loading {
+            self.render_search_skeleton(&mut content_ui, content_w);
+            return None;
+        }
+
+        let Some(results) = results else {
+            content_ui.label(egui::RichText::new("Type a query in the address bar to search.").color(self.theme.text_secondary));
+            return None;
+        };
+
+        if results.is_empty() {
+            content_ui.label(
+                egui::RichText::new("No results returned by the enabled private backends.")
+                    .color(self.theme.text_secondary),
+            );
+            return None;
+        }
+
+        egui::ScrollArea::vertical()
+            .auto_shrink([false, false])
+            .show(&mut content_ui, |ui| {
+                for result in results {
+                    let item_h = 102.0;
+                    let item_rect = Rect::from_min_size(
+                        ui.cursor().min,
+                        Vec2::new(content_w, item_h),
+                    );
+                    let response = ui.allocate_rect(item_rect, egui::Sense::click());
+                    let hovered = response.hovered();
+                    let fill = if hovered { self.theme.glass_hover } else { self.theme.glass_bg };
+                    ui.painter().rect_filled(item_rect, CornerRadius::same(14), fill);
+                    ui.painter().rect_stroke(
+                        item_rect,
+                        CornerRadius::same(14),
+                        Stroke::new(
+                            1.0,
+                            if hovered { self.theme.accent_primary } else { self.theme.glass_border },
+                        ),
+                        egui::StrokeKind::Inside,
+                    );
+
+                    ui.painter().text(
+                        Pos2::new(item_rect.min.x + 18.0, item_rect.min.y + 18.0),
+                        egui::Align2::LEFT_TOP,
+                        &result.title,
+                        egui::FontId::proportional(16.0),
+                        self.theme.text_primary,
+                    );
+                    ui.painter().text(
+                        Pos2::new(item_rect.min.x + 18.0, item_rect.min.y + 42.0),
+                        egui::Align2::LEFT_TOP,
+                        elide_text(&result.url, 92),
+                        egui::FontId::monospace(11.0),
+                        self.theme.accent_shield,
+                    );
+                    ui.painter().text(
+                        Pos2::new(item_rect.min.x + 18.0, item_rect.min.y + 64.0),
+                        egui::Align2::LEFT_TOP,
+                        elide_text(&result.snippet, 150),
+                        egui::FontId::proportional(12.0),
+                        self.theme.text_secondary,
+                    );
+                    ui.painter().text(
+                        Pos2::new(item_rect.max.x - 18.0, item_rect.min.y + 18.0),
+                        egui::Align2::RIGHT_TOP,
+                        search_backend_label(&result.source_backend),
+                        egui::FontId::proportional(11.0),
+                        self.theme.text_muted,
+                    );
+
+                    if response.clicked() {
+                        navigate = Some(result.url);
+                    }
+                    ui.add_space(10.0);
+                }
+            });
+
+        navigate
+    }
+
+    fn render_search_skeleton(&self, ui: &mut egui::Ui, width: f32) {
+        for idx in 0..5 {
+            let rect = Rect::from_min_size(ui.cursor().min, Vec2::new(width, 82.0));
+            let shimmer = ((self.animation_phase * 2.5 + idx as f32).sin() * 0.5 + 0.5) * 32.0;
+            let alpha = 28 + shimmer as u8;
+            ui.painter().rect_filled(rect, CornerRadius::same(14), Color32::from_rgba_unmultiplied(255, 255, 255, 8));
+            ui.painter().rect_filled(
+                Rect::from_min_size(rect.min + Vec2::new(18.0, 18.0), Vec2::new(width * 0.48, 12.0)),
+                CornerRadius::same(6),
+                Color32::from_rgba_unmultiplied(120, 180, 255, alpha),
+            );
+            ui.painter().rect_filled(
+                Rect::from_min_size(rect.min + Vec2::new(18.0, 42.0), Vec2::new(width * 0.72, 10.0)),
+                CornerRadius::same(5),
+                Color32::from_rgba_unmultiplied(255, 255, 255, alpha / 2),
+            );
+            ui.allocate_space(Vec2::new(width, 92.0));
+        }
+    }
+
+    fn paint_search_aura(&self, ui: &mut egui::Ui, rect: Rect) {
+        let phase = self.animation_phase;
+        let band_h = rect.height() / 18.0;
+        for i in 0..18 {
+            let t = i as f32 / 17.0;
+            let alpha = (10.0 + ((phase * 0.8 + t * std::f32::consts::TAU).sin() * 0.5 + 0.5) * 10.0) as u8;
+            let y = rect.top() + i as f32 * band_h;
+            let x_offset = (phase * 9.0 + i as f32 * 11.0).sin() * 10.0;
+            let band = Rect::from_min_size(
+                Pos2::new(rect.left() + x_offset, y),
+                Vec2::new(rect.width() - x_offset.abs(), band_h + 1.0),
+            );
+            ui.painter().rect_filled(
+                band,
+                CornerRadius::ZERO,
+                Color32::from_rgba_unmultiplied(
+                    self.theme.accent_primary.r(),
+                    self.theme.accent_primary.g(),
+                    self.theme.accent_primary.b(),
+                    alpha,
+                ),
+            );
+        }
+    }
+
+    fn render_web_content(&mut self, ctx: &Context, ui: &mut egui::Ui, url: &str) {
         let Some(tab_id) = self.active_tab_id() else { return; };
 
         let is_loading = self.tab_pages.get(&tab_id)
@@ -1526,10 +2074,12 @@ impl FortrustApp {
             .and_then(|s| s.page.as_ref().map(|p| p.url.clone()));
         if let Some(ref page_url_val) = page_url
             && page_url_val == url
-            && let Some(page) = self.tab_pages.get(&tab_id).and_then(|s| s.page.as_ref())
         {
-            self.paint_engine_page(ui, page);
-            return;
+            let page = self.tab_pages.get(&tab_id).and_then(|s| s.page.clone());
+            if let Some(page) = page {
+                self.paint_engine_page(ctx, ui, &page);
+                return;
+            }
         }
 
         if let Some(texture) = self.tab_pages.get(&tab_id).and_then(|s| s.renderer_frame.as_ref()) {
@@ -1549,7 +2099,7 @@ impl FortrustApp {
             height: ui.available_height().max(240.0),
         };
         if let Ok(page) = self.internal_engine.internal_page("fortrust://empty", viewport) {
-            self.paint_engine_page(ui, &page);
+            self.paint_engine_page(ctx, ui, &page);
         } else {
             self.render_error(ui, url, "no rendered page is available for this tab");
         }
@@ -1591,7 +2141,7 @@ impl FortrustApp {
         });
     }
 
-    fn paint_engine_page(&self, ui: &mut egui::Ui, page: &EnginePage) {
+    fn paint_engine_page(&mut self, ctx: &Context, ui: &mut egui::Ui, page: &EnginePage) {
         let outer = ui.available_size();
         let (surface, _) = ui.allocate_exact_size(outer, egui::Sense::hover());
         let painter = ui.painter_at(surface);
@@ -1652,9 +2202,62 @@ impl FortrustApp {
                         painter.rect_stroke(r, 0.0, egui::Stroke::new(*width, to_egui_color(*color)), egui::StrokeKind::Outside);
                     }
                 }
+                DisplayCommand::DrawImage { rect, image_id, natural_width, natural_height, alt } => {
+                    if let Some(img) = page.rendered.images.get(*image_id) {
+                        self.paint_decoded_image(
+                            ctx,
+                            &painter,
+                            content.min,
+                            rect,
+                            img,
+                            *natural_width,
+                            *natural_height,
+                        );
+                    } else if !alt.is_empty() {
+                        painter.text(
+                            Pos2::new(content.min.x + rect.x, content.min.y + rect.y),
+                            egui::Align2::LEFT_TOP,
+                            format!("[image: {alt}]"),
+                            egui::FontId::proportional(11.0),
+                            Color32::from_rgb(160, 160, 160),
+                        );
+                    }
+                }
                 DisplayCommand::ClipPush(_) | DisplayCommand::ClipPop => {}
             }
         }
+    }
+
+    /// Cache decoded images as egui textures and paint one into the given rect.
+    /// The first call decodes; subsequent calls reuse the texture id.
+    fn paint_decoded_image(
+        &mut self,
+        ctx: &Context,
+        painter: &egui::Painter,
+        content_origin: Pos2,
+        rect: &EngineRect,
+        image: &fortrust_core::DecodedImage,
+        natural_width: u32,
+        natural_height: u32,
+    ) {
+        if natural_width == 0 || natural_height == 0 { return; }
+        let texture = self.image_textures.entry(image.url.clone()).or_insert_with(|| {
+            let color_image = egui::ColorImage::from_rgba_unmultiplied(
+                [natural_width as usize, natural_height as usize],
+                &image.rgba,
+            );
+            ctx.load_texture(
+                format!("fortrust-img-{}", image.url),
+                color_image,
+                egui::TextureOptions::LINEAR,
+            )
+        });
+        let dest = egui::Rect::from_min_size(
+            Pos2::new(content_origin.x + rect.x, content_origin.y + rect.y),
+            Vec2::new(rect.width.max(1.0), rect.height.max(1.0)),
+        );
+        let uv = egui::Rect::from_min_max(Pos2::new(0.0, 0.0), Pos2::new(1.0, 1.0));
+        painter.image(texture.id(), dest, uv, Color32::WHITE);
     }
 
     fn render_page_info(&mut self, ctx: &Context) {
@@ -1702,6 +2305,12 @@ impl FortrustApp {
 
 impl eframe::App for FortrustApp {
     fn update(&mut self, ctx: &Context, _frame: &mut eframe::Frame) {
+        // Guard against windowing system returning 0 scale factor (crashes epaint font renderer)
+        let ppp = ctx.pixels_per_point();
+        if ppp <= 0.0 || !ppp.is_finite() {
+            ctx.set_pixels_per_point(1.0);
+        }
+
         let dt = self.last_frame.elapsed().as_secs_f32().min(0.05);
         self.last_frame = std::time::Instant::now();
         let motion_scale = self.motion_scale();
@@ -1743,6 +2352,9 @@ impl eframe::App for FortrustApp {
         if !self.sidebar_anim.overlay_offset.is_settled() {
             ctx.request_repaint();
         }
+
+        // Sync shield panel stats from privacy engine
+        self.sync_shield_stats();
 
         // Poll loading engine
         self.poll_loading(ctx);
@@ -1794,17 +2406,56 @@ impl eframe::App for FortrustApp {
                 .show(ctx, |ui| {
                     Frame {
                         fill: self.theme.glass_bg,
-                        inner_margin: Margin::symmetric(18, 14),
-                        corner_radius: CornerRadius::same(16),
+                        inner_margin: Margin::symmetric(18, 16),
+                        corner_radius: CornerRadius::same(18),
                         stroke: Stroke::new(1.0, self.theme.glass_border),
                         shadow: egui::epaint::Shadow {
-                            offset: [0, 8], blur: 24, spread: 0,
+                            offset: [0, 12], blur: 32, spread: 0,
                             color: Color32::from_black_alpha(50),
                         },
                         ..Default::default()
                     }.show(ui, |ui| {
-                        ui.label(egui::RichText::new("Fortrust starting").size(18.0).strong().color(self.theme.text_primary));
-                        ui.label(egui::RichText::new("Private browser shell is loading.").size(12.0).color(self.theme.text_secondary));
+                        let rect = Rect::from_min_size(ui.cursor().min, Vec2::new(280.0, 74.0));
+                        let logo_rect = Rect::from_min_size(rect.min + Vec2::new(2.0, 8.0), Vec2::new(42.0, 42.0));
+                        let shimmer = (self.animation_phase * 2.6).sin() * 0.5 + 0.5;
+                        ui.painter().circle_filled(
+                            logo_rect.center(),
+                            28.0 + shimmer * 6.0,
+                            Color32::from_rgba_unmultiplied(
+                                self.theme.accent_primary.r(),
+                                self.theme.accent_primary.g(),
+                                self.theme.accent_primary.b(),
+                                24,
+                            ),
+                        );
+                        icons::paint_shield_icon_rect(ui.painter(), logo_rect, self.theme.accent_primary);
+                        ui.painter().text(
+                            Pos2::new(rect.min.x + 56.0, rect.min.y + 18.0),
+                            egui::Align2::LEFT_CENTER,
+                            "Fortrust",
+                            egui::FontId::proportional(20.0),
+                            self.theme.text_primary,
+                        );
+                        ui.painter().text(
+                            Pos2::new(rect.min.x + 56.0, rect.min.y + 42.0),
+                            egui::Align2::LEFT_CENTER,
+                            "TRUST engine and private shell loading",
+                            egui::FontId::proportional(12.0),
+                            self.theme.text_secondary,
+                        );
+                        let bar = Rect::from_min_size(
+                            Pos2::new(rect.min.x + 56.0, rect.min.y + 58.0),
+                            Vec2::new(196.0, 4.0),
+                        );
+                        ui.painter().rect_filled(bar, CornerRadius::same(2), Color32::from_rgba_unmultiplied(255, 255, 255, 18));
+                        let glow_w = 48.0;
+                        let glow_x = bar.min.x + (bar.width() - glow_w) * shimmer;
+                        ui.painter().rect_filled(
+                            Rect::from_min_size(Pos2::new(glow_x, bar.min.y), Vec2::new(glow_w, bar.height())),
+                            CornerRadius::same(2),
+                            self.theme.accent_primary,
+                        );
+                        ui.allocate_space(rect.size());
                     });
                 });
         }
@@ -1899,8 +2550,7 @@ fn normalize_input(input: &str) -> String {
     } else if looks_like_host_candidate(trimmed) {
         format!("https://{trimmed}")
     } else {
-        let query = urlencoding::encode(trimmed);
-        format!("https://duckduckgo.com/?q={query}")
+        private_search_url(trimmed)
     }
 }
 
@@ -1912,9 +2562,56 @@ fn looks_like_host_candidate(input: &str) -> bool {
 }
 
 fn title_from_url(url: &str) -> String {
+    if let Some(query) = search_query_from_url(url) {
+        return format!("Search: {query}").chars().take(32).collect();
+    }
+
     url.strip_prefix("https://")
         .or_else(|| url.strip_prefix("http://"))
         .unwrap_or(url)
         .trim_end_matches('/')
         .chars().take(24).collect()
+}
+
+fn private_search_url(query: &str) -> String {
+    format!("fortrust://search?q={}", urlencoding::encode(query.trim()))
+}
+
+fn search_query_from_url(url: &str) -> Option<String> {
+    if !url.starts_with("fortrust://search") {
+        return None;
+    }
+    let parsed = url::Url::parse(url).ok()?;
+    parsed
+        .query_pairs()
+        .find_map(|(key, value)| (key == "q").then(|| value.trim().to_owned()))
+        .filter(|query| !query.is_empty())
+}
+
+fn search_backend_label(backend: &fortrust_search::SearchBackend) -> &'static str {
+    match backend {
+        fortrust_search::SearchBackend::BraveSearch => "Brave",
+        fortrust_search::SearchBackend::Mojeek => "Mojeek",
+        fortrust_search::SearchBackend::DuckDuckGo => "DDG",
+        fortrust_search::SearchBackend::Stract => "Stract",
+        fortrust_search::SearchBackend::Wikipedia => "Wikipedia",
+    }
+}
+
+fn extract_hostname(url: &str) -> String {
+    if url.starts_with("fortrust://") || url.starts_with("about:") {
+        return url.to_owned();
+    }
+    url::Url::parse(url)
+        .ok()
+        .and_then(|u| u.host_str().map(str::to_owned))
+        .unwrap_or_else(|| url.to_owned())
+}
+
+fn elide_text(input: &str, max_chars: usize) -> String {
+    let mut out = input.chars().take(max_chars).collect::<String>();
+    if input.chars().count() > max_chars {
+        out.push_str("...");
+    }
+    out
 }

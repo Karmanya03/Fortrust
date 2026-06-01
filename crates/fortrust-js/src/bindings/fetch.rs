@@ -181,6 +181,7 @@ fn perform_fetch(
         url: url.to_string(),
         top_level_url: None,
         resource_type: ResourceType::Xhr,
+        referrer_policy: None,
     };
 
     let handle = tokio::runtime::Handle::current();

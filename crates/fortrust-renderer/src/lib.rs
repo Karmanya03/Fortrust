@@ -1,3 +1,4 @@
+use fortrust_core::ImageRegistry;
 use fortrust_dom::{Document, DomArena, DomError, NodeRef, parse_html};
 use fortrust_layout::{LayoutConstraints, LayoutEngine, LayoutTree, Rect};
 use fortrust_paint::{DisplayList, PaintOptions, Painter};
@@ -36,6 +37,9 @@ pub struct RenderedPage {
     pub parse_error_count: usize,
     /// CSS injected by cosmetic filtering rules (ad blocking element hiding, etc.)
     pub injected_css: Vec<String>,
+    /// Decoded images referenced by the page. Index = the `image_ref` stored on
+    /// layout boxes and emitted in `DrawImage` paint commands.
+    pub images: ImageRegistry,
 }
 
 #[derive(Debug, Clone, Default)]
@@ -56,9 +60,19 @@ impl StaticRenderer {
         author_css: &[&str],
         viewport: Viewport,
     ) -> Result<RenderedPage, RenderError> {
+        self.render_with_images(html, author_css, viewport, ImageRegistry::new())
+    }
+
+    pub fn render_with_images(
+        &self,
+        html: &str,
+        author_css: &[&str],
+        viewport: Viewport,
+        images: ImageRegistry,
+    ) -> Result<RenderedPage, RenderError> {
         let arena = DomArena::new();
         let document = parse_html(&arena, html)?;
-        self.render_document(&document, author_css, &[], viewport)
+        self.render_document_with_images(&document, author_css, &[], viewport, images)
     }
 
     pub fn render_document(
@@ -67,6 +81,17 @@ impl StaticRenderer {
         author_css: &[&str],
         cosmetic_css: &[&str],
         viewport: Viewport,
+    ) -> Result<RenderedPage, RenderError> {
+        self.render_document_with_images(document, author_css, cosmetic_css, viewport, ImageRegistry::new())
+    }
+
+    pub fn render_document_with_images(
+        &self,
+        document: &Document<'_>,
+        author_css: &[&str],
+        cosmetic_css: &[&str],
+        viewport: Viewport,
+        images: ImageRegistry,
     ) -> Result<RenderedPage, RenderError> {
         let mut style = StyleEngine::new();
         for embedded_css in embedded_styles(document) {
@@ -101,11 +126,13 @@ impl StaticRenderer {
                     viewport_height: viewport.height,
                     containing_block: None,
                 },
+                &images,
             )
             .ok_or(RenderError::EmptyDocument)?;
 
         let display_list = self.painter.paint(
             &layout,
+            &images,
             PaintOptions {
                 viewport: Rect {
                     x: 0.0,
@@ -124,6 +151,7 @@ impl StaticRenderer {
             text_content: document.text_content(),
             parse_error_count: document.parse_errors.len(),
             injected_css: cosmetic_css.iter().map(|&s| s.to_owned()).collect(),
+            images,
         })
     }
 }
@@ -155,6 +183,7 @@ fn embedded_styles(document: &Document<'_>) -> Vec<String> {
 
 #[cfg(test)]
 mod tests {
+    use fortrust_core::{DecodedImage, ImageRegistry};
     use fortrust_paint::DisplayCommand;
     use fortrust_style::Color;
 
@@ -262,5 +291,76 @@ mod tests {
             )
         });
         assert!(has_border, "Expected DrawBorder command from CSS border property");
+    }
+
+    #[test]
+    fn renders_decoded_image_via_drawimage_command() {
+        let mut images = ImageRegistry::new();
+        // 2x2 red RGBA image
+        let rgba = vec![255, 0, 0, 255, 255, 0, 0, 255, 255, 0, 0, 255, 255, 0, 0, 255];
+        images.insert(DecodedImage {
+            url: "https://example.com/pixel.png".to_owned(),
+            width: 2,
+            height: 2,
+            rgba,
+        });
+
+        let page = StaticRenderer::new()
+            .render_with_images(
+                r#"<body><img src="https://example.com/pixel.png" width="40" height="20"></body>"#,
+                &[],
+                Viewport { width: 320.0, height: 240.0 },
+                images,
+            )
+            .unwrap();
+
+        let has_image_cmd = page.display_list.commands().iter().any(|cmd| {
+            matches!(cmd, DisplayCommand::DrawImage { image_id, natural_width, natural_height, .. }
+                if *image_id == 0 && *natural_width == 2 && *natural_height == 2)
+        });
+        assert!(has_image_cmd, "Expected DrawImage for the decoded <img>");
+    }
+
+    #[test]
+    fn falls_back_to_placeholder_when_image_is_missing() {
+        let page = StaticRenderer::new()
+            .render(
+                r#"<body><img src="https://missing.example/x.png" alt="Logo" width="40" height="20"></body>"#,
+                &[],
+                Viewport { width: 320.0, height: 240.0 },
+            )
+            .unwrap();
+
+        let has_placeholder = page.display_list.commands().iter().any(|cmd| {
+            matches!(cmd, DisplayCommand::DrawText { text, .. } if text.contains("Logo"))
+        });
+        assert!(has_placeholder, "Expected alt-text placeholder when image is absent");
+    }
+
+    #[test]
+    fn layout_uses_image_natural_size_when_no_explicit_dimensions() {
+        let mut images = ImageRegistry::new();
+        // 100x50 green image
+        let rgba = vec![0u8; 100 * 50 * 4];
+        images.insert(DecodedImage {
+            url: "https://example.com/banner.png".to_owned(),
+            width: 100,
+            height: 50,
+            rgba,
+        });
+
+        let page = StaticRenderer::new()
+            .render_with_images(
+                r#"<body><img src="https://example.com/banner.png"></body>"#,
+                &[],
+                Viewport { width: 320.0, height: 240.0 },
+                images,
+            )
+            .unwrap();
+
+        // The img box should be 100x50 (natural) — not 300x150 (default fallback)
+        let img_box = &page.layout.root.children[0];
+        assert_eq!(img_box.rect.width, 100.0);
+        assert_eq!(img_box.rect.height, 50.0);
     }
 }

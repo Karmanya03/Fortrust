@@ -3,7 +3,8 @@ use std::time::SystemTime;
 
 use bytes::Bytes;
 use fortrust_core::{
-    BlockReason, PrivacyEngine, PrivacyNote, RequestContext, RequestDecision, ResourceType,
+    BlockReason, PrivacyEngine, PrivacyNote, ReferrerPolicy, RequestContext, RequestDecision,
+    ResourceType, compute_referer,
 };
 use futures_util::{StreamExt, stream};
 use http::{HeaderMap, HeaderName, HeaderValue};
@@ -142,6 +143,12 @@ impl NetworkClient {
         let mut headers = privacy_headers(&decision.notes);
         add_fetch_metadata_headers(&mut headers, context.resource_type, decision.third_party);
         add_cache_validation_headers(&mut headers, &cache_decision);
+        add_referrer_header(
+            &mut headers,
+            &context.url,
+            context.top_level_url.as_deref(),
+            context.referrer_policy.unwrap_or_default(),
+        );
 
         Ok(PreparedRequest {
             original_context: context,
@@ -341,6 +348,26 @@ fn add_fetch_metadata_headers(
     );
 }
 
+/// Add the `Referer` header to outgoing requests based on the active referrer
+/// policy. When the policy resolves to "no referrer", the header is omitted
+/// (and any existing value in the map is removed).
+fn add_referrer_header(
+    headers: &mut HeaderMap,
+    request_url: &str,
+    top_level_url: Option<&str>,
+    policy: ReferrerPolicy,
+) {
+    let header_name = HeaderName::from_static("referer");
+    if let Some(value) = compute_referer(request_url, top_level_url, policy)
+        && let Ok(v) = HeaderValue::from_str(&value)
+    {
+        headers.insert(header_name, v);
+    } else {
+        // Strip any Referer that the caller may have left in the map.
+        headers.remove(header_name);
+    }
+}
+
 fn add_cache_validation_headers(headers: &mut HeaderMap, cache_decision: &CacheDecision) {
     let CacheDecision::Revalidate(_, validation) = cache_decision else {
         return;
@@ -509,6 +536,7 @@ mod tests {
                 url: "https://stats.google-analytics.com/collect".to_owned(),
                 top_level_url: Some("https://example.com".to_owned()),
                 resource_type: ResourceType::Script,
+                referrer_policy: None,
             })
             .unwrap_err();
 
@@ -528,6 +556,50 @@ mod tests {
         assert_eq!(prepared.headers.get("sec-gpc").unwrap(), "1");
         assert_eq!(prepared.headers.get("dnt").unwrap(), "1");
         assert_eq!(prepared.headers.get("sec-fetch-dest").unwrap(), "document");
+    }
+
+    #[test]
+    fn default_referrer_policy_omits_referer_header() {
+        // The default (NoReferrer) is the most privacy-preserving: no Referer
+        // is ever sent, even same-origin. This is the core Brave-style
+        // referrer protection.
+        let client = NetworkClient::in_memory(PrivacyEngine::new(PrivacyConfig::default()));
+        let prepared = client
+            .prepare(RequestContext {
+                url: "https://other.example/img.png".to_owned(),
+                top_level_url: Some("https://example.com/".to_owned()),
+                resource_type: ResourceType::Image,
+                referrer_policy: None,
+            })
+            .unwrap();
+
+        assert!(prepared.headers.get("referer").is_none(), "Referer must not be sent under default policy");
+    }
+
+    #[test]
+    fn explicit_same_origin_referrer_sends_for_same_origin_only() {
+        let client = NetworkClient::in_memory(PrivacyEngine::new(PrivacyConfig::default()));
+        // Same-origin: header is present.
+        let prepared_same = client
+            .prepare(RequestContext {
+                url: "https://example.com/img.png".to_owned(),
+                top_level_url: Some("https://example.com/".to_owned()),
+                resource_type: ResourceType::Image,
+                referrer_policy: Some(fortrust_core::ReferrerPolicy::SameOrigin),
+            })
+            .unwrap();
+        assert_eq!(prepared_same.headers.get("referer").unwrap(), "https://example.com/");
+
+        // Cross-origin: header is absent.
+        let prepared_cross = client
+            .prepare(RequestContext {
+                url: "https://other.com/img.png".to_owned(),
+                top_level_url: Some("https://example.com/".to_owned()),
+                resource_type: ResourceType::Image,
+                referrer_policy: Some(fortrust_core::ReferrerPolicy::SameOrigin),
+            })
+            .unwrap();
+        assert!(prepared_cross.headers.get("referer").is_none());
     }
 
     #[test]
@@ -563,6 +635,7 @@ mod tests {
                 url: url.to_string(),
                 top_level_url: Some("https://example.com".to_owned()),
                 resource_type: ResourceType::Script,
+                referrer_policy: None,
             })
             .unwrap();
 
@@ -611,6 +684,7 @@ mod tests {
                 url: url.to_string(),
                 top_level_url: Some("https://example.com".to_owned()),
                 resource_type: ResourceType::Stylesheet,
+                referrer_policy: None,
             })
             .await
             .unwrap();
@@ -658,6 +732,7 @@ mod tests {
                 url: url.to_string(),
                 top_level_url: Some("https://example.com".to_owned()),
                 resource_type: ResourceType::Script,
+                referrer_policy: None,
             })
             .await
             .unwrap();

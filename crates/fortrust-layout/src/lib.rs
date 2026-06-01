@@ -1,3 +1,4 @@
+use fortrust_core::ImageRegistry;
 use fortrust_dom::{NodeKind, NodeRef};
 use fortrust_style::{ComputedStyle, Display, Length, Overflow, StyleEngine};
 
@@ -99,6 +100,12 @@ pub struct LayoutBox {
     pub node_name: String,
     pub text: Option<String>,
     pub replaced_size: Option<(f32, f32)>,
+    /// Resolved image id from the `ImageRegistry`, if this is a `<img>` element
+    /// with a successfully decoded image. Used by the painter to emit a
+    /// `DrawImage` command referencing the image's RGBA pixels.
+    pub image_ref: Option<u32>,
+    /// Source URL of the `<img>` (kept for diagnostics & alt-text fallback).
+    pub image_url: Option<String>,
     pub rect: Rect,
     pub margin: UsedEdges,
     pub padding: UsedEdges,
@@ -134,9 +141,10 @@ impl LayoutEngine {
         &self,
         root: NodeRef<'arena>,
         constraints: LayoutConstraints,
+        images: &ImageRegistry,
     ) -> Option<LayoutTree> {
         let style = ComputedStyle::initial();
-        let mut root_box = self.build_box(root, None, &style)?;
+        let mut root_box = self.build_box(root, None, &style, images)?;
         let width = constraints.viewport_width.max(0.0);
         let mut positioned = Vec::new();
         let _ = layout_block_box(
@@ -160,6 +168,7 @@ impl LayoutEngine {
         node: NodeRef<'arena>,
         parent_style: Option<&ComputedStyle>,
         fallback_parent: &ComputedStyle,
+        images: &ImageRegistry,
     ) -> Option<LayoutBox> {
         match node.kind() {
             NodeKind::Text(text) => {
@@ -173,6 +182,8 @@ impl LayoutEngine {
                     node_name: "#text".to_owned(),
                     text: Some(text),
                     replaced_size: None,
+                    image_ref: None,
+                    image_url: None,
                     rect: zero_rect(),
                     margin: UsedEdges::ZERO,
                     padding: UsedEdges::ZERO,
@@ -217,10 +228,19 @@ impl LayoutEngine {
                 let node_name = element
                     .map(|element| element.local_name().to_owned())
                     .unwrap_or_else(|| "#document".to_owned());
-                let replaced_size = if is_replaced {
-                    parse_replaced_size(element.unwrap())
+                let (replaced_size, image_ref, image_url) = if is_replaced {
+                    let element = element.unwrap();
+                    let src = element.attr("src").map(|s| s.trim().to_owned()).filter(|s| !s.is_empty());
+                    let id = src.as_deref().and_then(|s| images.find_by_url(s));
+                    // If the element has explicit width/height attrs, use them.
+                    // Otherwise, fall back to the decoded image's natural
+                    // dimensions (if available), then 300x150.
+                    let explicit = parse_replaced_size(element);
+                    let natural = id.and_then(|i| images.get(i)).map(|img| (img.width as f32, img.height as f32));
+                    let size = explicit.or(natural);
+                    (size, id, src)
                 } else {
-                    None
+                    (None, None, None)
                 };
                 let text_content = if is_replaced {
                     element
@@ -236,7 +256,7 @@ impl LayoutEngine {
                 } else {
                     node.children()
                         .into_iter()
-                        .filter_map(|child| self.build_box(child, Some(&style), &style))
+                        .filter_map(|child| self.build_box(child, Some(&style), &style, images))
                         .collect()
                 };
 
@@ -256,6 +276,8 @@ impl LayoutEngine {
                     node_name,
                     text: text_content,
                     replaced_size,
+                    image_ref,
+                    image_url,
                     rect: zero_rect(),
                     margin,
                     padding,
@@ -744,6 +766,7 @@ mod tests {
                     viewport_height: 600.0,
                     containing_block: None,
                 },
+                &ImageRegistry::new(),
             )
             .unwrap();
 
@@ -766,6 +789,7 @@ mod tests {
                     viewport_height: 300.0,
                     containing_block: None,
                 },
+                &ImageRegistry::new(),
             )
             .unwrap();
 
@@ -786,6 +810,7 @@ mod tests {
                     viewport_height: 300.0,
                     containing_block: None,
                 },
+                &ImageRegistry::new(),
             )
             .unwrap();
 
@@ -809,6 +834,7 @@ mod tests {
                     viewport_height: 400.0,
                     containing_block: None,
                 },
+                &ImageRegistry::new(),
             )
             .unwrap();
 
@@ -832,6 +858,7 @@ mod tests {
                     viewport_height: 300.0,
                     containing_block: None,
                 },
+                &ImageRegistry::new(),
             )
             .unwrap();
 
@@ -863,6 +890,7 @@ mod tests {
                     viewport_height: 120.0,
                     containing_block: None,
                 },
+                &ImageRegistry::new(),
             )
             .unwrap();
 
@@ -893,6 +921,7 @@ mod tests {
                     viewport_height: 120.0,
                     containing_block: None,
                 },
+                &ImageRegistry::new(),
             )
             .unwrap();
 

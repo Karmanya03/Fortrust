@@ -12,6 +12,7 @@ use crate::codec::{BincodeCodec, CodecError, FramedMessage};
 use crate::messages::{BrowserToRenderer, NetProcessCommand, NetProcessEvent, RendererToBrowser};
 use tokio::net::TcpStream;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
+use tracing::trace;
 
 #[derive(Debug, Error)]
 pub enum IpcError {
@@ -171,15 +172,15 @@ pub fn create_tcp_endpoint(stream: TcpStream) -> (MessageSender, MessageReceiver
         let mut tmp = [0u8; 4096];
         loop {
             match reader.read(&mut tmp).await {
-                Ok(0) => { eprintln!("tcp_endpoint: reader EOF"); break; }
-                Ok(n) => { buf.extend_from_slice(&tmp[..n]); eprintln!("tcp_endpoint: reader got {} bytes", n); }
-                Err(e) => { eprintln!("tcp_endpoint: reader error: {}", e); break; }
+                Ok(0) => { trace!("tcp_endpoint: reader EOF"); break; }
+                Ok(n) => { buf.extend_from_slice(&tmp[..n]); trace!(bytes = n, "tcp_endpoint: reader got data"); }
+                Err(e) => { debug!(error = %e, "tcp_endpoint: reader error"); break; }
             }
 
             loop {
                 match BincodeCodec::read_raw_payload(&mut buf) {
                     Ok(Some(payload)) => {
-                        eprintln!("tcp_endpoint: extracted payload {} bytes", payload.len());
+                        trace!(bytes = payload.len(), "tcp_endpoint: extracted payload");
                         // Reconstruct framed bytes (header + payload) so the receiver
                         // sees the same framed format that MessageSender sends.
                         let mut framed = BytesMut::with_capacity(8 + payload.len());
@@ -188,7 +189,7 @@ pub fn create_tcp_endpoint(stream: TcpStream) -> (MessageSender, MessageReceiver
                         let _ = tx_in.send(framed.to_vec()).await;
                     }
                     Ok(None) => break,
-                    Err(e) => { eprintln!("tcp_endpoint: payload read error: {}", e); break; }
+                    Err(e) => { debug!(error = %e, "tcp_endpoint: payload read error"); break; }
                 }
             }
         }
@@ -198,13 +199,13 @@ pub fn create_tcp_endpoint(stream: TcpStream) -> (MessageSender, MessageReceiver
     tokio::spawn(async move {
         let mut writer = writer;
         while let Some(chunk) = rx_out.recv().await {
-            eprintln!("tcp_endpoint: writer sending {} bytes", chunk.len());
+            trace!(bytes = chunk.len(), "tcp_endpoint: writer sending data");
             if let Err(e) = writer.write_all(&chunk).await {
-                eprintln!("tcp_endpoint: writer error: {}", e);
+                debug!(error = %e, "tcp_endpoint: writer error");
                 break;
             }
         }
-        eprintln!("tcp_endpoint: writer exiting");
+        trace!("tcp_endpoint: writer exiting");
     });
 
     let sender = MessageSender { sender: tx_out };

@@ -175,6 +175,16 @@ fn render_page_frame(page: &RenderedPage, width: u32, height: u32, title: &str) 
                 let clip = clip_stack.last().copied().unwrap();
                 paint_text_block(&mut pixels, width, height, clip, *rect, text, color_to_rgba(*color));
             }
+            DisplayCommand::DrawImage { rect, image_id, natural_width, natural_height, alt } => {
+                let clip = clip_stack.last().copied().unwrap();
+                if let Some(img) = page.images.get(*image_id) {
+                    paint_image(&mut pixels, width, height, clip, *rect, img, *natural_width, *natural_height);
+                } else if !alt.is_empty() {
+                    paint_text_block(&mut pixels, width, height, clip, *rect, &format!("[image: {alt}]"), [160, 160, 160, 255]);
+                } else {
+                    paint_rect(&mut pixels, width, height, clip, *rect, [40, 44, 52, 255]);
+                }
+            }
         }
     }
 
@@ -253,6 +263,59 @@ fn paint_text_block(pixels: &mut [u8], width: usize, height: usize, clip: fortru
             height: rect.height.max(8.0),
         };
         paint_rect(pixels, width, height, clip, char_rect, rgba);
+    }
+}
+
+/// Render a decoded image into the given rect, scaling bilinearly. The image
+/// data lives in `image.rgba` as 4 bytes per pixel in (R, G, B, A) order.
+fn paint_image(
+    pixels: &mut [u8],
+    width: usize,
+    height: usize,
+    clip: fortrust_layout::Rect,
+    rect: fortrust_layout::Rect,
+    image: &fortrust_core::DecodedImage,
+    natural_width: u32,
+    natural_height: u32,
+) {
+    if natural_width == 0 || natural_height == 0 || image.rgba.is_empty() {
+        paint_rect(pixels, width, height, clip, rect, [40, 44, 52, 255]);
+        return;
+    }
+
+    let x0 = rect.x.max(clip.x).floor().max(0.0) as usize;
+    let y0 = rect.y.max(clip.y).floor().max(0.0) as usize;
+    let x1 = (rect.x + rect.width).min(clip.x + clip.width).ceil().max(0.0) as usize;
+    let y1 = (rect.y + rect.height).min(clip.y + clip.height).ceil().max(0.0) as usize;
+    if x1 <= x0 || y1 <= y0 { return; }
+
+    let dst_w = x1.saturating_sub(x0);
+    let dst_h = y1.saturating_sub(y0);
+    let src_w = natural_width as usize;
+    let src_h = natural_height as usize;
+
+    for dy in 0..dst_h {
+        let py = y0 + dy;
+        if py >= height { break; }
+        // Map dst pixel y -> src pixel y (with sub-pixel sampling -> nearest)
+        let sy = ((dy as f32) / dst_h as f32 * src_h as f32) as usize;
+        let sy = sy.min(src_h - 1);
+        for dx in 0..dst_w {
+            let px = x0 + dx;
+            if px >= width { break; }
+            let sx = ((dx as f32) / dst_w as f32 * src_w as f32) as usize;
+            let sx = sx.min(src_w - 1);
+            let src_idx = (sy * src_w + sx) * 4;
+            if src_idx + 4 > image.rgba.len() { continue; }
+            let src = [
+                image.rgba[src_idx],
+                image.rgba[src_idx + 1],
+                image.rgba[src_idx + 2],
+                image.rgba[src_idx + 3],
+            ];
+            let dst_idx = (py * width + px) * 4;
+            blend_rgba(&mut pixels[dst_idx..dst_idx + 4], src);
+        }
     }
 }
 

@@ -6,6 +6,8 @@ pub struct SpeedDialState {
     pub search_query: String,
     pub ads_blocked: u32,
     pub trackers_blocked: u32,
+    pub fingerprint_attempts: u32,
+    pub https_upgrades: u64,
     pub tab_count: usize,
     pub animation_frame: f32,
     pub star_positions: Vec<StarData>,
@@ -112,6 +114,8 @@ impl Default for SpeedDialState {
             search_query: String::new(),
             ads_blocked: 0,
             trackers_blocked: 0,
+            fingerprint_attempts: 0,
+            https_upgrades: 0,
             tab_count: 1,
             animation_frame: 0.0,
             show_add_dialog: false,
@@ -173,7 +177,7 @@ impl SpeedDialState {
 
             ui.add_space(20.0);
 
-            // Search bar with Google logo
+            // Search bar
             search_navigation = self.render_search_bar(ui, theme);
 
             ui.add_space(30.0);
@@ -430,7 +434,12 @@ impl SpeedDialState {
     }
 
     fn render_privacy_badge(&self, ui: &mut egui::Ui, _theme: &FortrustTheme) {
-        let text = format!("Privacy-first - {} trackers blocked", self.trackers_blocked);
+        let total_blocked = self.ads_blocked + self.trackers_blocked + self.fingerprint_attempts;
+        let text = if self.https_upgrades > 0 {
+            format!("{total_blocked} blocked · {} HTTPS · {} FP stopped", self.https_upgrades, self.fingerprint_attempts)
+        } else {
+            format!("{total_blocked} blocked · {} fingerprint attempts", self.fingerprint_attempts)
+        };
         let font = egui::FontId::proportional(11.5);
         let galley = ui.painter().layout_no_wrap(text.clone(), font, Color32::from_rgba_unmultiplied(200, 210, 230, 128));
 
@@ -480,13 +489,13 @@ impl SpeedDialState {
         ui.painter().rect_filled(search_rect, CornerRadius::same(25), Color32::from_rgba_unmultiplied(22, 28, 40, 210));
         ui.painter().rect_stroke(search_rect, CornerRadius::same(25), Stroke::new(1.0, Color32::from_rgba_unmultiplied(255, 255, 255, 25)), egui::StrokeKind::Inside);
 
-        // Google logo
-        // Google G icon
+        // Fortrust search glyph
         let g_rect = Rect::from_min_size(
             Pos2::new(search_rect.min.x + 8.0, search_rect.center().y - 11.0),
             Vec2::new(22.0, 22.0),
         );
-        icons::paint_google_g_icon(ui.painter(), g_rect);
+        ui.painter().circle_filled(g_rect.center(), 10.5, Color32::from_rgba_unmultiplied(80, 155, 255, 35));
+        icons::paint_search_icon(ui.painter(), g_rect.center(), 17.0, Color32::from_rgb(185, 215, 255));
 
         // Input field
         let input_rect = Rect::from_min_size(
@@ -497,7 +506,7 @@ impl SpeedDialState {
         let mut child_ui = ui.new_child(egui::UiBuilder::new().max_rect(input_rect).layout(egui::Layout::left_to_right(egui::Align::Center)));
         let resp = child_ui.add(
             egui::TextEdit::singleline(&mut self.search_query)
-                .hint_text("Search the web")
+                .hint_text("Search privately with Fortrust")
                 .frame(false)
                 .desired_width(input_rect.width() - 10.0)
                 .font(egui::FontId::proportional(14.0))
@@ -639,15 +648,16 @@ impl SpeedDialState {
     }
 
     fn render_stat_pills(&self, ui: &mut egui::Ui, _theme: &FortrustTheme, rect: Rect) {
-        let blocked_str = format!("{}", self.blocked_requests);
-        let saved_str = format!("{:.1}s", self.load_time_savings);
-        let doh_str = if self.doh_enabled { "Active".to_string() } else { "Off".to_string() };
-        let fp_str = if self.fingerprinting_protection { "On".to_string() } else { "Off".to_string() };
+        let total_blocked = self.ads_blocked + self.trackers_blocked + self.fingerprint_attempts;
+        let blocked_str = format!("{}", total_blocked);
+        let https_str = format!("{}", self.https_upgrades);
+        let fp_str = format!("{}", self.fingerprint_attempts);
+        let doh_str = if self.doh_enabled { "Active".to_owned() } else { "Off".to_owned() };
         let pills = [
             ("Blocked", &blocked_str),
-            ("Saved", &saved_str),
-            ("DoH", &doh_str),
+            ("HTTPS", &https_str),
             ("FP", &fp_str),
+            ("DoH", &doh_str),
         ];
 
         let pill_h = 28.0;
@@ -718,6 +728,6 @@ fn normalize_input(input: &str) -> String {
     } else if trimmed.contains('.') && !trimmed.contains(' ') {
         format!("https://{}", trimmed)
     } else {
-        format!("https://duckduckgo.com/?q={}", urlencoding::encode(trimmed))
+        format!("fortrust://search?q={}", urlencoding::encode(trimmed))
     }
 }

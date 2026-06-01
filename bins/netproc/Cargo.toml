@@ -5,6 +5,7 @@ edition.workspace = true
 license.workspace = true
 
 [dependencies]
+bytes.workspace = true
 fortrust-core = { path = "../../crates/fortrust-core" }
 fortrust-net = { path = "../../crates/fortrust-net" }
 fortrust-ipc = { path = "../../crates/fortrust-ipc" }

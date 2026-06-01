@@ -1,8 +1,8 @@
 //! Trust engine facade and rendering orchestration.
 
-use fortrust_core::{PrivacyConfig, PrivacyEngine, RequestContext, ResourceType};
+use fortrust_core::{DecodedImage, ImageRegistry, PrivacyConfig, PrivacyEngine, RequestContext, ResourceType};
 use fortrust_dom::{DomArena, NodeRef, parse_html};
-use fortrust_net::{FetchSource, NetworkClient, NetworkError};
+use fortrust_net::{FetchSource, NetprocClient, NetworkClient, NetworkError};
 use fortrust_renderer::{RenderError, RenderedPage, StaticRenderer};
 use futures_util::StreamExt;
 use url::Url;
@@ -141,6 +141,7 @@ impl From<fortrust_js::JsError> for EngineError {
 pub struct TrustEngine {
     renderer: StaticRenderer,
     network: Option<NetworkClient>,
+    netproc: Option<NetprocClient>,
     mode: EngineMode,
     // runtime flags to control optional capabilities
     pub javascript_enabled: bool,
@@ -152,6 +153,7 @@ impl TrustEngine {
         Self {
             renderer: StaticRenderer::new(),
             network: None,
+            netproc: None,
             mode: EngineMode::Offline,
             javascript_enabled: cfg!(feature = "javascript"),
             allow_external_subresources: true,
@@ -163,10 +165,39 @@ impl TrustEngine {
         Ok(Self {
             renderer: StaticRenderer::new(),
             network: Some(network),
+            netproc: None,
             mode: EngineMode::Networked,
             javascript_enabled: cfg!(feature = "javascript"),
             allow_external_subresources: true,
         })
+    }
+
+    /// Create a TrustEngine that routes the main document fetch through an external
+    /// `netproc` process. Subresource loading falls back to the in-process `NetworkClient`.
+    pub fn with_netproc(
+        privacy: PrivacyConfig,
+        netproc: NetprocClient,
+    ) -> Result<Self, EngineError> {
+        let network = NetworkClient::new(PrivacyEngine::new(privacy))?;
+        Ok(Self {
+            renderer: StaticRenderer::new(),
+            network: Some(network),
+            netproc: Some(netproc),
+            mode: EngineMode::Networked,
+            javascript_enabled: cfg!(feature = "javascript"),
+            allow_external_subresources: true,
+        })
+    }
+
+    /// Async constructor: connects to netproc at the given address, then creates the engine.
+    pub async fn with_netproc_async(
+        privacy: PrivacyConfig,
+        netproc_addr: &str,
+    ) -> Result<Self, EngineError> {
+        let netproc = NetprocClient::connect(netproc_addr)
+            .await
+            .map_err(|e| EngineError::Network(NetworkError::Transport(format!("netproc: {e:?}"))))?;
+        Self::with_netproc(privacy, netproc)
     }
 
     pub fn mode(&self) -> EngineMode {
@@ -192,6 +223,7 @@ impl TrustEngine {
             0,
             0,
             0,
+            Vec::new(),
         )
     }
 
@@ -215,6 +247,7 @@ impl TrustEngine {
             0,
             0,
             0,
+            Vec::new(),
         )
     }
 
@@ -225,7 +258,7 @@ impl TrustEngine {
     ) -> Result<EnginePage, EngineError> {
         let url = url.into();
         let html = internal_html(&url);
-        self.build_page(url, &html, &[], &[], viewport, PageSource::Internal, 0, 0, 0, 0)
+        self.build_page(url, &html, &[], &[], viewport, PageSource::Internal, 0, 0, 0, 0, Vec::new())
     }
 
     pub async fn load_url(
@@ -243,22 +276,33 @@ impl TrustEngine {
         cosmetic_css: &[&str],
     ) -> Result<EnginePage, EngineError> {
         let url = url.into();
-        let Some(network) = &mut self.network else {
+
+        // Main document fetch: prefer netproc, fall back to in-process NetworkClient
+        let response = if let Some(ref netproc) = self.netproc {
+            netproc.fetch(RequestContext::document(url.clone())).await?
+        } else if let Some(ref mut network) = self.network {
+            network.fetch(RequestContext::document(url.clone())).await?
+        } else {
             return Err(EngineError::NetworkUnavailable);
         };
 
-        let response = network.fetch(RequestContext::document(url)).await?;
         let html =
             std::str::from_utf8(&response.body).map_err(|_| EngineError::InvalidUtf8Document)?;
         let page_url = response.url.to_string();
-        let (author_css, external_stylesheets_blocked, external_images_loaded, external_images_blocked) = if self.allow_external_subresources {
-            let (author_css, external_stylesheets_blocked) =
-                load_external_stylesheets(network, &page_url, html).await?;
-            let (external_images_loaded, external_images_blocked) =
-                load_external_images(network, &page_url, html).await?;
-            (author_css, external_stylesheets_blocked, external_images_loaded, external_images_blocked)
+
+        // Subresource loading (stylesheets, images) always uses in-process NetworkClient
+        let (author_css, external_stylesheets_blocked, external_images_loaded, external_images_blocked, decoded_images) = if self.allow_external_subresources {
+            if let Some(ref mut network) = self.network {
+                let (author_css, external_stylesheets_blocked) =
+                    load_external_stylesheets(network, &page_url, html).await?;
+                let (external_images_loaded, external_images_blocked, decoded_images) =
+                    load_external_images(network, &page_url, html).await?;
+                (author_css, external_stylesheets_blocked, external_images_loaded, external_images_blocked, decoded_images)
+            } else {
+                (Vec::new(), 0usize, 0usize, 0usize, Vec::new())
+            }
         } else {
-            (Vec::new(), 0usize, 0usize, 0usize)
+            (Vec::new(), 0usize, 0usize, 0usize, Vec::new())
         };
         let author_css_refs = author_css.iter().map(String::as_str).collect::<Vec<_>>();
         self.build_page(
@@ -272,6 +316,7 @@ impl TrustEngine {
             external_stylesheets_blocked,
             external_images_loaded,
             external_images_blocked,
+            decoded_images,
         )
     }
 
@@ -288,13 +333,18 @@ impl TrustEngine {
         external_stylesheets_blocked: usize,
         external_images_loaded: usize,
         external_images_blocked: usize,
+        decoded_images: Vec<DecodedImage>,
     ) -> Result<EnginePage, EngineError> {
         let javascript_enabled = self.javascript_enabled && cfg!(feature = "javascript");
+        let mut images = fortrust_core::ImageRegistry::new();
+        for img in decoded_images {
+            images.insert(img);
+        }
         let (rendered, js_title_opt) = if javascript_enabled {
-                render_with_javascript(html, author_css, cosmetic_css, viewport, &url)?
+                render_with_javascript(html, author_css, cosmetic_css, viewport, &url, images)?
             } else {
                 let all_css = [author_css, cosmetic_css].concat();
-                (self.renderer.render(html, &all_css, viewport)?, None)
+                (self.renderer.render_with_images(html, &all_css, viewport, images)?, None)
             };
         let security = SecurityReport::for_render(
             source,
@@ -325,6 +375,7 @@ fn render_with_javascript(
     cosmetic_css: &[&str],
     viewport: Viewport,
     url: &str,
+    images: ImageRegistry,
 ) -> Result<(fortrust_renderer::RenderedPage, Option<String>), EngineError> {
     use fortrust_dom::DomArena;
     use fortrust_js::{EventLoop, JsRuntime, WebApiRegistry};
@@ -356,7 +407,7 @@ fn render_with_javascript(
     };
 
     let renderer = fortrust_renderer::StaticRenderer::new();
-    let rendered = renderer.render_document(&document, author_css, cosmetic_css, viewport)?;
+    let rendered = renderer.render_document_with_images(&document, author_css, cosmetic_css, viewport, images)?;
     Ok((rendered, js_title))
 }
 
@@ -367,6 +418,7 @@ fn render_with_javascript(
     _cosmetic_css: &[&str],
     _viewport: Viewport,
     _url: &str,
+    _images: ImageRegistry,
 ) -> Result<fortrust_renderer::RenderedPage, EngineError> {
     Err(EngineError::Render(
         fortrust_renderer::RenderError::EmptyDocument,
@@ -457,6 +509,7 @@ async fn load_external_stylesheets(
                 url: href,
                 top_level_url: Some(document_url.to_owned()),
                 resource_type: ResourceType::Stylesheet,
+                referrer_policy: None,
             })
             .await;
 
@@ -490,21 +543,23 @@ async fn load_external_images(
     network: &NetworkClient,
     document_url: &str,
     html: &str,
-) -> Result<(usize, usize), EngineError> {
+) -> Result<(usize, usize, Vec<DecodedImage>), EngineError> {
     let hrefs = external_image_hrefs(document_url, html);
     if hrefs.is_empty() {
-        return Ok((0, 0));
+        return Ok((0, 0, Vec::new()));
     }
 
     let mut loaded = 0usize;
     let mut blocked_or_failed = 0usize;
+    let mut decoded: Vec<DecodedImage> = Vec::new();
     let mut remaining_budget = MAX_EXTERNAL_SUBRESOURCE_BYTES_PER_DOCUMENT;
     for href in hrefs {
         let response = network
             .fetch_stream(RequestContext {
-                url: href,
+                url: href.clone(),
                 top_level_url: Some(document_url.to_owned()),
                 resource_type: ResourceType::Image,
+                referrer_policy: None,
             })
             .await;
 
@@ -516,14 +571,52 @@ async fn load_external_images(
                 }
 
                 let limit = remaining_budget.min(MAX_EXTERNAL_IMAGE_BYTES_PER_DOCUMENT);
-                match drain_stream_limited(&mut response.body, limit).await {
-                    Ok(consumed_bytes)
-                        if consume_document_budget(&mut remaining_budget, consumed_bytes)
-                            .is_ok() =>
-                    {
+                // Read up to the per-image limit so we can both count and decode.
+                let mut buffer: Vec<u8> = Vec::new();
+                let mut read_total: usize = 0;
+                let mut truncated = false;
+                while let Some(chunk) = response.body.next().await {
+                    match chunk {
+                        Ok(bytes) => {
+                            if read_total + bytes.len() > limit {
+                                let room = limit.saturating_sub(read_total);
+                                buffer.extend_from_slice(&bytes[..room]);
+                                read_total += room;
+                                truncated = true;
+                                break;
+                            }
+                            buffer.extend_from_slice(&bytes);
+                            read_total += bytes.len();
+                        }
+                        Err(_) => {
+                            blocked_or_failed += 1;
+                            break;
+                        }
+                    }
+                }
+                if truncated || consume_document_budget(&mut remaining_budget, read_total).is_err() {
+                    blocked_or_failed += 1;
+                    continue;
+                }
+
+                // Attempt to decode. If decoding fails, count as a blocked/failed
+                // image (we still try to limit unnecessary work).
+                match image::load_from_memory(&buffer) {
+                    Ok(dyn_img) => {
+                        let rgba = dyn_img.to_rgba8();
+                        let (w, h) = rgba.dimensions();
+                        decoded.push(DecodedImage {
+                            url: href,
+                            width: w,
+                            height: h,
+                            rgba: rgba.into_raw(),
+                        });
                         loaded += 1;
                     }
-                    _ => blocked_or_failed += 1,
+                    Err(e) => {
+                        tracing::debug!(target: "fortrust.engine", "image decode failed for {href}: {e}");
+                        blocked_or_failed += 1;
+                    }
                 }
             }
             Err(NetworkError::Blocked(_)) => blocked_or_failed += 1,
@@ -531,7 +624,7 @@ async fn load_external_images(
         }
     }
 
-    Ok((loaded, blocked_or_failed))
+    Ok((loaded, blocked_or_failed, decoded))
 }
 
 fn external_stylesheet_hrefs(document_url: &str, html: &str) -> Vec<String> {
@@ -606,23 +699,6 @@ fn image_href(node: NodeRef<'_>, base_url: &Url) -> Option<String> {
     } else {
         None
     }
-}
-
-async fn drain_stream_limited(
-    stream: &mut fortrust_net::TransportBodyStream,
-    byte_limit: usize,
-) -> Result<usize, NetworkError> {
-    let mut bytes = 0usize;
-    while let Some(chunk) = stream.next().await {
-        let chunk = chunk.map_err(|error| NetworkError::Transport(format!("{error:?}")))?;
-        bytes = bytes.saturating_add(chunk.len());
-        if bytes > byte_limit {
-            return Err(NetworkError::BodyTooLarge {
-                limit_bytes: byte_limit,
-            });
-        }
-    }
-    Ok(bytes)
 }
 
 async fn stylesheet_text_from_response(
@@ -881,22 +957,6 @@ mod tests {
 
         let hrefs = external_image_hrefs("https://example.com/", &html);
         assert_eq!(hrefs.len(), MAX_EXTERNAL_IMAGES_PER_DOCUMENT);
-    }
-
-    #[test]
-    fn image_stream_limit_is_enforced() {
-        use bytes::Bytes;
-        use futures_util::stream;
-
-        let mut stream: fortrust_net::TransportBodyStream = Box::pin(stream::iter(vec![
-            Ok::<Bytes, fortrust_net::TransportError>(Bytes::from_static(&[0u8; 1024])),
-            Ok::<Bytes, fortrust_net::TransportError>(Bytes::from_static(&[1u8; 1024])),
-            Ok::<Bytes, fortrust_net::TransportError>(Bytes::from_static(&[2u8; 1024])),
-        ]));
-
-        let error =
-            futures_executor::block_on(drain_stream_limited(&mut stream, 2048)).unwrap_err();
-        assert_eq!(error, NetworkError::BodyTooLarge { limit_bytes: 2048 });
     }
 
     #[test]

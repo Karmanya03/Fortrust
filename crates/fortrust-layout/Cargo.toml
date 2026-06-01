@@ -5,6 +5,7 @@ edition.workspace = true
 license.workspace = true
 
 [dependencies]
+fortrust-core = { path = "../fortrust-core" }
 fortrust-dom = { path = "../fortrust-dom" }
 fortrust-style = { path = "../fortrust-style" }
 smallvec.workspace = true

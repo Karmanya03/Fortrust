@@ -5,6 +5,7 @@ edition.workspace = true
 license.workspace = true
 
 [dependencies]
+fortrust-core = { path = "../fortrust-core" }
 fortrust-dom = { path = "../fortrust-dom" }
 fortrust-layout = { path = "../fortrust-layout" }
 fortrust-paint = { path = "../fortrust-paint" }

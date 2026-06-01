@@ -141,52 +141,6 @@ pub fn paint_check_icon(painter: &Painter, rect: Rect, color: Color32) {
     draw_path(painter, &[s(r, 2.5, 7.5), s(r, 6.0, 11.0), s(r, 11.5, 3.5)], color, 1.6);
 }
 
-pub fn paint_google_g_icon(painter: &Painter, rect: Rect) {
-    let r = center_rect(rect, Vec2::new(24.0, 24.0));
-    let cx = r.center().x;
-    let cy = r.center().y;
-    let radius = 10.5;
-    let steps = 16usize;
-
-    let (blue, red, yellow, green) = (
-        Color32::from_rgb(66, 133, 244),
-        Color32::from_rgb(234, 67, 53),
-        Color32::from_rgb(251, 188, 4),
-        Color32::from_rgb(52, 168, 83),
-    );
-
-    let arc = |start_deg: f32, end_deg: f32, color: Color32| {
-        let mut pts = vec![Pos2::new(cx, cy)];
-        let n = steps.max(2);
-        for i in 0..=n {
-            let t = start_deg + (end_deg - start_deg) * i as f32 / n as f32;
-            let rad = t * std::f32::consts::TAU / 360.0;
-            pts.push(Pos2::new(cx + rad.cos() * radius, cy + rad.sin() * radius));
-        }
-        painter.add(Shape::Path(egui::epaint::PathShape {
-            points: pts, closed: true, fill: color, stroke: Default::default(),
-        }));
-    };
-
-    // Blue: 315-45 degrees (top-right arc)
-    arc(315.0, 45.0, blue);
-    // Red: 45-135 degrees (bottom-right arc)
-    arc(45.0, 135.0, red);
-    // Yellow: 135-225 degrees (bottom-left arc)
-    arc(135.0, 225.0, yellow);
-    // Green: 225-315 degrees (top-left arc)
-    arc(225.0, 315.0, green);
-
-    // White "G" letter
-    painter.text(
-        Pos2::new(cx, cy),
-        egui::Align2::CENTER_CENTER,
-        "G",
-        egui::FontId::proportional(15.0),
-        Color32::WHITE,
-    );
-}
-
 pub fn paint_shield_icon_rect(painter: &Painter, rect: Rect, color: Color32) {
     let r = center_rect(rect, Vec2::new(14.0, 14.0));
     draw_path(painter, &[
