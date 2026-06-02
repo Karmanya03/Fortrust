@@ -24,3 +24,4 @@ serde.workspace = true
 serde_json.workspace = true
 fortrust-ipc = { path = "../fortrust-ipc" }
 fortrust-privacy = { path = "../fortrust-privacy" }
+fortrust-layout = { version = "0.0.1", path = "../fortrust-layout" }

@@ -756,8 +756,25 @@ impl SimpleSelector {
                     }
                     return false;
                 }
-                "nth-child" | "nth-of-type" | "first-of-type" | "last-of-type" => {
-                    // Always match for static rendering
+                pseudo if pseudo.starts_with("nth-child(") => {
+                    if let Some(parent) = node.parent() {
+                        let children = parent.children();
+                        let idx = children.iter().position(|c| std::ptr::addr_eq(c, node)).unwrap_or(0) + 1;
+                        if pseudo == "nth-child(even)" {
+                            if idx % 2 != 0 { return false; }
+                        } else if pseudo == "nth-child(odd)" {
+                            if idx % 2 == 0 { return false; }
+                        } else if let Some(n_str) = pseudo.strip_prefix("nth-child(").and_then(|s| s.strip_suffix(")")) {
+                            if let Ok(n) = n_str.parse::<usize>() {
+                                if idx != n { return false; }
+                            }
+                        }
+                    } else {
+                        return false;
+                    }
+                }
+                "nth-of-type" | "first-of-type" | "last-of-type" => {
+                    // Stubbed for static rendering
                 }
                 "before" | "after" | "placeholder" | "selection" => {
                     return false;

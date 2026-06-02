@@ -42,6 +42,10 @@ pub fn run() -> eframe::Result<()> {
         "Fortrust",
         options,
         Box::new(|creation_context| {
+            let ppp = creation_context.egui_ctx.pixels_per_point();
+            if ppp <= 0.0 || !ppp.is_finite() {
+                creation_context.egui_ctx.set_pixels_per_point(1.0);
+            }
             let app = FortrustApp::new(creation_context);
             Ok(Box::new(app))
         }),

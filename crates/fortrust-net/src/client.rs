@@ -138,6 +138,8 @@ impl NetworkClient {
             .as_deref()
             .ok_or(NetworkError::InvalidEffectiveUrl)?;
         let url = Url::parse(effective).map_err(|_| NetworkError::InvalidEffectiveUrl)?;
+
+
         let cache_decision = self.cache.lookup(&url, SystemTime::now());
 
         let mut headers = privacy_headers(&decision.notes);
@@ -164,38 +166,66 @@ impl NetworkClient {
         &mut self,
         context: RequestContext,
     ) -> Result<NetworkResponse, NetworkError> {
-        let prepared = self.prepare(context)?;
+        self.fetch_with_redirects(context, 10).await
+    }
 
-        if let CacheDecision::Fresh(entry) = &prepared.cache_decision {
-            return Ok(response_from_cache_entry(
+    async fn fetch_with_redirects(
+        &mut self,
+        mut context: RequestContext,
+        max_hops: usize,
+    ) -> Result<NetworkResponse, NetworkError> {
+        let mut hops = 0;
+        loop {
+            if hops >= max_hops {
+                return Err(NetworkError::Transport("Too many redirects".to_string()));
+            }
+            hops += 1;
+
+            let prepared = self.prepare(context.clone())?;
+
+            if let CacheDecision::Fresh(entry) = &prepared.cache_decision {
+                return Ok(response_from_cache_entry(
+                    prepared.url,
+                    entry.clone(),
+                    FetchSource::Cache,
+                ));
+            }
+
+            let network = self.send_buffered(&prepared).await?;
+
+            if network.status == 304
+                && let CacheDecision::Revalidate(entry, _) = prepared.cache_decision
+            {
+                return Ok(response_from_cache_entry(
+                    prepared.url,
+                    entry,
+                    FetchSource::RevalidatedCache,
+                ));
+            }
+
+            let response = response_from_transport(prepared.url.clone(), network);
+            let _ = self.store_response(
                 prepared.url,
-                entry.clone(),
-                FetchSource::Cache,
-            ));
+                response.status,
+                &response.headers,
+                response.body.clone(),
+                SystemTime::now(),
+            );
+
+            // Handle redirects
+            if (300..400).contains(&response.status) {
+                if let Some(location) = response.headers.get("location") {
+                    if let Ok(loc_str) = location.to_str() {
+                        if let Ok(next_url) = response.url.join(loc_str) {
+                            context.url = next_url.to_string();
+                            continue;
+                        }
+                    }
+                }
+            }
+
+            return Ok(response);
         }
-
-        let network = self.send_buffered(&prepared).await?;
-
-        if network.status == 304
-            && let CacheDecision::Revalidate(entry, _) = prepared.cache_decision
-        {
-            return Ok(response_from_cache_entry(
-                prepared.url,
-                entry,
-                FetchSource::RevalidatedCache,
-            ));
-        }
-
-        let response = response_from_transport(prepared.url.clone(), network);
-        let _ = self.store_response(
-            prepared.url,
-            response.status,
-            &response.headers,
-            response.body.clone(),
-            SystemTime::now(),
-        );
-
-        Ok(response)
     }
 
     pub async fn fetch_stream(
@@ -289,6 +319,12 @@ impl NetworkClient {
 
     pub fn max_buffered_body_bytes(&self) -> usize {
         self.max_buffered_body_bytes
+    }
+
+    /// Proactively resolve a hostname to seed the OS DNS cache.
+    pub async fn prefetch_dns(&self, host: &str) {
+        let addr = format!("{}:443", host);
+        let _ = tokio::net::lookup_host(addr).await;
     }
 }
 

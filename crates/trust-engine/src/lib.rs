@@ -16,6 +16,8 @@ pub const TRUST_ENGINE_NAME: &str = "Trust Engine";
 pub const TRUST_ENGINE_VERSION: &str = env!("CARGO_PKG_VERSION");
 const MAX_EXTERNAL_STYLESHEETS_PER_DOCUMENT: usize = 12;
 const MAX_EXTERNAL_STYLESHEET_BYTES_PER_DOCUMENT: usize = 1024 * 1024;
+const MAX_EXTERNAL_SCRIPTS_PER_DOCUMENT: usize = 8;
+const MAX_EXTERNAL_SCRIPT_BYTES_PER_DOCUMENT: usize = 512 * 1024;
 const MAX_EXTERNAL_IMAGES_PER_DOCUMENT: usize = 32;
 const MAX_EXTERNAL_IMAGE_BYTES_PER_DOCUMENT: usize = 4 * 1024 * 1024;
 const MAX_EXTERNAL_SUBRESOURCE_BYTES_PER_DOCUMENT: usize = 6 * 1024 * 1024;
@@ -217,6 +219,7 @@ impl TrustEngine {
             html,
             author_css,
             &[],
+            &[],
             viewport,
             PageSource::Offline,
             0,
@@ -241,6 +244,7 @@ impl TrustEngine {
             html,
             author_css,
             cosmetic_css,
+            &[],
             viewport,
             PageSource::Offline,
             0,
@@ -258,7 +262,37 @@ impl TrustEngine {
     ) -> Result<EnginePage, EngineError> {
         let url = url.into();
         let html = internal_html(&url);
-        self.build_page(url, &html, &[], &[], viewport, PageSource::Internal, 0, 0, 0, 0, Vec::new())
+        self.build_page(url, &html, &[], &[], &[], viewport, PageSource::Internal, 0, 0, 0, 0, Vec::new())
+    }
+
+    /// Render a list of `SearchResult`s into a styled `EnginePage` using the
+    /// trust engine's static renderer. This is displayed instead of the egui
+    /// search fallback when the results are ready.
+    pub fn render_search_results(
+        &self,
+        query: &str,
+        results: &[fortrust_search::SearchResult],
+        viewport: Viewport,
+    ) -> Result<EnginePage, EngineError> {
+        let html = build_search_results_html(query, results);
+        let url = format!(
+            "fortrust://search?q={}",
+            urlencoding::encode(query.trim())
+        );
+        self.build_page(
+            url,
+            &html,
+            &[],
+            &[],
+            &[],
+            viewport,
+            PageSource::Internal,
+            0,
+            0,
+            0,
+            0,
+            Vec::new(),
+        )
     }
 
     pub async fn load_url(
@@ -290,19 +324,22 @@ impl TrustEngine {
             std::str::from_utf8(&response.body).map_err(|_| EngineError::InvalidUtf8Document)?;
         let page_url = response.url.to_string();
 
-        // Subresource loading (stylesheets, images) always uses in-process NetworkClient
-        let (author_css, external_stylesheets_blocked, external_images_loaded, external_images_blocked, decoded_images) = if self.allow_external_subresources {
+        // Subresource loading (stylesheets, images, scripts) always uses in-process NetworkClient
+        let (author_css, external_scripts, external_stylesheets_blocked, external_images_loaded, external_images_blocked, decoded_images) = if self.allow_external_subresources {
             if let Some(ref mut network) = self.network {
+                prefetch_dns_links(network, &page_url, html);
                 let (author_css, external_stylesheets_blocked) =
                     load_external_stylesheets(network, &page_url, html).await?;
                 let (external_images_loaded, external_images_blocked, decoded_images) =
                     load_external_images(network, &page_url, html).await?;
-                (author_css, external_stylesheets_blocked, external_images_loaded, external_images_blocked, decoded_images)
+                let external_scripts =
+                    load_external_scripts(network, &page_url, html).await?;
+                (author_css, external_scripts, external_stylesheets_blocked, external_images_loaded, external_images_blocked, decoded_images)
             } else {
-                (Vec::new(), 0usize, 0usize, 0usize, Vec::new())
+                (Vec::new(), Vec::new(), 0usize, 0usize, 0usize, Vec::new())
             }
         } else {
-            (Vec::new(), 0usize, 0usize, 0usize, Vec::new())
+            (Vec::new(), Vec::new(), 0usize, 0usize, 0usize, Vec::new())
         };
         let author_css_refs = author_css.iter().map(String::as_str).collect::<Vec<_>>();
         self.build_page(
@@ -310,6 +347,7 @@ impl TrustEngine {
             html,
             &author_css_refs,
             cosmetic_css,
+            &external_scripts,
             viewport,
             response.source.into(),
             author_css.len(),
@@ -327,6 +365,7 @@ impl TrustEngine {
         html: &str,
         author_css: &[&str],
         cosmetic_css: &[&str],
+        external_scripts: &[String],
         viewport: Viewport,
         source: PageSource,
         external_stylesheets_loaded: usize,
@@ -341,7 +380,7 @@ impl TrustEngine {
             images.insert(img);
         }
         let (rendered, js_title_opt) = if javascript_enabled {
-                render_with_javascript(html, author_css, cosmetic_css, viewport, &url, images)?
+                render_with_javascript(html, author_css, cosmetic_css, external_scripts, viewport, &url, images)?
             } else {
                 let all_css = [author_css, cosmetic_css].concat();
                 (self.renderer.render_with_images(html, &all_css, viewport, images)?, None)
@@ -373,6 +412,7 @@ fn render_with_javascript(
     html: &str,
     author_css: &[&str],
     cosmetic_css: &[&str],
+    external_scripts: &[String],
     viewport: Viewport,
     url: &str,
     images: ImageRegistry,
@@ -393,6 +433,14 @@ fn render_with_javascript(
         unsafe { &*(&document as *const fortrust_dom::Document<'static>) };
     let _ = js.attach_document(static_doc);
 
+    // Run external scripts first — they may define globals that inline scripts depend on.
+    for script in external_scripts {
+        if !script.trim().is_empty() {
+            let _ = js.eval(script);
+        }
+    }
+
+    // Then run inline scripts.
     let scripts = extract_inline_scripts(html);
     for script in &scripts {
         if !script.trim().is_empty() {
@@ -416,10 +464,11 @@ fn render_with_javascript(
     _html: &str,
     _author_css: &[&str],
     _cosmetic_css: &[&str],
+    _external_scripts: &[String],
     _viewport: Viewport,
     _url: &str,
     _images: ImageRegistry,
-) -> Result<fortrust_renderer::RenderedPage, EngineError> {
+) -> Result<(fortrust_renderer::RenderedPage, Option<String>), EngineError> {
     Err(EngineError::Render(
         fortrust_renderer::RenderError::EmptyDocument,
     ))
@@ -539,6 +588,62 @@ async fn load_external_stylesheets(
     Ok((loaded, blocked_or_failed))
 }
 
+async fn load_external_scripts(
+    network: &mut NetworkClient,
+    document_url: &str,
+    html: &str,
+) -> Result<Vec<String>, EngineError> {
+    let srcs = external_script_srcs(document_url, html);
+    if srcs.is_empty() {
+        return Ok(Vec::new());
+    }
+
+    let mut loaded = Vec::new();
+    let mut total_bytes = 0usize;
+    for src in srcs {
+        if loaded.len() >= MAX_EXTERNAL_SCRIPTS_PER_DOCUMENT {
+            break;
+        }
+        if total_bytes >= MAX_EXTERNAL_SCRIPT_BYTES_PER_DOCUMENT {
+            break;
+        }
+
+        let response = network
+            .fetch(RequestContext {
+                url: src.clone(),
+                top_level_url: Some(document_url.to_owned()),
+                resource_type: ResourceType::Script,
+                referrer_policy: None,
+            })
+            .await;
+
+        match response {
+            Ok(resp) => {
+                let allowed_bytes = MAX_EXTERNAL_SCRIPT_BYTES_PER_DOCUMENT
+                    .saturating_sub(total_bytes);
+                if resp.body.len() > allowed_bytes {
+                    tracing::debug!(target: "fortrust.engine", "external script {src} exceeds budget, skipping");
+                    continue;
+                }
+                match std::str::from_utf8(&resp.body) {
+                    Ok(text) => {
+                        total_bytes += resp.body.len();
+                        loaded.push(text.to_owned());
+                    }
+                    Err(_) => {
+                        tracing::debug!(target: "fortrust.engine", "external script {src} is not valid UTF-8, skipping");
+                    }
+                }
+            }
+            Err(e) => {
+                tracing::debug!(target: "fortrust.engine", "failed to fetch external script {src}: {e:?}");
+            }
+        }
+    }
+
+    Ok(loaded)
+}
+
 async fn load_external_images(
     network: &NetworkClient,
     document_url: &str,
@@ -627,6 +732,51 @@ async fn load_external_images(
     Ok((loaded, blocked_or_failed, decoded))
 }
 
+fn external_script_srcs(document_url: &str, html: &str) -> Vec<String> {
+    let Ok(base_url) = Url::parse(document_url) else {
+        return Vec::new();
+    };
+
+    let html_lower = html.to_ascii_lowercase();
+    let mut pos = 0;
+    let mut srcs = Vec::new();
+    while let Some(start) = html_lower[pos..].find("<script") {
+        let start_abs = pos + start;
+        let Some(tag_end_rel) = html_lower[start_abs..].find('>') else { break };
+        let tag_end_abs = start_abs + tag_end_rel + 1;
+        let tag_content = &html[start_abs..tag_end_abs];
+        if let Some(src) = extract_attr_value(tag_content, "src") {
+            if let Ok(url) = base_url.join(src.trim()) {
+                if matches!(url.scheme(), "http" | "https") {
+                    srcs.push(url.to_string());
+                }
+            }
+        }
+        pos = tag_end_abs;
+        if srcs.len() >= MAX_EXTERNAL_SCRIPTS_PER_DOCUMENT {
+            break;
+        }
+    }
+    srcs
+}
+
+fn extract_attr_value<'a>(tag_content: &'a str, attr: &str) -> Option<&'a str> {
+    let lower = tag_content.to_ascii_lowercase();
+    let search = format!("{attr}=");
+    let attr_start = lower.find(search.as_str())?;
+    let value_start = attr_start + search.len();
+    let rest = &tag_content[value_start..];
+    if rest.starts_with('"') {
+        rest[1..].find('"').map(|end| &rest[1..1 + end])
+    } else if rest.starts_with('\'') {
+        rest[1..].find('\'').map(|end| &rest[1..1 + end])
+    } else {
+        // unquoted attribute — up to next whitespace or >
+        let end = rest.find(|c: char| c.is_ascii_whitespace() || c == '>');
+        Some(&rest[..end.unwrap_or(rest.len())])
+    }
+}
+
 fn external_stylesheet_hrefs(document_url: &str, html: &str) -> Vec<String> {
     let Ok(base_url) = Url::parse(document_url) else {
         return Vec::new();
@@ -643,6 +793,46 @@ fn external_stylesheet_hrefs(document_url: &str, html: &str) -> Vec<String> {
         .filter_map(|node| stylesheet_href(node, &base_url))
         .take(MAX_EXTERNAL_STYLESHEETS_PER_DOCUMENT)
         .collect()
+}
+
+fn prefetch_dns_links(network: &NetworkClient, document_url: &str, html: &str) {
+    let Ok(base_url) = Url::parse(document_url) else {
+        return;
+    };
+
+    let arena = DomArena::new();
+    let Ok(document) = parse_html(&arena, html) else {
+        return;
+    };
+
+    let hosts: Vec<String> = document
+        .descendants()
+        .into_iter()
+        .filter_map(|node| {
+            let element = node.as_element()?;
+            if !element.local_name().eq_ignore_ascii_case("link") {
+                return None;
+            }
+            let rel = element.attr("rel")?;
+            if !rel
+                .split_ascii_whitespace()
+                .any(|part| part.eq_ignore_ascii_case("dns-prefetch"))
+            {
+                return None;
+            }
+            let href = element.attr("href")?;
+            let url = base_url.join(href.trim()).ok()?;
+            url.host_str().map(|s| s.to_owned())
+        })
+        .take(10)
+        .collect();
+
+    for host in hosts {
+        let network_clone = network.clone();
+        tokio::spawn(async move {
+            network_clone.prefetch_dns(&host).await;
+        });
+    }
 }
 
 fn external_image_hrefs(document_url: &str, html: &str) -> Vec<String> {
@@ -780,29 +970,162 @@ fn find_ascii_case_insensitive(haystack: &str, needle: &str) -> Option<usize> {
         })
 }
 
-fn internal_html(url: &str) -> String {
+const COMMON_STYLES: &str = r#"
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  body {
+    background: #0d1117;
+    color: #e6edf3;
+    font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif;
+    font-size: 15px;
+    line-height: 1.6;
+    padding: 32px 24px;
+  }
+  .card {
+    background: rgba(22, 27, 34, 0.95);
+    border: 1px solid rgba(48, 54, 61, 0.8);
+    border-radius: 12px;
+    padding: 24px 28px;
+    margin-bottom: 16px;
+    max-width: 720px;
+  }
+  h1 { font-size: 26px; font-weight: 700; color: #58a6ff; margin-bottom: 8px; }
+  h2 { font-size: 16px; font-weight: 600; color: #8b949e; margin-bottom: 12px; }
+  p { color: #8b949e; margin-top: 6px; }
+  .badge {
+    display: inline-block;
+    background: rgba(35, 134, 54, 0.15);
+    border: 1px solid rgba(35, 134, 54, 0.4);
+    color: #3fb950;
+    border-radius: 20px;
+    padding: 2px 10px;
+    font-size: 12px;
+    margin-right: 6px;
+    margin-top: 8px;
+  }
+  .badge-warn {
+    background: rgba(187, 128, 9, 0.15);
+    border-color: rgba(187, 128, 9, 0.4);
+    color: #d29922;
+  }
+  .url { font-family: monospace; font-size: 12px; color: #58a6ff; word-break: break-all; }
+"#;
+
+fn build_search_results_html(query: &str, results: &[fortrust_search::SearchResult]) -> String {
+    let mut results_html = String::new();
+    if results.is_empty() {
+        results_html.push_str("<p>No results found.</p>");
+    } else {
+        for res in results {
+            let title = escape_text(&res.title);
+            let snippet = escape_text(&res.snippet);
+            let url = escape_text(&res.url);
+            results_html.push_str(&format!(
+                r#"<div class="card" style="padding: 16px; margin-bottom: 12px; max-width: 680px;">
+  <a href="{url}" style="text-decoration: none;">
+    <h2 style="color: #58a6ff; font-size: 18px; margin-bottom: 4px;">{title}</h2>
+  </a>
+  <p class="url" style="margin-bottom: 6px; color: #3fb950;">{url}</p>
+  <p style="color: #8b949e; font-size: 14px; line-height: 1.5;">{snippet}</p>
+</div>"#
+            ));
+        }
+    }
+
+    let safe_query = escape_text(query);
     format!(
         r#"<!doctype html>
-<html>
+<html lang="en">
 <head>
-  <title>{TRUST_ENGINE_NAME}</title>
-  <style>
-    body {{ background-color: #ffffff; color: #111111; margin: 16px; }}
-    main {{ background-color: #eef7f4; padding: 16px; }}
-    h1 {{ color: #0f766e; font-size: 32px; margin: 8px; }}
-    p {{ margin: 8px; }}
-    strong {{ color: #0f766e; }}
-  </style>
+  <meta charset="utf-8">
+  <title>{safe_query} - Fortrust Search</title>
+  <style>{COMMON_STYLES}</style>
 </head>
 <body>
-  <main>
-    <h1>{TRUST_ENGINE_NAME}</h1>
-    <p>Secure static rendering is online for <strong>{}</strong>.</p>
-    <p>JavaScript and external subresources remain disabled until isolated renderer and privacy-gated resource loading are complete.</p>
-  </main>
+  <div style="margin-bottom: 24px;">
+    <h1>&#128269; Search Results</h1>
+    <p>Showing private results for "<strong>{safe_query}</strong>"</p>
+  </div>
+  {results_html}
 </body>
-</html>"#,
-        escape_text(url)
+</html>"#
+    )
+}
+
+fn internal_html(url: &str) -> String {
+    let is_start  = url == "fortrust://start";
+    let is_empty  = url == "fortrust://empty";
+    let is_search = url.starts_with("fortrust://search");
+    let is_settings = url == "fortrust://settings";
+
+    let (page_title, body) = if is_start {
+        (
+            "Fortrust — Speed Dial".to_owned(),
+            format!(
+                r#"<div class="card">
+  <h1>&#128737; Fortrust</h1>
+  <h2>Privacy-first browsing engine</h2>
+  <p>Type a URL or search query in the address bar to get started.</p>
+  <span class="badge">HTTPS Only</span>
+  <span class="badge">GPC + DNT</span>
+  <span class="badge">No tracking</span>
+</div>
+<div class="card">
+  <h2>About This Build</h2>
+  <p class="url">{TRUST_ENGINE_NAME} v{TRUST_ENGINE_VERSION}</p>
+  <p>Sandboxed static renderer &bull; Privacy pipeline active &bull; External scripts gated</p>
+</div>"#
+            ),
+        )
+    } else if is_empty {
+        (
+            "Fortrust".to_owned(),
+            "<div class=\"card\"><h1>&#128737; Fortrust</h1><p>Ready.</p></div>".to_owned(),
+        )
+    } else if is_search {
+        (
+            "Fortrust Search".to_owned(),
+            "<div class=\"card\"><h1>&#128269; Fortrust Search</h1><p>Searching privately&hellip;</p></div>".to_owned(),
+        )
+    } else if is_settings {
+        (
+            "Fortrust Settings".to_owned(),
+            format!(
+                r#"<div class="card">
+  <h1>&#9881;&#65039; Settings</h1>
+  <h2>Browser configuration</h2>
+  <p>Settings are managed through the sidebar privacy panel.</p>
+  <span class="badge">{TRUST_ENGINE_NAME}</span>
+</div>"#
+            ),
+        )
+    } else {
+        let safe_url = escape_text(url);
+        (
+            TRUST_ENGINE_NAME.to_owned(),
+            format!(
+                r#"<div class="card">
+  <h1>&#128737; {TRUST_ENGINE_NAME}</h1>
+  <p>Secure static rendering is online.</p>
+  <p class="url">{safe_url}</p>
+  <span class="badge">Sandboxed</span>
+  <span class="badge">Privacy active</span>
+</div>"#
+            ),
+        )
+    };
+
+    format!(
+        r#"<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <title>{page_title}</title>
+  <style>{COMMON_STYLES}</style>
+</head>
+<body>
+{body}
+</body>
+</html>"#
     )
 }
 

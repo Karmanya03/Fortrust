@@ -1135,6 +1135,7 @@ dependencies = [
  "egui",
  "fortrust-core",
  "fortrust-ipc",
+ "fortrust-layout",
  "fortrust-privacy",
  "fortrust-search",
  "fortrust-storage",
@@ -4222,6 +4223,7 @@ dependencies = [
  "fortrust-net",
  "fortrust-paint",
  "fortrust-renderer",
+ "fortrust-search",
  "fortrust-style",
  "futures-executor",
  "futures-util",
@@ -4231,8 +4233,10 @@ dependencies = [
  "markup5ever 0.14.1",
  "percent-encoding",
  "serde",
+ "tokio",
  "tracing",
  "url",
+ "urlencoding",
 ]
 
 [[package]]

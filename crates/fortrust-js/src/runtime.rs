@@ -174,6 +174,7 @@ impl JsRuntime {
         }
 
         bindings::navigator::register(&mut self.context)?;
+        bindings::screen::register(&mut self.context)?;
 
         bindings::location::register(&mut self.context, &origin)?;
 

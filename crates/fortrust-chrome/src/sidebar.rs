@@ -208,6 +208,10 @@ impl SidebarState {
             Vec2::new((area.max.x - sbr.max.x).max(0.0), area.height()),
         );
         if scrim.width() > 0.0 {
+            let alpha = (anim.scrim_alpha() * 110.0).round().clamp(0.0, 255.0) as u8;
+            if alpha > 0 {
+                ui.painter().rect_filled(scrim, CornerRadius::ZERO, Color32::from_black_alpha(alpha));
+            }
             let resp = ui.allocate_rect(scrim, egui::Sense::click());
             if resp.clicked() {
                 anim.close();

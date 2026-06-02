@@ -216,7 +216,7 @@ impl CookieJar {
         !domain_matches(cookie_domain, request_domain)
     }
 
-    fn should_accept(&self, key: &CookieKey, value: &CookieValue, request_url: &Url) -> bool {
+    fn should_accept(&self, key: &CookieKey, _value: &CookieValue, request_url: &Url) -> bool {
         let request_domain = request_url.host_str().unwrap_or("");
         let cookie_domain = key
             .domain

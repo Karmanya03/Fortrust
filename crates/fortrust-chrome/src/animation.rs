@@ -192,6 +192,7 @@ impl TabAnimation {
 
 pub struct SidebarAnimation {
     pub overlay_offset: Animated,
+    pub scrim_opacity: Spring,
 }
 
 pub const SIDEBAR_COLLAPSED_W: f32 = 0.0;
@@ -201,15 +202,18 @@ impl SidebarAnimation {
     pub fn new() -> Self {
         Self {
             overlay_offset: Animated::new(SIDEBAR_COLLAPSED_W, 9.0),
+            scrim_opacity: Spring::new(0.0).with_stiffness(20.0).with_damping(0.95),
         }
     }
 
     pub fn open(&mut self) {
         self.overlay_offset.set_target(SIDEBAR_EXPANDED_W);
+        self.scrim_opacity.set_target(1.0);
     }
 
     pub fn close(&mut self) {
         self.overlay_offset.set_target(SIDEBAR_COLLAPSED_W);
+        self.scrim_opacity.set_target(0.0);
     }
 
     pub fn toggle(&mut self) {
@@ -226,6 +230,7 @@ impl SidebarAnimation {
 
     pub fn tick(&mut self, dt: f32) {
         self.overlay_offset.tick(dt);
+        self.scrim_opacity.tick(dt);
     }
 
     pub fn current_offset(&self) -> f32 {
@@ -234,6 +239,14 @@ impl SidebarAnimation {
 
     pub fn current_width(&self) -> f32 {
         self.overlay_offset.value()
+    }
+
+    pub fn scrim_alpha(&self) -> f32 {
+        self.scrim_opacity.value().clamp(0.0, 1.0)
+    }
+
+    pub fn is_animating(&self) -> bool {
+        !self.overlay_offset.is_settled() || !self.scrim_opacity.is_settled()
     }
 }
 

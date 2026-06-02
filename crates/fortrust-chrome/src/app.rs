@@ -310,7 +310,7 @@ impl EngineWorker {
                         let _ = event_sender.send(event);
                     }
                     EngineCommand::Search { request_id, query } => {
-                        let results = runtime.block_on(search.search(&query));
+                        let results = runtime.block_on(search.search(&query, 1));
                         let _ = event_sender.send(EngineEvent::SearchLoaded {
                             request_id,
                             query,
@@ -725,6 +725,12 @@ fn drain_failed_worker(
 
 impl FortrustApp {
     pub fn new(creation_context: &eframe::CreationContext<'_>) -> Self {
+        // Set a safe pixels_per_point baseline before any egui styling runs.
+        let ppp = creation_context.egui_ctx.pixels_per_point();
+        if ppp <= 0.0 || !ppp.is_finite() {
+            creation_context.egui_ctx.set_pixels_per_point(1.0);
+        }
+
         let storage = Self::open_storage();
         let config = Self::load_browser_config(storage.as_ref());
         let theme = Self::theme_for_mode(&config.ui.theme, config.ui.glass_strength);
@@ -792,12 +798,6 @@ impl FortrustApp {
         if let Some(ref s) = app.storage {
             app.download_manager.load_state_from_settings(&s.settings);
             app.download_manager.resume_all_paused(&app.download_dir);
-        }
-
-        // Set a safe pixels_per_point baseline to guard against 0 scale factors
-        let ppp = creation_context.egui_ctx.pixels_per_point();
-        if ppp <= 0.0 || !ppp.is_finite() {
-            creation_context.egui_ctx.set_pixels_per_point(1.0);
         }
 
         app
@@ -1312,7 +1312,7 @@ impl FortrustApp {
             .frame(Frame {
                 fill: self.theme.surface_tab_bar,
                 inner_margin: Margin::symmetric(4, 0),
-                outer_margin: Margin::ZERO,
+                stroke: Stroke::new(1.0, self.theme.border_subtle),
                 ..Default::default()
             })
             .show(ctx, |ui| {
@@ -1352,9 +1352,9 @@ impl FortrustApp {
                         if !is_dragging {
                             // Tab hover and active background
                             if selected {
-                                ui.painter().rect_filled(tab_rect, CornerRadius::same(6), self.theme.surface_deepest);
+                                ui.painter().rect_filled(tab_rect, 6.0, self.theme.surface_deepest);
                             } else if ui.rect_contains_pointer(tab_rect) {
-                                ui.painter().rect_filled(tab_rect, CornerRadius::same(6), self.theme.surface_hover);
+                                ui.painter().rect_filled(tab_rect, 6.0, self.theme.surface_hover);
                             }
 
                             let is_speed_dial = tab.url.starts_with("fortrust://start");
@@ -1365,11 +1365,11 @@ impl FortrustApp {
                                 let fg = Color32::from_rgba_unmultiplied(79, 158, 255, 180);
                                 let fg2 = Color32::from_rgba_unmultiplied(79, 158, 255, 100);
                                 let fav_rect = Rect::from_min_size(Pos2::new(tab_rect.min.x + 6.0, tab_rect.center().y - 6.5), Vec2::new(13.0, 13.0));
-                                ui.painter().rect_filled(fav_rect, CornerRadius::same(2), Color32::from_rgb(26, 32, 48));
-                                ui.painter().rect_filled(Rect::from_min_size(Pos2::new(fav_rect.min.x + 2.0, fav_rect.min.y + 2.0), Vec2::new(4.0, 4.0)), CornerRadius::same(1), fg);
-                                ui.painter().rect_filled(Rect::from_min_size(Pos2::new(fav_rect.min.x + 7.0, fav_rect.min.y + 2.0), Vec2::new(4.0, 4.0)), CornerRadius::same(1), fg);
-                                ui.painter().rect_filled(Rect::from_min_size(Pos2::new(fav_rect.min.x + 2.0, fav_rect.min.y + 7.0), Vec2::new(4.0, 4.0)), CornerRadius::same(1), fg2);
-                                ui.painter().rect_filled(Rect::from_min_size(Pos2::new(fav_rect.min.x + 7.0, fav_rect.min.y + 7.0), Vec2::new(4.0, 4.0)), CornerRadius::same(1), fg2);
+                                ui.painter().rect_filled(fav_rect, 2.0, Color32::from_rgb(26, 32, 48));
+                                ui.painter().rect_filled(Rect::from_min_size(Pos2::new(fav_rect.min.x + 2.0, fav_rect.min.y + 2.0), Vec2::new(4.0, 4.0)), 1.0, fg);
+                                ui.painter().rect_filled(Rect::from_min_size(Pos2::new(fav_rect.min.x + 7.0, fav_rect.min.y + 2.0), Vec2::new(4.0, 4.0)), 1.0, fg);
+                                ui.painter().rect_filled(Rect::from_min_size(Pos2::new(fav_rect.min.x + 2.0, fav_rect.min.y + 7.0), Vec2::new(4.0, 4.0)), 1.0, fg2);
+                                ui.painter().rect_filled(Rect::from_min_size(Pos2::new(fav_rect.min.x + 7.0, fav_rect.min.y + 7.0), Vec2::new(4.0, 4.0)), 1.0, fg2);
                             } else {
                                 // Globe icon for web pages
                                 let fav_rect = Rect::from_min_size(Pos2::new(tab_rect.min.x + 6.0, tab_rect.center().y - 6.5), Vec2::new(13.0, 13.0));
@@ -1404,7 +1404,7 @@ impl FortrustApp {
                             if ui.rect_contains_pointer(tab_rect) {
                                 let close_rect = Rect::from_min_size(Pos2::new(tab_rect.max.x - 19.0, tab_rect.center().y - 7.5), Vec2::new(15.0, 15.0));
                                 let close_hovered = ui.rect_contains_pointer(close_rect);
-                                if close_hovered { ui.painter().rect_filled(close_rect, CornerRadius::same(3), self.theme.glass_hover); }
+                                if close_hovered { ui.painter().rect_filled(close_rect, 3.0, self.theme.glass_hover); }
                                 icons::paint_close_icon(ui.painter(), close_rect, self.theme.text_muted);
                                 if ui.allocate_rect(close_rect, egui::Sense::click()).clicked() { closed = Some(tab.id); }
                             }
@@ -1416,7 +1416,7 @@ impl FortrustApp {
                                         Pos2::new(tab_rect.min.x, tab_rect.max.y - 1.5),
                                         Vec2::new(tab_rect.width(), 1.5),
                                     ),
-                                    CornerRadius::same(1),
+                                    1.0,
                                     self.theme.accent_primary,
                                 );
                             }
@@ -1441,8 +1441,8 @@ impl FortrustApp {
                             Pos2::new(pointer_x - ghost_w / 2.0, 6.0),
                             Vec2::new(ghost_w, 27.0),
                         );
-                        ui.painter().rect_filled(ghost_rect, CornerRadius::same(6), Color32::from_rgba_unmultiplied(self.theme.accent_primary.r(), self.theme.accent_primary.g(), self.theme.accent_primary.b(), 40));
-                        ui.painter().rect_stroke(ghost_rect, CornerRadius::same(6), Stroke::new(1.0, Color32::from_rgba_unmultiplied(self.theme.accent_primary.r(), self.theme.accent_primary.g(), self.theme.accent_primary.b(), 80)), egui::StrokeKind::Inside);
+                        ui.painter().rect_filled(ghost_rect, 6.0, Color32::from_rgba_unmultiplied(self.theme.accent_primary.r(), self.theme.accent_primary.g(), self.theme.accent_primary.b(), 40));
+                        ui.painter().rect_stroke(ghost_rect, 6.0, Stroke::new(1.0, Color32::from_rgba_unmultiplied(self.theme.accent_primary.r(), self.theme.accent_primary.g(), self.theme.accent_primary.b(), 80)), egui::StrokeKind::Inside);
                         if let Some(tab) = self.tabs.tabs().iter().find(|t| t.id == drag_id) {
                             ui.painter().text(
                                 Pos2::new(ghost_rect.center().x, ghost_rect.center().y),
@@ -1472,58 +1472,7 @@ impl FortrustApp {
                     icons::paint_plus_icon(ui.painter(), add_tab_btn.rect, self.theme.text_muted);
                     if add_tab_btn.clicked() { self.open_new_tab(); }
 
-                    // Spacer — window controls (always visible, macOS-style)
-                    let wc_btn_size = 12.0;
-                    let wc_gap = 6.0;
-                    let wc_needed = 8.0 + wc_btn_size + wc_gap + wc_btn_size + wc_gap + wc_btn_size + 8.0;
-                    if ui.available_width() >= wc_needed {
-                        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                            ui.add_space(8.0);
 
-                            // Close (red dot)
-                            let close_rect = ui.allocate_space(Vec2::new(wc_btn_size, wc_btn_size)).1;
-                            let close_hovered = ui.rect_contains_pointer(close_rect);
-                            ui.painter().circle_filled(close_rect.center(), wc_btn_size / 2.0, Color32::from_rgb(255, 95, 87));
-                            if close_hovered {
-                                icons::paint_close_icon(ui.painter(), Rect::from_center_size(close_rect.center(), Vec2::new(8.0, 8.0)), Color32::from_rgba_unmultiplied(80, 20, 15, 200));
-                            } else {
-                                ui.painter().circle_filled(close_rect.center(), wc_btn_size / 4.0, Color32::from_rgba_unmultiplied(160, 40, 40, 120));
-                            }
-                            ui.add_space(wc_gap);
-                            let close_clicked = ui.allocate_rect(close_rect, egui::Sense::click()).clicked();
-
-                            // Minimize (yellow dot)
-                            let min_rect = ui.allocate_space(Vec2::new(wc_btn_size, wc_btn_size)).1;
-                            let min_hovered = ui.rect_contains_pointer(min_rect);
-                            ui.painter().circle_filled(min_rect.center(), wc_btn_size / 2.0, Color32::from_rgb(254, 188, 46));
-                            if min_hovered {
-                                ui.painter().line_segment(
-                                    [Pos2::new(min_rect.center().x - 2.5, min_rect.center().y), Pos2::new(min_rect.center().x + 2.5, min_rect.center().y)],
-                                    Stroke::new(1.5, Color32::from_rgba_unmultiplied(120, 80, 15, 200)),
-                                );
-                            } else {
-                                ui.painter().circle_filled(min_rect.center(), wc_btn_size / 4.0, Color32::from_rgba_unmultiplied(160, 100, 25, 120));
-                            }
-                            ui.add_space(wc_gap);
-                            let min_clicked = ui.allocate_rect(min_rect, egui::Sense::click()).clicked();
-
-                            // Maximize (green dot)
-                            let max_rect = ui.allocate_space(Vec2::new(wc_btn_size, wc_btn_size)).1;
-                            let max_hovered = ui.rect_contains_pointer(max_rect);
-                            ui.painter().circle_filled(max_rect.center(), wc_btn_size / 2.0, Color32::from_rgb(40, 200, 64));
-                            if max_hovered {
-                                let sq = Rect::from_center_size(max_rect.center(), Vec2::new(5.0, 5.0));
-                                ui.painter().rect_stroke(sq, CornerRadius::same(1), Stroke::new(1.5, Color32::from_rgba_unmultiplied(15, 90, 25, 200)), egui::StrokeKind::Inside);
-                            } else {
-                                ui.painter().circle_filled(max_rect.center(), wc_btn_size / 4.0, Color32::from_rgba_unmultiplied(25, 120, 40, 120));
-                            }
-                            let max_clicked = ui.allocate_rect(max_rect, egui::Sense::click()).clicked();
-
-                            if min_clicked { ui.ctx().send_viewport_cmd(egui::ViewportCommand::Minimized(true)); }
-                            if max_clicked { ui.ctx().send_viewport_cmd(egui::ViewportCommand::Maximized(true)); }
-                            if close_clicked { ui.ctx().send_viewport_cmd(egui::ViewportCommand::Close); }
-                        });
-                    }
 
                     if let Some(id) = clicked {
                         self.tabs.activate(id);
@@ -1552,8 +1501,8 @@ impl FortrustApp {
                 let frame = egui::Frame {
                     fill: self.theme.surface_sidebar,
                     stroke: egui::Stroke::new(1.0, self.theme.border_strong),
-                    corner_radius: egui::CornerRadius::same(8),
-                    inner_margin: egui::Margin::same(4),
+                    corner_radius: CornerRadius::same(8),
+                    inner_margin: Margin::same(4),
                     ..Default::default()
                 };
                 frame.show(ui, |ui| {
@@ -1618,6 +1567,7 @@ impl FortrustApp {
             .frame(Frame {
                 fill: self.theme.surface_tab_bar,
                 inner_margin: Margin::symmetric(8, 0),
+                stroke: Stroke::new(1.0, self.theme.border_subtle),
                 ..Default::default()
             })
             .show(ctx, |ui| {
@@ -1745,31 +1695,25 @@ impl FortrustApp {
                     .frame(Frame {
                         fill: self.theme.surface_rail,
                         inner_margin: Margin::ZERO,
-                        outer_margin: Margin::ZERO,
+                        stroke: Stroke::new(1.0, self.theme.border_subtle),
                         ..Default::default()
                     })
                     .show_inside(ui, |ui| {
                         self.sidebar_state.render_icon_rail(ui, &self.theme, &mut self.sidebar_anim);
                     });
 
-                // Render sidebar overlay
-                let old_theme = self.config.ui.theme.clone();
-                let downloads_entries = self.download_manager.all_downloads();
-                if let Some(url) = self.sidebar_state.render_overlay(ui, &self.theme, &mut self.sidebar_anim, &mut self.config, self.storage.as_ref(), &downloads_entries, &mut self.workspaces) {
-                    navigate = Some(url);
-                }
-                // Process pending download actions from sidebar
-                if let Some((dl_id, action)) = self.sidebar_state.pending_download_cmd.take() {
-                    match action {
-                        DownloadAction::Pause => self.download_manager.pause_download(dl_id),
-                        DownloadAction::Resume => self.download_manager.resume_download(dl_id, &self.download_dir),
-                        DownloadAction::Remove => self.download_manager.remove_download(dl_id),
-                    }
-                }
-                if self.config.ui.theme != old_theme { self.refresh_theme(ctx); }
+                ui.spacing_mut().item_spacing = Vec2::ZERO;
 
-                // Main content area
-                let active_url = self.active_state()
+                egui::CentralPanel::default()
+                    .frame(Frame {
+                        fill: self.theme.surface_card,
+                        inner_margin: Margin::ZERO,
+                        outer_margin: Margin::ZERO,
+                        ..Default::default()
+                    })
+                    .show_inside(ui, |ui| {
+                        // Main content area
+                        let active_url = self.active_state()
                     .and_then(TabPageState::current_url)
                     .map(str::to_owned)
                     .or_else(|| self.tabs.active_tab().map(|tab| tab.url.to_string()))
@@ -1787,10 +1731,10 @@ impl FortrustApp {
                     let progress = (self.animation_phase * 3.0).sin() * 0.5 + 0.5;
                     let fill_w = bar_rect.width() * (0.15 + progress * 0.55);
                     let fill_x = bar_rect.min.x + (bar_rect.width() - fill_w) * progress;
-                    ui.painter().rect_filled(bar_rect, CornerRadius::ZERO, Color32::from_rgba_unmultiplied(79, 158, 255, 40));
+                    ui.painter().rect_filled(bar_rect, 0.0, Color32::from_rgba_unmultiplied(79, 158, 255, 40));
                     ui.painter().rect_filled(
                         Rect::from_min_size(Pos2::new(fill_x, bar_rect.min.y), Vec2::new(fill_w, 3.0)),
-                        CornerRadius::ZERO, self.theme.accent_primary,
+                        0.0, self.theme.accent_primary,
                     );
                 }
 
@@ -1814,7 +1758,24 @@ impl FortrustApp {
                 } else {
                     self.render_web_content(ctx, ui, &active_url);
                 }
+
+                // Render sidebar overlay ON TOP of central panel content
+                let old_theme = self.config.ui.theme.clone();
+                let downloads_entries = self.download_manager.all_downloads();
+                if let Some(url) = self.sidebar_state.render_overlay(ui, &self.theme, &mut self.sidebar_anim, &mut self.config, self.storage.as_ref(), &downloads_entries, &mut self.workspaces) {
+                    navigate = Some(url);
+                }
+                // Process pending download actions from sidebar
+                if let Some((dl_id, action)) = self.sidebar_state.pending_download_cmd.take() {
+                    match action {
+                        DownloadAction::Pause => self.download_manager.pause_download(dl_id),
+                        DownloadAction::Resume => self.download_manager.resume_download(dl_id, &self.download_dir),
+                        DownloadAction::Remove => self.download_manager.remove_download(dl_id),
+                    }
+                }
+                if self.config.ui.theme != old_theme { self.refresh_theme(ctx); }
             });
+        });
 
         if let Some(url) = navigate {
             self.navigate_input(url, HistoryMode::Push);
@@ -1862,7 +1823,6 @@ impl FortrustApp {
             .and_then(|state| state.load_error.clone());
 
         let rect = ui.max_rect();
-        ui.painter().rect_filled(rect, CornerRadius::ZERO, self.theme.surface_deepest);
         self.paint_search_aura(ui, rect);
 
         let mut navigate = None;
@@ -1898,10 +1858,10 @@ impl FortrustApp {
             content_ui.cursor().min,
             Vec2::new(content_w, 48.0),
         );
-        content_ui.painter().rect_filled(status_rect, CornerRadius::same(14), self.theme.glass_bg);
+        content_ui.painter().rect_filled(status_rect, 14.0, self.theme.glass_bg);
         content_ui.painter().rect_stroke(
             status_rect,
-            CornerRadius::same(14),
+            14.0,
             Stroke::new(1.0, self.theme.glass_border),
             egui::StrokeKind::Inside,
         );
@@ -1963,10 +1923,10 @@ impl FortrustApp {
                     let response = ui.allocate_rect(item_rect, egui::Sense::click());
                     let hovered = response.hovered();
                     let fill = if hovered { self.theme.glass_hover } else { self.theme.glass_bg };
-                    ui.painter().rect_filled(item_rect, CornerRadius::same(14), fill);
+                    ui.painter().rect_filled(item_rect, 14.0, fill);
                     ui.painter().rect_stroke(
                         item_rect,
-                        CornerRadius::same(14),
+                        14.0,
                         Stroke::new(
                             1.0,
                             if hovered { self.theme.accent_primary } else { self.theme.glass_border },
@@ -2003,8 +1963,32 @@ impl FortrustApp {
                         self.theme.text_muted,
                     );
 
-                    if response.clicked() {
-                        navigate = Some(result.url);
+                    let mut archive_clicked = false;
+                    if result.archive_url.is_some() {
+                        let btn_rect = Rect::from_min_size(
+                            Pos2::new(item_rect.max.x - 110.0, item_rect.max.y - 28.0),
+                            Vec2::new(92.0, 20.0),
+                        );
+                        let btn_response = ui.interact(btn_rect, ui.id().with(format!("arch_{}", result.url)), egui::Sense::click());
+                        let btn_hovered = btn_response.hovered();
+                        ui.painter().rect_filled(btn_rect, 4.0, if btn_hovered { self.theme.accent_primary } else { self.theme.glass_bg });
+                        ui.painter().rect_stroke(btn_rect, 4.0, Stroke::new(1.0, self.theme.glass_border), egui::StrokeKind::Inside);
+                        ui.painter().text(
+                            btn_rect.center(),
+                            egui::Align2::CENTER_CENTER,
+                            "View Cached",
+                            egui::FontId::proportional(11.0),
+                            if btn_hovered { self.theme.text_on_accent } else { self.theme.text_primary },
+                        );
+                        if btn_response.clicked() {
+                            archive_clicked = true;
+                        }
+                    }
+
+                    if archive_clicked {
+                        navigate = result.archive_url.clone();
+                    } else if response.clicked() {
+                        navigate = Some(result.url.clone());
                     }
                     ui.add_space(10.0);
                 }
@@ -2018,15 +2002,15 @@ impl FortrustApp {
             let rect = Rect::from_min_size(ui.cursor().min, Vec2::new(width, 82.0));
             let shimmer = ((self.animation_phase * 2.5 + idx as f32).sin() * 0.5 + 0.5) * 32.0;
             let alpha = 28 + shimmer as u8;
-            ui.painter().rect_filled(rect, CornerRadius::same(14), Color32::from_rgba_unmultiplied(255, 255, 255, 8));
+            ui.painter().rect_filled(rect, 14.0, Color32::from_rgba_unmultiplied(255, 255, 255, 8));
             ui.painter().rect_filled(
                 Rect::from_min_size(rect.min + Vec2::new(18.0, 18.0), Vec2::new(width * 0.48, 12.0)),
-                CornerRadius::same(6),
+                6.0,
                 Color32::from_rgba_unmultiplied(120, 180, 255, alpha),
             );
             ui.painter().rect_filled(
                 Rect::from_min_size(rect.min + Vec2::new(18.0, 42.0), Vec2::new(width * 0.72, 10.0)),
-                CornerRadius::same(5),
+                5.0,
                 Color32::from_rgba_unmultiplied(255, 255, 255, alpha / 2),
             );
             ui.allocate_space(Vec2::new(width, 92.0));
@@ -2047,7 +2031,7 @@ impl FortrustApp {
             );
             ui.painter().rect_filled(
                 band,
-                CornerRadius::ZERO,
+                0.0,
                 Color32::from_rgba_unmultiplied(
                     self.theme.accent_primary.r(),
                     self.theme.accent_primary.g(),
@@ -2147,7 +2131,7 @@ impl FortrustApp {
         let painter = ui.painter_at(surface);
         painter.rect_filled(surface.shrink(18.0), 22.0, self.theme.glass_bg);
         let content = surface.shrink2(Vec2::new(12.0, 12.0));
-        painter.rect_filled(content, CornerRadius::same(8), Color32::WHITE);
+        painter.rect_filled(content, 8.0, Color32::WHITE);
         for command in page.rendered.display_list.commands() {
             match command {
                 DisplayCommand::FillRect { rect, color } => {
@@ -2306,10 +2290,16 @@ impl FortrustApp {
 impl eframe::App for FortrustApp {
     fn update(&mut self, ctx: &Context, _frame: &mut eframe::Frame) {
         // Guard against windowing system returning 0 scale factor (crashes epaint font renderer)
-        let ppp = ctx.pixels_per_point();
+        let mut ppp = ctx.pixels_per_point();
         if ppp <= 0.0 || !ppp.is_finite() {
-            ctx.set_pixels_per_point(1.0);
+            ppp = 1.0;
+            ctx.set_pixels_per_point(ppp);
         }
+        ctx.input_mut(|i| {
+            if i.pixels_per_point <= 0.0 || !i.pixels_per_point.is_finite() {
+                i.pixels_per_point = ppp;
+            }
+        });
 
         let dt = self.last_frame.elapsed().as_secs_f32().min(0.05);
         self.last_frame = std::time::Instant::now();
@@ -2349,7 +2339,7 @@ impl eframe::App for FortrustApp {
 
         // Tick sidebar animation
         self.sidebar_anim.tick(dt * motion_scale);
-        if !self.sidebar_anim.overlay_offset.is_settled() {
+        if self.sidebar_anim.is_animating() {
             ctx.request_repaint();
         }
 
@@ -2410,7 +2400,7 @@ impl eframe::App for FortrustApp {
                         corner_radius: CornerRadius::same(18),
                         stroke: Stroke::new(1.0, self.theme.glass_border),
                         shadow: egui::epaint::Shadow {
-                            offset: [0, 12], blur: 32, spread: 0,
+                            offset: [0, 12].into(), blur: 32, spread: 0,
                             color: Color32::from_black_alpha(50),
                         },
                         ..Default::default()
@@ -2447,12 +2437,12 @@ impl eframe::App for FortrustApp {
                             Pos2::new(rect.min.x + 56.0, rect.min.y + 58.0),
                             Vec2::new(196.0, 4.0),
                         );
-                        ui.painter().rect_filled(bar, CornerRadius::same(2), Color32::from_rgba_unmultiplied(255, 255, 255, 18));
+                        ui.painter().rect_filled(bar, 2.0, Color32::from_rgba_unmultiplied(255, 255, 255, 18));
                         let glow_w = 48.0;
                         let glow_x = bar.min.x + (bar.width() - glow_w) * shimmer;
                         ui.painter().rect_filled(
                             Rect::from_min_size(Pos2::new(glow_x, bar.min.y), Vec2::new(glow_w, bar.height())),
-                            CornerRadius::same(2),
+                            2.0,
                             self.theme.accent_primary,
                         );
                         ui.allocate_space(rect.size());
@@ -2494,7 +2484,7 @@ fn frame_bytes_to_rgba(texture_data: &[u8], width: u32, height: u32, stride: u32
 
 fn apply_egui_style(ctx: &egui::Context, theme: &FortrustTheme, ui_config: &fortrust_core::UiConfig) {
     let mut style = (*ctx.style()).clone();
-    style.visuals.panel_fill = Color32::TRANSPARENT;
+    style.visuals.panel_fill = theme.surface_deepest;
     style.visuals.window_fill = theme.glass_bg;
     style.visuals.window_stroke = Stroke::new(1.0, theme.glass_border);
     let density = if ui_config.compact_density { 0.88 } else { 1.08 };
@@ -2592,9 +2582,10 @@ fn search_backend_label(backend: &fortrust_search::SearchBackend) -> &'static st
     match backend {
         fortrust_search::SearchBackend::BraveSearch => "Brave",
         fortrust_search::SearchBackend::Mojeek => "Mojeek",
-        fortrust_search::SearchBackend::DuckDuckGo => "DDG",
+        fortrust_search::SearchBackend::DuckDuckGo => "DuckDuckGo",
         fortrust_search::SearchBackend::Stract => "Stract",
         fortrust_search::SearchBackend::Wikipedia => "Wikipedia",
+        fortrust_search::SearchBackend::SearXNG(_) => "SearXNG",
     }
 }
 

@@ -20,6 +20,7 @@ http = { workspace = true }
 futures-util = { workspace = true }
 futures-executor = { workspace = true }
 tracing = { workspace = true }
+tokio = { workspace = true }
 
 # Local workspace crates
 fortrust-core = { path = "../fortrust-core" }
@@ -30,6 +31,8 @@ fortrust-net = { path = "../fortrust-net" }
 fortrust-paint = { path = "../fortrust-paint" }
 fortrust-renderer = { path = "../fortrust-renderer" }
 fortrust-style = { path = "../fortrust-style" }
+urlencoding.workspace = true
+fortrust-search = { version = "0.0.1", path = "../fortrust-search" }
 
 [features]
 javascript = ["fortrust-js"]

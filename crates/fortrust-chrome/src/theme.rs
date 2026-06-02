@@ -42,36 +42,40 @@ impl FortrustTheme {
 
     pub fn dark_with_glass_strength(_glass_strength: u8) -> Self {
         Self {
-            glass_bg: Color32::from_rgba_unmultiplied(20, 22, 30, 200),
-            glass_border: Color32::from_rgba_unmultiplied(255, 255, 255, 18),
+            glass_bg: Color32::from_rgba_unmultiplied(24, 24, 26, 200),
+            glass_border: Color32::from_rgba_unmultiplied(255, 255, 255, 20),
             glass_hover: Color32::from_rgba_unmultiplied(255, 255, 255, 12),
 
-            surface_deepest: Color32::from_rgb(13, 15, 18), // c0
-            surface_rail: Color32::from_rgb(19, 22, 27), // c1
-            surface_sidebar: Color32::from_rgb(24, 28, 34), // c2
-            surface_tab_bar: Color32::from_rgb(29, 34, 42), // c3
-            surface_card: Color32::from_rgb(35, 40, 48), // c4
-            surface_hover: Color32::from_rgb(44, 50, 64), // c5
+            // Using frontend-ui-dark-ts neutral palette
+            surface_deepest: Color32::from_rgb(24, 24, 26),   // bg1: hsl(240, 6%, 10%)
+            surface_rail: Color32::from_rgb(29, 29, 31),      // bg2: hsl(240, 5%, 12%)
+            surface_sidebar: Color32::from_rgb(29, 29, 31),   // bg2
+            surface_tab_bar: Color32::from_rgb(29, 29, 31),   // bg2
+            surface_card: Color32::from_rgb(33, 33, 36),      // bg3: hsl(240, 5%, 14%)
+            surface_hover: Color32::from_rgb(46, 46, 51),     // bg4: hsl(240, 4%, 18%)
 
-            accent_primary: Color32::from_rgb(79, 158, 255), // blue
-            accent_secondary: Color32::from_rgb(60, 130, 220),
-            accent_shield: Color32::from_rgb(63, 176, 110), // green
-            accent_shield_warn: Color32::from_rgb(255, 170, 60),
-            accent_shield_off: Color32::from_rgb(120, 120, 130),
+            // Using frontend-ui-dark-ts brand colors
+            accent_primary: Color32::from_rgb(130, 81, 238),  // brand: #8251EE
+            accent_secondary: Color32::from_rgb(163, 126, 245), // brand.light
+            accent_shield: Color32::from_rgb(16, 185, 129),   // status.success: #10B981
+            accent_shield_warn: Color32::from_rgb(245, 158, 11), // status.warning: #F59E0B
+            accent_shield_off: Color32::from_rgb(113, 113, 122), // text.muted: #71717A
 
-            text_primary: Color32::from_rgb(221, 225, 234), // t1
-            text_secondary: Color32::from_rgb(144, 152, 168), // t2
-            text_muted: Color32::from_rgb(79, 86, 104), // t3
-            text_placeholder: Color32::from_rgb(100, 100, 115),
+            // Using frontend-ui-dark-ts text colors
+            text_primary: Color32::WHITE,
+            text_secondary: Color32::from_rgb(161, 161, 170), // text.secondary: #A1A1AA
+            text_muted: Color32::from_rgb(113, 113, 122),     // text.muted: #71717A
+            text_placeholder: Color32::from_rgb(113, 113, 122),
             text_on_accent: Color32::WHITE,
 
-            tile_bg: Color32::from_rgba_unmultiplied(35, 38, 52, 200),
+            tile_bg: Color32::from_rgba_unmultiplied(255, 255, 255, 12),
             tile_hover_overlay: Color32::from_rgba_unmultiplied(255, 255, 255, 20),
-            tile_shadow: Color32::from_rgba_unmultiplied(0, 0, 0, 80),
+            tile_shadow: Color32::from_rgba_unmultiplied(130, 81, 238, 40), // glow shadow
 
-            border_subtle: Color32::from_rgb(39, 45, 56), // border
-            border_strong: Color32::from_rgb(50, 57, 73), // border2
-            accent_danger: Color32::from_rgb(255, 92, 92), // red
+            // Using frontend-ui-dark-ts border colors
+            border_subtle: Color32::from_rgba_unmultiplied(255, 255, 255, 20), // border.subtle
+            border_strong: Color32::from_rgba_unmultiplied(255, 255, 255, 30), // border.default
+            accent_danger: Color32::from_rgb(239, 68, 68),    // status.error: #EF4444
         }
     }
 
@@ -85,32 +89,32 @@ impl FortrustTheme {
             glass_border: Color32::from_rgba_unmultiplied(0, 0, 0, 18),
             glass_hover: Color32::from_rgba_unmultiplied(0, 0, 0, 8),
 
-            surface_deepest: Color32::from_rgb(245, 245, 250),
-            surface_rail: Color32::from_rgb(235, 235, 242),
-            surface_sidebar: Color32::from_rgb(240, 240, 248),
-            surface_tab_bar: Color32::from_rgb(238, 238, 245),
-            surface_card: Color32::from_rgb(248, 248, 252),
-            surface_hover: Color32::from_rgb(220, 220, 230),
+            surface_deepest: Color32::from_rgb(244, 244, 245), 
+            surface_rail: Color32::from_rgb(250, 250, 250), 
+            surface_sidebar: Color32::from_rgb(250, 250, 250),
+            surface_tab_bar: Color32::from_rgb(250, 250, 250),
+            surface_card: Color32::WHITE,
+            surface_hover: Color32::from_rgb(228, 228, 231),
 
-            accent_primary: Color32::from_rgb(79, 158, 255),
-            accent_secondary: Color32::from_rgb(60, 130, 220),
-            accent_shield: Color32::from_rgb(63, 176, 110),
-            accent_shield_warn: Color32::from_rgb(255, 170, 60),
-            accent_shield_off: Color32::from_rgb(160, 160, 170),
+            accent_primary: Color32::from_rgb(130, 81, 238),
+            accent_secondary: Color32::from_rgb(147, 102, 245),
+            accent_shield: Color32::from_rgb(16, 185, 129),
+            accent_shield_warn: Color32::from_rgb(245, 158, 11),
+            accent_shield_off: Color32::from_rgb(161, 161, 170),
 
-            text_primary: Color32::from_rgb(30, 32, 38),
-            text_secondary: Color32::from_rgb(110, 115, 130),
-            text_muted: Color32::from_rgb(160, 165, 178),
-            text_placeholder: Color32::from_rgb(180, 185, 198),
+            text_primary: Color32::from_rgb(24, 24, 27),
+            text_secondary: Color32::from_rgb(82, 82, 91),
+            text_muted: Color32::from_rgb(113, 113, 122),
+            text_placeholder: Color32::from_rgb(161, 161, 170),
             text_on_accent: Color32::WHITE,
 
-            tile_bg: Color32::from_rgba_unmultiplied(255, 255, 255, 230),
+            tile_bg: Color32::from_rgba_unmultiplied(0, 0, 0, 8),
             tile_hover_overlay: Color32::from_rgba_unmultiplied(0, 0, 0, 12),
-            tile_shadow: Color32::from_rgba_unmultiplied(0, 0, 0, 30),
+            tile_shadow: Color32::from_rgba_unmultiplied(130, 81, 238, 20),
 
-            border_subtle: Color32::from_rgb(210, 210, 220),
-            border_strong: Color32::from_rgb(180, 180, 190),
-            accent_danger: Color32::from_rgb(255, 70, 70),
+            border_subtle: Color32::from_rgba_unmultiplied(0, 0, 0, 20),
+            border_strong: Color32::from_rgba_unmultiplied(0, 0, 0, 30),
+            accent_danger: Color32::from_rgb(239, 68, 68),
         }
     }
 }

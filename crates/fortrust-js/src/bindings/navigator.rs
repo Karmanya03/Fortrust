@@ -33,6 +33,7 @@ pub fn register(context: &mut Context) -> JsResult<()> {
         .property(js_string!("doNotTrack"), js_string!("1"), Attribute::all())
         .property(js_string!("hardwareConcurrency"), 4, Attribute::all())
         .property(js_string!("maxTouchPoints"), 0, Attribute::all())
+        .property(js_string!("deviceMemory"), 8, Attribute::all())
         .build();
 
     let global = context.global_object();

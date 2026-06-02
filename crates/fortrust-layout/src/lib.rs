@@ -106,6 +106,8 @@ pub struct LayoutBox {
     pub image_ref: Option<u32>,
     /// Source URL of the `<img>` (kept for diagnostics & alt-text fallback).
     pub image_url: Option<String>,
+    /// `href` of an enclosing `<a>` element, used for click-through navigation.
+    pub link_href: Option<String>,
     pub rect: Rect,
     pub margin: UsedEdges,
     pub padding: UsedEdges,
@@ -184,6 +186,7 @@ impl LayoutEngine {
                     replaced_size: None,
                     image_ref: None,
                     image_url: None,
+                    link_href: None,
                     rect: zero_rect(),
                     margin: UsedEdges::ZERO,
                     padding: UsedEdges::ZERO,
@@ -251,14 +254,17 @@ impl LayoutEngine {
                     None
                 };
 
-                let children = if is_positioned {
-                    Vec::new()
-                } else {
-                    node.children()
-                        .into_iter()
-                        .filter_map(|child| self.build_box(child, Some(&style), &style, images))
-                        .collect()
-                };
+                // Extract href from <a> elements for click-through navigation
+                let link_href = element
+                    .filter(|el| el.local_name().eq_ignore_ascii_case("a"))
+                    .and_then(|el| el.attr("href"))
+                    .map(|h| h.trim().to_owned())
+                    .filter(|h| !h.is_empty());
+
+                let children = node.children()
+                    .into_iter()
+                    .filter_map(|child| self.build_box(child, Some(&style), &style, images))
+                    .collect();
 
                 let overflow_clip = if style.is_overflow_hidden() {
                     Some(Rect {
@@ -278,6 +284,7 @@ impl LayoutEngine {
                     replaced_size,
                     image_ref,
                     image_url,
+                    link_href,
                     rect: zero_rect(),
                     margin,
                     padding,
@@ -332,11 +339,36 @@ fn layout_block_box(
                 (cb.x + left, cb.y + top)
             })
             .unwrap_or((used_x, y));
+        
+        let mut cursor_y = offset.1;
+        let child_containing = Rect {
+            x: offset.0,
+            y: offset.1,
+            width: box_width,
+            height: f32::MAX,
+        };
+        for child in &mut layout_box.children {
+            let ch = layout_block_box(
+                child,
+                positioned,
+                child_x(child, offset.0),
+                cursor_y,
+                box_width,
+                Some(&child_containing),
+                line_height_px,
+            );
+            cursor_y += ch;
+        }
+
+        let total_h = cursor_y - offset.1;
+        let explicit_h = layout_box.style.height.to_px(line_height_px, pb_width, 16.0);
+        let final_h = if explicit_h > 0.0 { explicit_h } else { total_h };
+
         layout_box.rect = Rect {
             x: offset.0,
             y: offset.1,
             width: box_width,
-            height: 0.0,
+            height: final_h,
         };
         layout_box.positioned_offset = Some(offset);
         positioned.push(layout_box.clone());
@@ -556,12 +588,13 @@ fn layout_flex_children(
     let mut max_y = content_y;
 
     for child in &mut layout_box.children {
-        let child_width = flex_item_width(child, content_width, line_height_px)
-            .min(content_width.max(0.0))
-            .max(0.0);
-        if cursor_x > content_x && cursor_x + child_width > content_x + content_width {
+        let base_width = flex_item_width(child, content_width, line_height_px);
+        let final_width = base_width.max(0.0);
+        let child_outer_width = final_width + child.margin.horizontal();
+
+        if cursor_x > content_x && cursor_x + child_outer_width > content_x + content_width {
             cursor_x = content_x;
-            cursor_y += row_height.max(line_height_px);
+            cursor_y += row_height;
             row_height = 0.0;
         }
 
@@ -570,10 +603,11 @@ fn layout_flex_children(
             positioned,
             cursor_x,
             cursor_y,
-            child_width,
+            final_width,
             containing_block,
             line_height_px,
         );
+
         cursor_x += child.rect.width + child.margin.horizontal();
         row_height = row_height.max(child_height);
         max_y = max_y.max(cursor_y + child_height);

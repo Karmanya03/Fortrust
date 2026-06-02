@@ -1,6 +1,6 @@
 use fortrust_core::ImageRegistry;
 use fortrust_layout::{BoxKind, LayoutBox, LayoutTree, Rect};
-use fortrust_style::{BorderStyle, Color, FontWeight, Length, OutlineStyle};
+use fortrust_style::{BorderStyle, Color, FontWeight, FontStyle, Length, OutlineStyle};
 
 #[derive(Debug, Clone, PartialEq)]
 pub enum DisplayCommand {
@@ -14,6 +14,7 @@ pub enum DisplayCommand {
         color: Color,
         font_size_px: f32,
         font_weight: FontWeight,
+        font_style: FontStyle,
     },
     /// Render a decoded image into the given rect, preserving aspect ratio and
     /// centered. The `image_id` indexes into the `ImageRegistry` carried on the
@@ -219,6 +220,7 @@ fn paint_box(layout_box: &LayoutBox, images: &ImageRegistry, list: &mut DisplayL
             color: layout_box.style.color,
             font_size_px: font_size_px(layout_box.style.font_size),
             font_weight: layout_box.style.font_weight,
+            font_style: layout_box.style.font_style,
         });
     }
 
@@ -250,6 +252,7 @@ fn paint_box(layout_box: &LayoutBox, images: &ImageRegistry, list: &mut DisplayL
                 color: layout_box.style.color,
                 font_size_px: font_size_px(layout_box.style.font_size).min(layout_box.rect.height),
                 font_weight: layout_box.style.font_weight,
+                font_style: layout_box.style.font_style,
             });
         }
     }

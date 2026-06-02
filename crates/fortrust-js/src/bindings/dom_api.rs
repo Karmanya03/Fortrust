@@ -114,26 +114,22 @@ fn build_document_object(
 
             let el = ObjectInitializer::new(ctx)
                 .property(
-                    js_string!("tagName"),
-                    JsString::from(tag.to_uppercase()),
-                    Attribute::all(),
-                )
-                .property(js_string!("innerHTML"), js_string!(""), Attribute::all())
-                .property(js_string!("outerHTML"), js_string!(""), Attribute::all())
-                .build();
-
-            Ok(JsValue::from(el))
-        })
-    };
+                                NativeFunction::from_closure(move |_this, _args, ctx| {
+                                    let arr = boa_engine::object::builtins::JsArray::new(ctx);
+                                    let img_data = ObjectInitializer::new(ctx)
+                                        .property(js_string!("data"), JsValue::from(arr), Attribute::all())
+                                        .property(js_string!("width"), 1, Attribute::all())
+                                        .property(js_string!("height"), 1, Attribute::all())
+                                        .build();
+                                    Ok(JsValue::from(img_data))
+                                }),
 
     let initial_title = document
         .first_element_by_tag("title")
         .map(|n| n.text_content())
-        .unwrap_or_else(|| document.text_content())
-        .chars()
-        .take(80)
-        .collect::<String>();
-    let doc_ptr_usize = document as *const Document<'static> as usize;
+                                NativeFunction::from_closure(move |_this, _args, _ctx| {
+                                    Ok(JsValue::undefined())
+                                }),
 
     let obj = ObjectInitializer::new(context)
         .property(js_string!("title"), title_val, Attribute::all())
@@ -348,6 +344,54 @@ fn wrap_element(context: &mut Context, node: fortrust_dom::NodeRef<'_>) -> JsRes
             },
             js_string!("addEventListener"),
             2,
+        )
+        .function(
+            unsafe {
+                NativeFunction::from_closure(move |_this, args, ctx| {
+                    let ctx_type = args
+                        .first()
+                        .map(|v| v.to_string(ctx).map(|s| s.to_std_string_escaped()))
+                        .unwrap_or(Ok(String::new()))?;
+                    if ctx_type == "2d" {
+                        let mock_ctx = ObjectInitializer::new(ctx)
+                            .function(
+                                NativeFunction::from_closure(move |_this, _args, ctx| {
+                                    let arr = boa_engine::object::builtins::JsArray::new(ctx);
+                                    let img_data = ObjectInitializer::new(ctx)
+                                        .property(js_string!("data"), JsValue::from(arr), Attribute::all())
+                                        .property(js_string!("width"), 1, Attribute::all())
+                                        .property(js_string!("height"), 1, Attribute::all())
+                                        .build();
+                                    Ok(JsValue::from(img_data))
+                                }),
+                                js_string!("getImageData"),
+                                4,
+                            )
+                            .function(
+                                NativeFunction::from_closure(move |_this, _args, _ctx| {
+                                    Ok(JsValue::undefined())
+                                }),
+                                js_string!("fillText"),
+                                3,
+                            )
+                            .build();
+                        Ok(JsValue::from(mock_ctx))
+                    } else {
+                        Ok(JsValue::null())
+                    }
+                })
+            },
+            js_string!("getContext"),
+            1,
+        )
+        .function(
+            unsafe {
+                NativeFunction::from_closure(move |_this, _args, _ctx| {
+                    Ok(JsValue::from(js_string!("data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNkYAAAAAYAAjCB0C8AAAAASUVORK5CYII=")))
+                })
+            },
+            js_string!("toDataURL"),
+            0,
         )
         .build();
 
