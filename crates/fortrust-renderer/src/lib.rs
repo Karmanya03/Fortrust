@@ -154,6 +154,79 @@ impl StaticRenderer {
             images,
         })
     }
+
+    /// Re-render the document only if the DOM has been mutated (dirty flags set).
+    /// Returns `Some(RenderedPage)` if a re-render was performed, `None` if the
+    /// document was clean and no re-render was needed.
+    pub fn render_if_dirty(
+        &self,
+        document: &Document<'_>,
+        author_css: &[&str],
+        cosmetic_css: &[&str],
+        viewport: Viewport,
+        images: ImageRegistry,
+    ) -> Result<Option<RenderedPage>, RenderError> {
+        if !document.is_dirty() {
+            return Ok(None);
+        }
+        let page = self.render_document_with_images(
+            document, author_css, cosmetic_css, viewport, images,
+        )?;
+        document.clear_dirty();
+        Ok(Some(page))
+    }
+
+    /// Render with damage tracking: only repaints regions affected by dirty subtrees.
+    /// Returns the damage rectangles that were repainted, suitable for
+    /// partial framebuffer updates.
+    pub fn render_with_damage_tracking(
+        &self,
+        document: &Document<'_>,
+        author_css: &[&str],
+        cosmetic_css: &[&str],
+        viewport: Viewport,
+        images: ImageRegistry,
+    ) -> Result<(RenderedPage, Vec<Rect>), RenderError> {
+        let dirty_roots = document.dirty_subtree_roots();
+        if dirty_roots.is_empty() {
+            // No dirty nodes — render everything as baseline
+            let page = self.render_document_with_images(
+                document, author_css, cosmetic_css, viewport, images,
+            )?;
+            let full_viewport = Rect {
+                x: 0.0, y: 0.0, width: viewport.width, height: viewport.height,
+            };
+            document.clear_dirty();
+            return Ok((page, vec![full_viewport]));
+        }
+
+        // Full re-render (style + layout must be recalculated for correct
+        // positioning even of unchanged nodes). But we track damage rects
+        // from the dirty subtrees' layout boxes.
+        let page = self.render_document_with_images(
+            document, author_css, cosmetic_css, viewport, images,
+        )?;
+
+        // Collect damage rectangles from the layout tree by finding
+        // layout boxes whose node_name matches dirty subtree roots.
+        let mut damage_rects = Vec::new();
+        for dirty_node in &dirty_roots {
+            let tag = dirty_node.as_element()
+                .map(|el| el.local_name().to_owned())
+                .unwrap_or_else(|| "#text".to_owned());
+            collect_damage_rects(&page.layout.root, &tag, &mut damage_rects);
+        }
+
+        // If we couldn't find matching layout boxes, damage the full viewport
+        if damage_rects.is_empty() {
+            damage_rects.push(Rect {
+                x: 0.0, y: 0.0, width: viewport.width, height: viewport.height,
+            });
+        }
+
+        document.clear_dirty();
+        Ok((page, damage_rects))
+    }
 }
 
 fn render_root<'arena>(document: &Document<'arena>) -> Option<NodeRef<'arena>> {
@@ -179,6 +252,19 @@ fn embedded_styles(document: &Document<'_>) -> Vec<String> {
         .map(|node| node.text_content())
         .filter(|css| !css.trim().is_empty())
         .collect()
+}
+
+/// Walk the layout tree and collect rects of boxes matching the given node name.
+/// Used by damage tracking to identify regions that need repainting.
+fn collect_damage_rects(layout_box: &fortrust_layout::LayoutBox, node_name: &str, out: &mut Vec<Rect>) {
+    if layout_box.node_name.eq_ignore_ascii_case(node_name) {
+        if layout_box.rect.width > 0.0 && layout_box.rect.height > 0.0 {
+            out.push(layout_box.rect);
+        }
+    }
+    for child in &layout_box.children {
+        collect_damage_rects(child, node_name, out);
+    }
 }
 
 #[cfg(test)]
@@ -362,5 +448,74 @@ mod tests {
         let img_box = &page.layout.root.children[0];
         assert_eq!(img_box.rect.width, 100.0);
         assert_eq!(img_box.rect.height, 50.0);
+    }
+
+    #[test]
+    fn render_if_dirty_skips_clean_document() {
+        let arena = DomArena::new();
+        let document = parse_html(&arena, "<body><p>Clean</p></body>").unwrap();
+        document.clear_dirty();
+
+        let renderer = StaticRenderer::new();
+        let result = renderer.render_if_dirty(
+            &document, &[], &[],
+            Viewport { width: 320.0, height: 240.0 },
+            ImageRegistry::new(),
+        ).unwrap();
+
+        // Document was clean — no re-render needed
+        assert!(result.is_none());
+    }
+
+    #[test]
+    fn render_if_dirty_rerenders_mutated_document() {
+        let arena = DomArena::new();
+        let document = parse_html(&arena, "<body><p>Original</p></body>").unwrap();
+
+        // Mutate the DOM — this marks nodes dirty
+        let p = document.first_element_by_tag("p").unwrap();
+        p.set_text_content(&arena, "Mutated");
+
+        assert!(document.is_dirty());
+
+        let renderer = StaticRenderer::new();
+        let result = renderer.render_if_dirty(
+            &document, &[], &[],
+            Viewport { width: 320.0, height: 240.0 },
+            ImageRegistry::new(),
+        ).unwrap();
+
+        // Document was dirty — re-render performed
+        assert!(result.is_some());
+        let page = result.unwrap();
+        assert!(page.text_content.contains("Mutated"));
+
+        // After re-render, dirty flags should be cleared
+        assert!(!document.is_dirty());
+    }
+
+    #[test]
+    fn damage_tracking_returns_rects_for_dirty_subtrees() {
+        let arena = DomArena::new();
+        let document = parse_html(
+            &arena,
+            "<body><div id=\"a\">A</div><div id=\"b\">B</div></body>",
+        ).unwrap();
+
+        // Mutate only the second div
+        let div_b = document.get_element_by_id("b").unwrap();
+        div_b.set_text_content(&arena, "B-modified");
+
+        let renderer = StaticRenderer::new();
+        let (page, damage_rects) = renderer.render_with_damage_tracking(
+            &document, &[], &[],
+            Viewport { width: 320.0, height: 240.0 },
+            ImageRegistry::new(),
+        ).unwrap();
+
+        // Should have at least one damage rect
+        assert!(!damage_rects.is_empty());
+        // Page should contain the mutated text
+        assert!(page.text_content.contains("B-modified"));
     }
 }

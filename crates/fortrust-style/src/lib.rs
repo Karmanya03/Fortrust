@@ -1,3 +1,6 @@
+pub mod animation;
+
+use std::collections::HashMap;
 use compact_str::CompactString;
 use cssparser::{Parser, ParserInput, Token, match_ignore_ascii_case};
 use fortrust_dom::NodeRef;
@@ -217,6 +220,207 @@ pub struct BoxShadow {
     pub color: Color,
 }
 
+// ── CSS Transform types ─────────────────────────────────────────────────────
+
+/// A single CSS transform function.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum TransformFunction {
+    /// `translateX(px)`
+    TranslateX(f32),
+    /// `translateY(px)`
+    TranslateY(f32),
+    /// `translate(x, y)`
+    Translate(f32, f32),
+    /// `rotate(deg)`
+    Rotate(f32),
+    /// `scaleX(factor)`
+    ScaleX(f32),
+    /// `scaleY(factor)`
+    ScaleY(f32),
+    /// `scale(x, y)`
+    Scale(f32, f32),
+    /// `skewX(deg)`
+    SkewX(f32),
+    /// `skewY(deg)`
+    SkewY(f32),
+    /// `matrix(a, b, c, d, tx, ty)` — full 2D affine transform
+    Matrix(f32, f32, f32, f32, f32, f32),
+}
+
+impl TransformFunction {
+    /// Decompose this transform into a 2D affine matrix [a, b, c, d, tx, ty].
+    /// The matrix maps (x,y) → (ax + cy + tx, bx + dy + ty).
+    pub fn to_matrix(&self) -> [f32; 6] {
+        match self {
+            Self::TranslateX(tx) => [1.0, 0.0, 0.0, 1.0, *tx, 0.0],
+            Self::TranslateY(ty) => [1.0, 0.0, 0.0, 1.0, 0.0, *ty],
+            Self::Translate(tx, ty) => [1.0, 0.0, 0.0, 1.0, *tx, *ty],
+            Self::Rotate(deg) => {
+                let rad = deg.to_radians();
+                let cos = rad.cos();
+                let sin = rad.sin();
+                [cos, sin, -sin, cos, 0.0, 0.0]
+            }
+            Self::ScaleX(sx) => [*sx, 0.0, 0.0, 1.0, 0.0, 0.0],
+            Self::ScaleY(sy) => [1.0, 0.0, 0.0, *sy, 0.0, 0.0],
+            Self::Scale(sx, sy) => [*sx, 0.0, 0.0, *sy, 0.0, 0.0],
+            Self::SkewX(deg) => {
+                let tan = deg.to_radians().tan();
+                [1.0, 0.0, tan, 1.0, 0.0, 0.0]
+            }
+            Self::SkewY(deg) => {
+                let tan = deg.to_radians().tan();
+                [1.0, tan, 0.0, 1.0, 0.0, 0.0]
+            }
+            Self::Matrix(a, b, c, d, tx, ty) => [*a, *b, *c, *d, *tx, *ty],
+        }
+    }
+}
+
+/// A list of CSS transform functions (applied left-to-right).
+#[derive(Debug, Clone, PartialEq)]
+pub struct CssTransform {
+    pub functions: Vec<TransformFunction>,
+}
+
+impl CssTransform {
+    pub fn none() -> Self {
+        Self { functions: Vec::new() }
+    }
+
+    pub fn is_none(&self) -> bool {
+        self.functions.is_empty()
+    }
+
+    /// Compute the combined 2D affine matrix by multiplying all transform
+    /// functions in order. Returns the identity matrix if the list is empty.
+    pub fn combined_matrix(&self) -> [f32; 6] {
+        let mut result = [1.0f32, 0.0, 0.0, 1.0, 0.0, 0.0]; // identity
+        for func in &self.functions {
+            let m = func.to_matrix();
+            result = multiply_matrices(result, m);
+        }
+        result
+    }
+}
+
+/// Multiply two 2D affine matrices: result = a * b.
+fn multiply_matrices(a: [f32; 6], b: [f32; 6]) -> [f32; 6] {
+    [
+        a[0] * b[0] + a[2] * b[1],     // result.a
+        a[1] * b[0] + a[3] * b[1],     // result.b
+        a[0] * b[2] + a[2] * b[3],     // result.c
+        a[1] * b[2] + a[3] * b[3],     // result.d
+        a[0] * b[4] + a[2] * b[5] + a[4], // result.tx
+        a[1] * b[4] + a[3] * b[5] + a[5], // result.ty
+    ]
+}
+
+/// Parse a CSS `transform` value string into a `CssTransform`.
+pub(crate) fn parse_css_transform(value: &str) -> Option<CssTransform> {
+    let value = value.trim();
+    if value.eq_ignore_ascii_case("none") || value.is_empty() {
+        return Some(CssTransform::none());
+    }
+
+    let mut functions = Vec::new();
+    let mut remaining = value;
+
+    while !remaining.is_empty() {
+        remaining = remaining.trim_start();
+        if remaining.is_empty() { break; }
+
+        if let Some(rest) = remaining.strip_prefix("translateX(") {
+            let (val, rest) = extract_paren_value(rest)?;
+            functions.push(TransformFunction::TranslateX(parse_px_value(&val)?));
+            remaining = rest;
+        } else if let Some(rest) = remaining.strip_prefix("translateY(") {
+            let (val, rest) = extract_paren_value(rest)?;
+            functions.push(TransformFunction::TranslateY(parse_px_value(&val)?));
+            remaining = rest;
+        } else if let Some(rest) = remaining.strip_prefix("translate(") {
+            let (val, rest) = extract_paren_value(rest)?;
+            let parts: Vec<&str> = val.split(|c: char| c == ',' || c.is_whitespace())
+                .map(str::trim).filter(|s| !s.is_empty()).collect();
+            let x = parse_px_value(parts.first()?)?;
+            let y = parts.get(1).and_then(|s| parse_px_value(s)).unwrap_or(0.0);
+            functions.push(TransformFunction::Translate(x, y));
+            remaining = rest;
+        } else if let Some(rest) = remaining.strip_prefix("rotate(") {
+            let (val, rest) = extract_paren_value(rest)?;
+            functions.push(TransformFunction::Rotate(parse_angle_value(&val)?));
+            remaining = rest;
+        } else if let Some(rest) = remaining.strip_prefix("scaleX(") {
+            let (val, rest) = extract_paren_value(rest)?;
+            functions.push(TransformFunction::ScaleX(val.trim().parse::<f32>().ok()?));
+            remaining = rest;
+        } else if let Some(rest) = remaining.strip_prefix("scaleY(") {
+            let (val, rest) = extract_paren_value(rest)?;
+            functions.push(TransformFunction::ScaleY(val.trim().parse::<f32>().ok()?));
+            remaining = rest;
+        } else if let Some(rest) = remaining.strip_prefix("scale(") {
+            let (val, rest) = extract_paren_value(rest)?;
+            let parts: Vec<&str> = val.split(|c: char| c == ',' || c.is_whitespace())
+                .map(str::trim).filter(|s| !s.is_empty()).collect();
+            let x = parts.first()?.trim().parse::<f32>().ok()?;
+            let y = parts.get(1).and_then(|s| s.trim().parse::<f32>().ok()).unwrap_or(x);
+            functions.push(TransformFunction::Scale(x, y));
+            remaining = rest;
+        } else if let Some(rest) = remaining.strip_prefix("skewX(") {
+            let (val, rest) = extract_paren_value(rest)?;
+            functions.push(TransformFunction::SkewX(parse_angle_value(&val)?));
+            remaining = rest;
+        } else if let Some(rest) = remaining.strip_prefix("skewY(") {
+            let (val, rest) = extract_paren_value(rest)?;
+            functions.push(TransformFunction::SkewY(parse_angle_value(&val)?));
+            remaining = rest;
+        } else if let Some(rest) = remaining.strip_prefix("matrix(") {
+            let (val, rest) = extract_paren_value(rest)?;
+            let nums: Vec<f32> = val.split(',')
+                .filter_map(|s| s.trim().parse::<f32>().ok())
+                .collect();
+            if nums.len() == 6 {
+                functions.push(TransformFunction::Matrix(nums[0], nums[1], nums[2], nums[3], nums[4], nums[5]));
+            }
+            remaining = rest;
+        } else {
+            // Skip unknown function
+            if let Some(paren) = remaining.find('(') {
+                if let Some(close) = remaining[paren..].find(')') {
+                    remaining = &remaining[paren + close + 1..];
+                } else { break; }
+            } else { break; }
+        }
+    }
+
+    if functions.is_empty() { return None; }
+    Some(CssTransform { functions })
+}
+
+fn extract_paren_value(s: &str) -> Option<(String, &str)> {
+    let close = s.find(')')?;
+    Some((s[..close].to_owned(), &s[close + 1..]))
+}
+
+fn parse_px_value(s: &str) -> Option<f32> {
+    let s = s.trim().to_lowercase();
+    let s = s.strip_suffix("px").unwrap_or(&s);
+    s.trim().parse::<f32>().ok()
+}
+
+fn parse_angle_value(s: &str) -> Option<f32> {
+    let s = s.trim().to_lowercase();
+    if let Some(stripped) = s.strip_suffix("deg") {
+        stripped.trim().parse::<f32>().ok()
+    } else if let Some(stripped) = s.strip_suffix("turn") {
+        stripped.trim().parse::<f32>().ok().map(|v| v * 360.0)
+    } else if let Some(stripped) = s.strip_suffix("rad") {
+        stripped.trim().parse::<f32>().ok().map(|v| v * 180.0 / std::f32::consts::PI)
+    } else {
+        s.parse::<f32>().ok()
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum OutlineStyle {
     None,
@@ -242,6 +446,376 @@ impl OutlineSizes {
         Self { width: 0.0, style: OutlineStyle::None, color: Color::TRANSPARENT }
     }
 }
+
+// ── @font-face types ─────────────────────────────────────────────────────────
+
+/// How a font-face should behave while loading.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum FontDisplay {
+    Auto,
+    Block,
+    Swap,
+    Fallback,
+    Optional,
+}
+
+impl Default for FontDisplay {
+    fn default() -> Self {
+        Self::Auto
+    }
+}
+
+/// A single source entry in `src:` of an @font-face rule.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct FontFaceSource {
+    /// The URL of the font file.
+    pub url: String,
+    /// Optional format hint (e.g. "woff2", "woff", "truetype", "opentype").
+    pub format: Option<String>,
+}
+
+/// A parsed `@font-face` rule.
+#[derive(Debug, Clone, PartialEq)]
+pub struct FontFaceRule {
+    /// The font-family name declared in this rule.
+    pub family: String,
+    /// One or more font sources (tried in order).
+    pub sources: Vec<FontFaceSource>,
+    /// Font weight (defaults to Normal).
+    pub weight: FontWeight,
+    /// Font style (defaults to Normal).
+    pub style: FontStyle,
+    /// Font-display strategy.
+    pub display: FontDisplay,
+    /// Optional unicode-range (stored as raw string for now).
+    pub unicode_range: Option<String>,
+}
+
+// ── Animation / Transition types ──────────────────────────────────────────────
+
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum EasingFunction {
+    Linear,
+    Ease,
+    EaseIn,
+    EaseOut,
+    EaseInOut,
+    CubicBezier(f32, f32, f32, f32),
+    StepStart,
+    StepEnd,
+    Steps(i32),
+}
+
+impl Default for EasingFunction {
+    fn default() -> Self { Self::Ease }
+}
+
+impl EasingFunction {
+    pub fn apply(&self, t: f32) -> f32 {
+        let t = t.clamp(0.0, 1.0);
+        match self {
+            Self::Linear => t,
+            Self::Ease => cubic_bezier(0.25, 0.1, 0.25, 1.0, t),
+            Self::EaseIn => cubic_bezier(0.42, 0.0, 1.0, 1.0, t),
+            Self::EaseOut => cubic_bezier(0.0, 0.0, 0.58, 1.0, t),
+            Self::EaseInOut => cubic_bezier(0.42, 0.0, 0.58, 1.0, t),
+            Self::CubicBezier(x1, y1, x2, y2) => cubic_bezier(*x1, *y1, *x2, *y2, t),
+            Self::StepStart => if t < 1.0 { 0.0 } else { 1.0 },
+            Self::StepEnd => if t > 0.0 { 1.0 } else { 0.0 },
+            Self::Steps(n) => {
+                if *n <= 1 { return t; }
+                let step = 1.0 / *n as f32;
+                (t / step).floor() * step
+            }
+        }
+    }
+}
+
+fn cubic_bezier(x1: f32, y1: f32, x2: f32, y2: f32, t: f32) -> f32 {
+    let t = t.clamp(0.0, 1.0);
+    let one_minus_t = 1.0 - t;
+    let x = 3.0 * one_minus_t * one_minus_t * t * x1
+        + 3.0 * one_minus_t * t * t * x2
+        + t * t * t;
+    let y = 3.0 * one_minus_t * one_minus_t * t * y1
+        + 3.0 * one_minus_t * t * t * y2
+        + t * t * t;
+    if x == 0.0 { return y; }
+    y / x
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub enum AnimationDirection {
+    Normal,
+    Reverse,
+    Alternate,
+    AlternateReverse,
+}
+
+impl Default for AnimationDirection {
+    fn default() -> Self { Self::Normal }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AnimationFillMode {
+    None,
+    Forwards,
+    Backwards,
+    Both,
+}
+
+impl Default for AnimationFillMode {
+    fn default() -> Self { Self::None }
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub enum AnimationPlayState {
+    Running,
+    Paused,
+}
+
+impl Default for AnimationPlayState {
+    fn default() -> Self { Self::Running }
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct SingleAnimation {
+    pub name: String,
+    pub duration: f32,
+    pub timing_function: EasingFunction,
+    pub delay: f32,
+    pub iteration_count: f32,
+    pub direction: AnimationDirection,
+    pub fill_mode: AnimationFillMode,
+    pub play_state: AnimationPlayState,
+}
+
+impl Default for SingleAnimation {
+    fn default() -> Self {
+        Self {
+            name: String::new(),
+            duration: 0.0,
+            timing_function: EasingFunction::default(),
+            delay: 0.0,
+            iteration_count: 1.0,
+            direction: AnimationDirection::default(),
+            fill_mode: AnimationFillMode::default(),
+            play_state: AnimationPlayState::default(),
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct SingleTransition {
+    pub property: String,
+    pub duration: f32,
+    pub timing_function: EasingFunction,
+    pub delay: f32,
+}
+
+impl Default for SingleTransition {
+    fn default() -> Self {
+        Self {
+            property: String::new(),
+            duration: 0.0,
+            timing_function: EasingFunction::default(),
+            delay: 0.0,
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct Keyframe {
+    pub offset: f32,
+    pub declarations: Vec<(String, String)>,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct KeyframesRule {
+    pub name: String,
+    pub keyframes: Vec<Keyframe>,
+}
+
+// ── Media Query types ─────────────────────────────────────────────────────
+
+/// A single media feature condition (e.g. `min-width: 768px`).
+#[derive(Debug, Clone, PartialEq)]
+pub enum MediaFeature {
+    MinWidth(f32),
+    MaxWidth(f32),
+    MinHeight(f32),
+    MaxHeight(f32),
+    PrefersColorScheme(ColorScheme),
+    PrefersReducedMotion(ReducedMotion),
+    Orientation(OrientationValue),
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ColorScheme { Light, Dark }
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ReducedMotion { Reduce, NoPreference }
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum OrientationValue { Portrait, Landscape }
+
+/// A media query: an optional media type + a list of feature conditions.
+/// All conditions must match (AND logic) for the query to be true.
+#[derive(Debug, Clone, PartialEq)]
+pub struct MediaQuery {
+    /// If true, the query is negated (`@media not ...`).
+    pub negated: bool,
+    /// Media type: "all", "screen", "print", etc.
+    pub media_type: String,
+    /// Feature conditions (all must match).
+    pub features: Vec<MediaFeature>,
+}
+
+/// Environment context for evaluating media queries.
+#[derive(Debug, Clone)]
+pub struct MediaContext {
+    pub viewport_width: f32,
+    pub viewport_height: f32,
+    pub color_scheme: ColorScheme,
+    pub reduced_motion: ReducedMotion,
+}
+
+impl Default for MediaContext {
+    fn default() -> Self {
+        Self {
+            viewport_width: 1280.0,
+            viewport_height: 720.0,
+            color_scheme: ColorScheme::Light,
+            reduced_motion: ReducedMotion::NoPreference,
+        }
+    }
+}
+
+impl MediaContext {
+    pub fn evaluate(&self, query: &MediaQuery) -> bool {
+        // Check media type
+        let type_matches = query.media_type == "all"
+            || query.media_type == "screen";
+
+        // Check all features (AND logic)
+        let features_match = query.features.iter().all(|f| self.matches_feature(f));
+
+        let result = type_matches && features_match;
+        if query.negated { !result } else { result }
+    }
+
+    fn matches_feature(&self, feature: &MediaFeature) -> bool {
+        match feature {
+            MediaFeature::MinWidth(w) => self.viewport_width >= *w,
+            MediaFeature::MaxWidth(w) => self.viewport_width <= *w,
+            MediaFeature::MinHeight(h) => self.viewport_height >= *h,
+            MediaFeature::MaxHeight(h) => self.viewport_height <= *h,
+            MediaFeature::PrefersColorScheme(scheme) => self.color_scheme == *scheme,
+            MediaFeature::PrefersReducedMotion(motion) => self.reduced_motion == *motion,
+            MediaFeature::Orientation(orient) => {
+                let actual = if self.viewport_height > self.viewport_width {
+                    OrientationValue::Portrait
+                } else {
+                    OrientationValue::Landscape
+                };
+                actual == *orient
+            }
+        }
+    }
+}
+
+/// A group of rules gated behind a media query.
+#[derive(Debug, Clone, PartialEq)]
+pub struct MediaRule {
+    pub query: MediaQuery,
+    pub rules: Vec<Rule>,
+}
+
+/// Parse a `@media` condition string into a `MediaQuery`.
+pub(crate) fn parse_media_query(input: &str) -> Option<MediaQuery> {
+    let input = input.trim();
+    let mut negated = false;
+    let mut remaining = input;
+
+    // Handle `not` prefix
+    if let Some(rest) = remaining.strip_prefix("not ") {
+        negated = true;
+        remaining = rest.trim();
+    }
+
+    // Parse media type
+    let (media_type, features_str) = if remaining.contains('(') {
+        let paren_pos = remaining.find('(')?;
+        let before = remaining[..paren_pos].trim();
+        let media_type = if before.is_empty() || before == "and" {
+            "all".to_owned()
+        } else {
+            before.split_whitespace().next().unwrap_or("all").to_owned()
+        };
+        (media_type, &remaining[paren_pos..])
+    } else {
+        (remaining.trim().to_owned(), "")
+    };
+
+    // Parse features
+    let mut features = Vec::new();
+    let mut feat_remaining = features_str;
+    while let Some(open) = feat_remaining.find('(') {
+        let close = feat_remaining[open..].find(')')? + open;
+        let feat_body = &feat_remaining[open + 1..close];
+        if let Some(feat) = parse_media_feature(feat_body.trim()) {
+            features.push(feat);
+        }
+        feat_remaining = &feat_remaining[close + 1..];
+    }
+
+    Some(MediaQuery { negated, media_type, features })
+}
+
+fn parse_media_feature(input: &str) -> Option<MediaFeature> {
+    let input = input.trim();
+    if let Some((prop, val)) = input.split_once(':') {
+        let prop = prop.trim().to_lowercase();
+        let val = val.trim();
+        match prop.as_str() {
+            "min-width" => parse_px_media(val).map(MediaFeature::MinWidth),
+            "max-width" => parse_px_media(val).map(MediaFeature::MaxWidth),
+            "min-height" => parse_px_media(val).map(MediaFeature::MinHeight),
+            "max-height" => parse_px_media(val).map(MediaFeature::MaxHeight),
+            "prefers-color-scheme" => match val.to_lowercase().as_str() {
+                "dark" => Some(MediaFeature::PrefersColorScheme(ColorScheme::Dark)),
+                "light" => Some(MediaFeature::PrefersColorScheme(ColorScheme::Light)),
+                _ => None,
+            },
+            "prefers-reduced-motion" => match val.to_lowercase().as_str() {
+                "reduce" => Some(MediaFeature::PrefersReducedMotion(ReducedMotion::Reduce)),
+                "no-preference" => Some(MediaFeature::PrefersReducedMotion(ReducedMotion::NoPreference)),
+                _ => None,
+            },
+            "orientation" => match val.to_lowercase().as_str() {
+                "portrait" => Some(MediaFeature::Orientation(OrientationValue::Portrait)),
+                "landscape" => Some(MediaFeature::Orientation(OrientationValue::Landscape)),
+                _ => None,
+            },
+            _ => None,
+        }
+    } else {
+        // Bare feature name (boolean)
+        match input.to_lowercase().as_str() {
+            "portrait" => Some(MediaFeature::Orientation(OrientationValue::Portrait)),
+            "landscape" => Some(MediaFeature::Orientation(OrientationValue::Landscape)),
+            _ => None,
+        }
+    }
+}
+
+fn parse_px_media(val: &str) -> Option<f32> {
+    let val = val.trim().to_lowercase();
+    let val = val.strip_suffix("px").unwrap_or(&val);
+    val.trim().parse::<f32>().ok()
+}
+
+// ── ComputedStyle ─────────────────────────────────────────────────────────────
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct ComputedStyle {
@@ -285,6 +859,11 @@ pub struct ComputedStyle {
     pub column_gap: Length,
     pub box_shadow: Option<BoxShadow>,
     pub outline: OutlineSizes,
+    pub transform: CssTransform,
+    pub animations: Vec<SingleAnimation>,
+    pub transitions: Vec<SingleTransition>,
+    /// CSS custom properties (--variable-name: value). Inherited by default.
+    pub custom_properties: HashMap<String, String>,
 }
 
 impl ComputedStyle {
@@ -330,6 +909,10 @@ impl ComputedStyle {
             column_gap: Length::Px(0.0),
             box_shadow: None,
             outline: OutlineSizes::none(),
+            transform: CssTransform::none(),
+            animations: Vec::new(),
+            transitions: Vec::new(),
+            custom_properties: HashMap::new(),
         }
     }
 
@@ -346,6 +929,8 @@ impl ComputedStyle {
             style.line_height = parent.line_height;
             style.letter_spacing = parent.letter_spacing;
             style.word_spacing = parent.word_spacing;
+            // Custom properties inherit by default
+            style.custom_properties = parent.custom_properties.clone();
         }
         style
     }
@@ -454,6 +1039,7 @@ enum PropertyValue {
     String(String),
     BoxShadow(BoxShadow),
     Outline(OutlineSizes),
+    Transform(CssTransform),
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -480,6 +1066,18 @@ pub struct Rule {
 #[derive(Debug, Clone, Default, PartialEq)]
 pub struct Stylesheet {
     rules: Vec<Rule>,
+    pub keyframes: Vec<KeyframesRule>,
+    pub font_face_rules: Vec<FontFaceRule>,
+    pub media_rules: Vec<MediaRule>,
+}
+
+fn parse_keyframe_offset(selector: &str) -> f32 {
+    let s = selector.trim();
+    if s.eq_ignore_ascii_case("from") || s == "0%" { 0.0 }
+    else if s.eq_ignore_ascii_case("to") || s == "100%" { 1.0 }
+    else {
+        s.trim_end_matches('%').trim().parse::<f32>().unwrap_or(0.0) / 100.0
+    }
 }
 
 impl Stylesheet {
@@ -492,29 +1090,155 @@ impl Stylesheet {
         }
 
         let mut rules = Vec::new();
+        let mut keyframes = Vec::new();
+        let mut font_face_rules = Vec::new();
+        let mut media_rules = Vec::new();
         let mut rest = input;
-        while let Some(open) = rest.find('{') {
-            let selector_text = rest[..open].trim();
-            let after_open = &rest[open + 1..];
-            let Some(close) = after_open.find('}') else {
-                return Err(StyleError::UnclosedRule);
-            };
+        'outer: while !rest.is_empty() {
+            let trimmed = rest.trim_start();
+            let at_offset = rest.len() - trimmed.len();
 
-            let body = &after_open[..close];
-            let selectors = parse_selectors(selector_text);
-            let declarations = parse_declarations(body);
-            if !selectors.is_empty() && !declarations.is_empty() {
-                rules.push(Rule {
-                    selectors,
-                    declarations,
-                    order: rules.len(),
-                });
+            // ── @font-face ──
+            if trimmed.starts_with("@font-face") {
+                let after_at = &trimmed["@font-face".len()..].trim_start();
+                if let Some(open) = after_at.find('{') {
+                    let body_start = open + 1;
+                    let rest_after = &after_at[body_start..];
+                    if let Some(close) = rest_after.find('}') {
+                        let body = &rest_after[..close];
+                        if let Some(rule) = parse_font_face_body(body) {
+                            font_face_rules.push(rule);
+                        }
+                        // Advance past the entire @font-face {...} block
+                        let consumed_from_trimmed = "@font-face".len()
+                            + (after_at.as_ptr() as usize - trimmed["@font-face".len()..].as_ptr() as usize)
+                            + body_start + close + 1;
+                        let consumed = (rest.len() - trimmed.len()) + consumed_from_trimmed;
+                        rest = &rest[consumed..];
+                        continue;
+                    }
+                }
             }
 
-            rest = &after_open[close + 1..];
+            if trimmed.starts_with("@keyframes") || trimmed.starts_with("@-webkit-keyframes") {
+                let after_at = if trimmed.starts_with("@-webkit-keyframes") {
+                    &trimmed["@-webkit-keyframes".len()..]
+                } else {
+                    &trimmed["@keyframes".len()..]
+                };
+                let name_end = after_at.find(|c: char| c.is_whitespace() || c == '{').unwrap_or(after_at.len());
+                let name = after_at[..name_end].trim().to_owned();
+                let after_name = after_at[name_end..].trim_start();
+                if !name.is_empty() {
+                    if let Some(open) = after_name.find('{') {
+                        let body_start = open + 1;
+                        let rest_after = &after_name[body_start..];
+                        let rest_after_len = rest_after.len();
+                        let mut depth = 1u32;
+                        let mut close = 0;
+                        for (i, ch) in rest_after.char_indices() {
+                            match ch {
+                                '{' => depth += 1,
+                                '}' => {
+                                    depth -= 1;
+                                    if depth == 0 {
+                                        close = i;
+                                        break;
+                                    }
+                                }
+                                _ => {}
+                            }
+                        }
+                        let keyframe_body = &rest_after[..close];
+                        let mut kfs = Vec::new();
+                        let mut kp = 0;
+                        while kp < keyframe_body.len() {
+                            let ktrim = keyframe_body[kp..].trim_start();
+                            let koff = keyframe_body.len() - ktrim.len();
+                            if let Some(ko) = ktrim.find('{') {
+                                let ksel = ktrim[..ko].trim();
+                                let kbody = &ktrim[ko + 1..];
+                                if let Some(kc) = kbody.find('}') {
+                                    let decls_raw = &kbody[..kc];
+                                    let offset_val = parse_keyframe_offset(ksel);
+                                    let mut pairs = Vec::new();
+                                    for line in decls_raw.split(';') {
+                                        let line = line.trim();
+                                        if line.is_empty() { continue; }
+                                        if let Some(colon) = line.find(':') {
+                                            let prop = line[..colon].trim().to_owned();
+                                            let val = line[colon + 1..].trim().to_owned();
+                                            if !prop.is_empty() && !val.is_empty() {
+                                                pairs.push((prop, val));
+                                            }
+                                        }
+                                    }
+                                    kfs.push(Keyframe { offset: offset_val, declarations: pairs });
+                                    kp += koff + ko + 1 + kc + 1;
+                                } else { break; }
+                            } else { break; }
+                        }
+                        keyframes.push(KeyframesRule { name, keyframes: kfs });
+                        // consumed = everything from start of rest through the closing '}'
+                        let consumed = rest.len() - rest_after_len + close + 1;
+                        rest = &rest[consumed..];
+                        continue;
+                    }
+                }
+            }
+
+            // ── @media ──
+            if trimmed.starts_with("@media") {
+                let after_at = &trimmed["@media".len()..].trim_start();
+                // Find the opening brace of the media block
+                if let Some(open) = after_at.find('{') {
+                    let query_str = after_at[..open].trim();
+                    let body_start = open + 1;
+                    let rest_after = &after_at[body_start..];
+                    // Find matching closing brace (handle nested braces)
+                    let mut depth = 1u32;
+                    let mut close = 0;
+                    for (i, ch) in rest_after.char_indices() {
+                        match ch {
+                            '{' => depth += 1,
+                            '}' => {
+                                depth -= 1;
+                                if depth == 0 { close = i; break; }
+                            }
+                            _ => {}
+                        }
+                    }
+                    let media_body = &rest_after[..close];
+                    // Parse the inner rules as a sub-stylesheet
+                    if let Some(query) = parse_media_query(query_str) {
+                        let inner_rules = parse_inner_rules(media_body, rules.len());
+                        media_rules.push(MediaRule { query, rules: inner_rules });
+                    }
+                    let consumed = rest.len() - rest_after.len() + close + 1;
+                    rest = &rest[consumed..];
+                    continue;
+                }
+            }
+
+            if let Some(open) = trimmed.find('{') {
+                let selector_text = &trimmed[..open];
+                let after_open = &trimmed[open + 1..];
+                let Some(close) = after_open.find('}') else {
+                    return Err(StyleError::UnclosedRule);
+                };
+                let body = &after_open[..close];
+                let selectors = parse_selectors(selector_text);
+                let declarations = parse_declarations(body);
+                if !selectors.is_empty() && !declarations.is_empty() {
+                    rules.push(Rule { selectors, declarations, order: rules.len() });
+                }
+                rest = &after_open[close + 1..];
+            } else {
+                break 'outer;
+            }
         }
 
-        Ok(Self { rules })
+        Ok(Self { rules, keyframes, font_face_rules, media_rules })
     }
 
     fn ua_defaults() -> Self {
@@ -555,17 +1279,44 @@ impl Stylesheet {
 #[derive(Debug, Clone)]
 pub struct StyleEngine {
     stylesheets: Vec<Stylesheet>,
+    pub keyframes: Vec<KeyframesRule>,
+    pub media_context: MediaContext,
 }
 
 impl StyleEngine {
     pub fn new() -> Self {
         Self {
             stylesheets: vec![Stylesheet::ua_defaults()],
+            keyframes: Vec::new(),
+            media_context: MediaContext::default(),
         }
     }
 
+    pub fn with_media_context(mut self, ctx: MediaContext) -> Self {
+        self.media_context = ctx;
+        self
+    }
+
+    pub fn set_media_context(&mut self, ctx: MediaContext) {
+        self.media_context = ctx;
+    }
+
     pub fn add_stylesheet(&mut self, stylesheet: Stylesheet) {
+        for kf in &stylesheet.keyframes {
+            if !self.keyframes.iter().any(|k| k.name == kf.name) {
+                self.keyframes.push(kf.clone());
+            }
+        }
         self.stylesheets.push(stylesheet);
+    }
+
+    pub fn get_keyframes(&self, name: &str) -> Option<&KeyframesRule> {
+        self.keyframes.iter().find(|k| k.name == name)
+    }
+
+    /// Return all @font-face rules from all added stylesheets.
+    pub fn font_face_rules(&self) -> Vec<&FontFaceRule> {
+        self.stylesheets.iter().flat_map(|s| s.font_face_rules.iter()).collect()
     }
 
     pub fn compute_style<'arena>(
@@ -587,15 +1338,51 @@ impl StyleEngine {
                     }
                 }
             }
+            // Also include rules from matching @media queries
+            for media_rule in &stylesheet.media_rules {
+                if self.media_context.evaluate(&media_rule.query) {
+                    for rule in &media_rule.rules {
+                        for selector in &rule.selectors {
+                            if selector.matches(node) {
+                                matched.push((selector.specificity, rule.order, &rule.declarations));
+                            }
+                        }
+                    }
+                }
+            }
         }
 
         matched.sort_by_key(|(specificity, order, _)| (*specificity, *order));
-        for (_, _, declarations) in matched {
+
+        // First pass: collect all custom property definitions
+        for (_, _, declarations) in &matched {
+            for decl in declarations.iter() {
+                if decl.property.starts_with("--") {
+                    if let PropertyValue::String(val) = &decl.value {
+                        let resolved = resolve_var_references(val, &style.custom_properties);
+                        style.custom_properties.insert(decl.property.to_string(), resolved);
+                    }
+                }
+            }
+        }
+
+        // Second pass: apply regular declarations with var() resolution
+        for (_, _, declarations) in &matched {
             apply_declarations(&mut style, declarations);
         }
 
+        // Handle inline style attribute
         if let Some(inline) = element.attr("style") {
             let declarations = parse_declarations(&inline);
+            // Collect inline custom properties first
+            for decl in &declarations {
+                if decl.property.starts_with("--") {
+                    if let PropertyValue::String(val) = &decl.value {
+                        let resolved = resolve_var_references(val, &style.custom_properties);
+                        style.custom_properties.insert(decl.property.to_string(), resolved);
+                    }
+                }
+            }
             apply_declarations(&mut style, &declarations);
         }
 
@@ -812,13 +1599,58 @@ fn parse_selectors(input: &str) -> SmallVec<[Selector; 2]> {
     input.split(',').filter_map(Selector::parse).collect()
 }
 
+/// Parse a block of CSS rules (used inside @media blocks).
+fn parse_inner_rules(body: &str, start_order: usize) -> Vec<Rule> {
+    let mut rules = Vec::new();
+    let mut rest = body;
+    while !rest.is_empty() {
+        let trimmed = rest.trim_start();
+        if trimmed.is_empty() { break; }
+        if let Some(open) = trimmed.find('{') {
+            let selector_text = &trimmed[..open];
+            let after_open = &trimmed[open + 1..];
+            let Some(close) = after_open.find('}') else { break };
+            let decl_body = &after_open[..close];
+            let selectors = parse_selectors(selector_text);
+            let declarations = parse_declarations(decl_body);
+            if !selectors.is_empty() && !declarations.is_empty() {
+                rules.push(Rule {
+                    selectors,
+                    declarations,
+                    order: start_order + rules.len(),
+                });
+            }
+            rest = &after_open[close + 1..];
+        } else {
+            break;
+        }
+    }
+    rules
+}
+
 fn parse_declarations(input: &str) -> SmallVec<[Declaration; 6]> {
     input
         .split(';')
         .filter_map(|chunk| {
             let (property, raw_value) = chunk.split_once(':')?;
-            let property = property.trim().to_ascii_lowercase();
-            let value = parse_property_value(&property, raw_value.trim())?;
+            let property = property.trim();
+            let raw_trimmed = raw_value.trim();
+            // Custom properties (--*) are stored as raw strings
+            if property.starts_with("--") {
+                return Some(Declaration {
+                    property: CompactString::from(property.to_ascii_lowercase()),
+                    value: PropertyValue::String(raw_trimmed.to_owned()),
+                });
+            }
+            let property = property.to_ascii_lowercase();
+            // If the value contains var(), store as raw String for later resolution
+            if raw_trimmed.contains("var(") {
+                return Some(Declaration {
+                    property: CompactString::from(property),
+                    value: PropertyValue::String(raw_trimmed.to_owned()),
+                });
+            }
+            let value = parse_property_value(&property, raw_trimmed)?;
             Some(Declaration {
                 property: CompactString::from(property),
                 value,
@@ -933,13 +1765,104 @@ fn parse_property_value(property: &str, value: &str) -> Option<PropertyValue> {
         | "border-right-width"
         | "border-bottom-width"
         | "border-left-width" => parse_length(value).map(PropertyValue::Length),
+        "transform" => parse_css_transform(value).map(PropertyValue::Transform),
         _ => None,
     }
 }
 
+/// Resolve all `var(--name)` and `var(--name, fallback)` references in a value string.
+/// Uses the provided custom properties map for lookups.
+fn resolve_var_references(value: &str, custom_props: &HashMap<String, String>) -> String {
+    let mut result = String::with_capacity(value.len());
+    let mut remaining = value;
+
+    while let Some(var_start) = remaining.find("var(") {
+        // Append everything before var()
+        result.push_str(&remaining[..var_start]);
+        let after = &remaining[var_start + 4..]; // skip "var("
+
+        // Find the matching closing paren (handle nested parens)
+        let mut depth = 1;
+        let mut end = 0;
+        for (i, ch) in after.char_indices() {
+            match ch {
+                '(' => depth += 1,
+                ')' => {
+                    depth -= 1;
+                    if depth == 0 {
+                        end = i;
+                        break;
+                    }
+                }
+                _ => {}
+            }
+        }
+
+        if depth != 0 {
+            // Unmatched paren — keep the original text
+            result.push_str("var(");
+            remaining = after;
+            continue;
+        }
+
+        let var_body = &after[..end];
+        remaining = &after[end + 1..]; // skip past ')'
+
+        // Parse var body: --name or --name, fallback
+        let (var_name, fallback) = if let Some(comma_pos) = var_body.find(',') {
+            let name = var_body[..comma_pos].trim();
+            let fb = var_body[comma_pos + 1..].trim();
+            (name, Some(fb))
+        } else {
+            (var_body.trim(), None)
+        };
+
+        // Look up the custom property
+        let resolved = custom_props
+            .get(var_name)
+            .map(|s| s.as_str())
+            .or(fallback);
+
+        if let Some(val) = resolved {
+            // Recursively resolve var() in the resolved value
+            let resolved_val = resolve_var_references(val, custom_props);
+            result.push_str(&resolved_val);
+        }
+        // If no value and no fallback, the property is invalid at computed time
+        // (we leave it empty, which effectively drops the declaration)
+    }
+
+    // Append remaining text after the last var()
+    result.push_str(remaining);
+    result
+}
+
 fn apply_declarations(style: &mut ComputedStyle, declarations: &[Declaration]) {
     for declaration in declarations {
-        match (declaration.property.as_str(), &declaration.value) {
+        // Store custom properties
+        if declaration.property.starts_with("--") {
+            if let PropertyValue::String(val) = &declaration.value {
+                let resolved = resolve_var_references(val, &style.custom_properties);
+                style.custom_properties.insert(declaration.property.to_string(), resolved);
+            }
+            continue;
+        }
+
+        // Resolve var() references in String-typed values and re-parse
+        let effective_value = if let PropertyValue::String(raw) = &declaration.value {
+            let resolved = resolve_var_references(raw, &style.custom_properties);
+            if resolved.is_empty() {
+                continue; // Unresolvable var() with no fallback
+            }
+            match parse_property_value(&declaration.property, &resolved) {
+                Some(parsed) => parsed,
+                None => continue,
+            }
+        } else {
+            declaration.value.clone()
+        };
+
+        match (declaration.property.as_str(), &effective_value) {
             ("display", PropertyValue::Display(value)) => style.display = *value,
             ("color", PropertyValue::Color(value)) => style.color = *value,
             ("background-color", PropertyValue::Color(value)) => style.background_color = *value,
@@ -1049,6 +1972,9 @@ fn apply_declarations(style: &mut ComputedStyle, declarations: &[Declaration]) {
             }
             ("outline-color", PropertyValue::Color(value)) => {
                 style.outline.color = *value;
+            }
+            ("transform", PropertyValue::Transform(value)) => {
+                style.transform = value.clone();
             }
             _ => {}
         }
@@ -1170,7 +2096,7 @@ fn parse_border_shorthand(value: &str) -> Option<PropertyValue> {
     Some(PropertyValue::Border(borders))
 }
 
-fn parse_color(input: &str) -> Option<Color> {
+pub(crate) fn parse_color(input: &str) -> Option<Color> {
     if let Some(color) = parse_function_color(input) {
         return Some(color);
     }
@@ -1284,6 +2210,102 @@ fn hex_pair(ch: char) -> Option<u8> {
     Some((value << 4) | value)
 }
 
+/// Parse the body of an `@font-face { ... }` rule into a `FontFaceRule`.
+fn parse_font_face_body(body: &str) -> Option<FontFaceRule> {
+    let mut family = String::new();
+    let mut sources = Vec::new();
+    let mut weight = FontWeight::Normal;
+    let mut style = FontStyle::Normal;
+    let mut display = FontDisplay::Auto;
+    let mut unicode_range = None;
+
+    for decl in body.split(';') {
+        let decl = decl.trim();
+        if decl.is_empty() { continue; }
+        let Some((prop, val)) = decl.split_once(':') else { continue; };
+        let prop = prop.trim().to_ascii_lowercase();
+        let val = val.trim();
+
+        match prop.as_str() {
+            "font-family" => {
+                family = val.trim_matches('"').trim_matches('\'').to_owned();
+            }
+            "src" => {
+                // Parse src: url("...") format("..."), url("...") format("...")
+                let mut remaining = val;
+                while !remaining.is_empty() {
+                    let remaining_trimmed = remaining.trim_start().trim_start_matches(',').trim_start();
+                    remaining = remaining_trimmed;
+                    if remaining.is_empty() { break; }
+                    if let Some(url_start) = remaining.find("url(") {
+                        let after = &remaining[url_start + 4..];
+                        let close = after.find(')')?;
+                        let url_raw = &after[..close];
+                        let url = url_raw.trim_matches('"').trim_matches('\'').to_owned();
+                        remaining = &after[close + 1..];
+                        // Check for format(...)
+                        let format = if remaining.trim_start().starts_with("format(") {
+                            let fmt_start = remaining.trim_start()["format(".len()..].to_string();
+                            if let Some(fmt_close) = fmt_start.find(')') {
+                                let fmt_raw = &fmt_start[..fmt_close];
+                                remaining = &remaining.trim_start()["format(".len() + fmt_close + 1..];
+                                Some(fmt_raw.trim_matches('"').trim_matches('\'').to_owned())
+                            } else { None }
+                        } else { None };
+                        sources.push(FontFaceSource { url, format });
+                    } else {
+                        break;
+                    }
+                }
+            }
+            "font-weight" => {
+                match val.to_ascii_lowercase().as_str() {
+                    "bold" | "700" => weight = FontWeight::Bold,
+                    "normal" | "400" => weight = FontWeight::Normal,
+                    _ => {
+                        if let Ok(n) = val.parse::<u16>() {
+                            weight = FontWeight::Number(n);
+                        }
+                    }
+                }
+            }
+            "font-style" => {
+                match val.to_ascii_lowercase().as_str() {
+                    "italic" => style = FontStyle::Italic,
+                    "oblique" => style = FontStyle::Oblique,
+                    _ => style = FontStyle::Normal,
+                }
+            }
+            "font-display" => {
+                match val.to_ascii_lowercase().as_str() {
+                    "block" => display = FontDisplay::Block,
+                    "swap" => display = FontDisplay::Swap,
+                    "fallback" => display = FontDisplay::Fallback,
+                    "optional" => display = FontDisplay::Optional,
+                    _ => display = FontDisplay::Auto,
+                }
+            }
+            "unicode-range" => {
+                unicode_range = Some(val.to_owned());
+            }
+            _ => {}
+        }
+    }
+
+    if family.is_empty() {
+        return None;
+    }
+
+    Some(FontFaceRule {
+        family,
+        sources,
+        weight,
+        style,
+        display,
+        unicode_range,
+    })
+}
+
 fn parse_edge_sizes(input: &str) -> Option<EdgeSizes> {
     let values = input
         .split_whitespace()
@@ -1319,7 +2341,7 @@ fn parse_edge_sizes(input: &str) -> Option<EdgeSizes> {
     }
 }
 
-fn parse_length(input: &str) -> Option<Length> {
+pub(crate) fn parse_length(input: &str) -> Option<Length> {
     let trimmed = input.trim().to_ascii_lowercase();
     if trimmed == "auto" {
         return Some(Length::Auto);
@@ -1376,6 +2398,76 @@ mod tests {
     use fortrust_dom::{DomArena, parse_html};
 
     use super::*;
+
+    #[test]
+    fn parse_font_face_rule_extracts_family_and_url() {
+        let css = r#"
+            @font-face {
+                font-family: "CustomFont";
+                src: url("https://example.com/font.woff2") format("woff2"),
+                     url("https://example.com/font.woff") format("woff");
+                font-weight: bold;
+                font-style: italic;
+                font-display: swap;
+                unicode-range: U+0000-00FF;
+            }
+            body { color: red; }
+        "#;
+        let sheet = Stylesheet::parse(css).unwrap();
+        assert_eq!(sheet.font_face_rules.len(), 1);
+        let rule = &sheet.font_face_rules[0];
+        assert_eq!(rule.family, "CustomFont");
+        assert_eq!(rule.sources.len(), 2);
+        assert_eq!(rule.sources[0].url, "https://example.com/font.woff2");
+        assert_eq!(rule.sources[0].format.as_deref(), Some("woff2"));
+        assert_eq!(rule.sources[1].url, "https://example.com/font.woff");
+        assert_eq!(rule.sources[1].format.as_deref(), Some("woff"));
+        assert_eq!(rule.weight, FontWeight::Bold);
+        assert_eq!(rule.style, FontStyle::Italic);
+        assert_eq!(rule.display, FontDisplay::Swap);
+        assert_eq!(rule.unicode_range.as_deref(), Some("U+0000-00FF"));
+    }
+
+    #[test]
+    fn parse_font_face_without_format() {
+        let css = r#"
+            @font-face {
+                font-family: SimpleFont;
+                src: url("./simple.ttf");
+            }
+        "#;
+        let sheet = Stylesheet::parse(css).unwrap();
+        assert_eq!(sheet.font_face_rules.len(), 1);
+        let rule = &sheet.font_face_rules[0];
+        assert_eq!(rule.family, "SimpleFont");
+        assert_eq!(rule.sources.len(), 1);
+        assert_eq!(rule.sources[0].url, "./simple.ttf");
+        assert_eq!(rule.sources[0].format, None);
+        assert_eq!(rule.weight, FontWeight::Normal);
+        assert_eq!(rule.style, FontStyle::Normal);
+        assert_eq!(rule.display, FontDisplay::Auto);
+    }
+
+    #[test]
+    fn style_engine_collects_font_face_rules() {
+        let css = r#"
+            @font-face {
+                font-family: "MyFont";
+                src: url("/fonts/my.woff2") format("woff2");
+            }
+            @font-face {
+                font-family: "MyFont";
+                src: url("/fonts/my-bold.woff2") format("woff2");
+                font-weight: bold;
+            }
+        "#;
+        let mut engine = StyleEngine::new();
+        engine.add_stylesheet(Stylesheet::parse(css).unwrap());
+        let rules = engine.font_face_rules();
+        assert_eq!(rules.len(), 2);
+        assert_eq!(rules[0].family, "MyFont");
+        assert_eq!(rules[1].weight, FontWeight::Bold);
+    }
 
     #[test]
     fn ua_defaults_make_body_block_with_margin() {
@@ -1508,5 +2600,243 @@ mod tests {
                 a: 128
             }
         );
+    }
+
+    // ── CSS Variables tests ─────────────────────────────────────────────
+
+    #[test]
+    fn custom_property_stored_and_inherited() {
+        let arena = DomArena::new();
+        let document = parse_html(&arena, r#"<div class="parent"><p>Child</p></div>"#).unwrap();
+        let div = document.first_element_by_tag("div").unwrap();
+        let p = document.first_element_by_tag("p").unwrap();
+        let mut engine = StyleEngine::new();
+        engine.add_stylesheet(
+            Stylesheet::parse(".parent { --brand: #ff0000; color: var(--brand); }").unwrap(),
+        );
+
+        let parent_style = engine.compute_style(div, None);
+        assert_eq!(parent_style.custom_properties.get("--brand").map(|s| s.as_str()), Some("#ff0000"));
+        assert_eq!(parent_style.color, Color::rgb(255, 0, 0));
+
+        // Child inherits the custom property
+        let child_style = engine.compute_style(p, Some(&parent_style));
+        assert_eq!(child_style.custom_properties.get("--brand").map(|s| s.as_str()), Some("#ff0000"));
+    }
+
+    #[test]
+    fn var_with_fallback() {
+        let arena = DomArena::new();
+        let document = parse_html(&arena, r#"<p>Text</p>"#).unwrap();
+        let p = document.first_element_by_tag("p").unwrap();
+        let mut engine = StyleEngine::new();
+        // --undefined is not defined, so fallback should be used
+        engine.add_stylesheet(
+            Stylesheet::parse("p { color: var(--undefined, blue); }").unwrap(),
+        );
+
+        let style = engine.compute_style(p, None);
+        assert_eq!(style.color, Color::rgb(0, 0, 255));
+    }
+
+    #[test]
+    fn var_resolves_to_length() {
+        let arena = DomArena::new();
+        let document = parse_html(&arena, r#"<main>Content</main>"#).unwrap();
+        let main = document.first_element_by_tag("main").unwrap();
+        let mut engine = StyleEngine::new();
+        engine.add_stylesheet(
+            Stylesheet::parse("main { --w: 200px; width: var(--w); }").unwrap(),
+        );
+
+        let style = engine.compute_style(main, None);
+        assert_eq!(style.width, Length::Px(200.0));
+    }
+
+    #[test]
+    fn var_chained_reference() {
+        let arena = DomArena::new();
+        let document = parse_html(&arena, r#"<p>Text</p>"#).unwrap();
+        let p = document.first_element_by_tag("p").unwrap();
+        let mut engine = StyleEngine::new();
+        engine.add_stylesheet(
+            Stylesheet::parse("p { --base: #00ff00; --accent: var(--base); color: var(--accent); }").unwrap(),
+        );
+
+        let style = engine.compute_style(p, None);
+        assert_eq!(style.color, Color::rgb(0, 255, 0));
+    }
+
+    #[test]
+    fn inline_style_custom_property() {
+        let arena = DomArena::new();
+        let document = parse_html(
+            &arena,
+            r#"<p style="--sz: 24px; font-size: var(--sz)">Big</p>"#,
+        ).unwrap();
+        let p = document.first_element_by_tag("p").unwrap();
+        let engine = StyleEngine::new();
+
+        let style = engine.compute_style(p, None);
+        assert_eq!(style.font_size, Length::Px(24.0));
+    }
+
+    // ── CSS Transform tests ─────────────────────────────────────────────
+
+    #[test]
+    fn parse_transform_translate() {
+        let arena = DomArena::new();
+        let document = parse_html(&arena, r#"<div>Box</div>"#).unwrap();
+        let div = document.first_element_by_tag("div").unwrap();
+        let mut engine = StyleEngine::new();
+        engine.add_stylesheet(
+            Stylesheet::parse("div { transform: translateX(10px) translateY(20px); }").unwrap(),
+        );
+
+        let style = engine.compute_style(div, None);
+        assert!(!style.transform.is_none());
+        assert_eq!(style.transform.functions.len(), 2);
+    }
+
+    #[test]
+    fn parse_transform_rotate_scale() {
+        let t = parse_css_transform("rotate(45deg) scale(2)").unwrap();
+        assert_eq!(t.functions.len(), 2);
+        match t.functions[0] {
+            TransformFunction::Rotate(deg) => assert_eq!(deg, 45.0),
+            _ => panic!("Expected Rotate"),
+        }
+        match t.functions[1] {
+            TransformFunction::Scale(sx, sy) => { assert_eq!(sx, 2.0); assert_eq!(sy, 2.0); }
+            _ => panic!("Expected Scale"),
+        }
+    }
+
+    #[test]
+    fn transform_combined_matrix_identity() {
+        let t = CssTransform::none();
+        let m = t.combined_matrix();
+        assert_eq!(m, [1.0, 0.0, 0.0, 1.0, 0.0, 0.0]);
+    }
+
+    #[test]
+    fn transform_combined_matrix_translate() {
+        let t = CssTransform { functions: vec![TransformFunction::Translate(10.0, 20.0)] };
+        let m = t.combined_matrix();
+        assert_eq!(m[4], 10.0); // tx
+        assert_eq!(m[5], 20.0); // ty
+    }
+
+    // ── Media Query tests ───────────────────────────────────────────────
+
+    #[test]
+    fn parse_media_query_min_width() {
+        let q = parse_media_query("(min-width: 768px)").unwrap();
+        assert!(!q.negated);
+        assert_eq!(q.media_type, "all");
+        assert_eq!(q.features.len(), 1);
+        match &q.features[0] {
+            MediaFeature::MinWidth(w) => assert_eq!(*w, 768.0),
+            _ => panic!("Expected MinWidth"),
+        }
+    }
+
+    #[test]
+    fn parse_media_query_prefers_color_scheme() {
+        let q = parse_media_query("(prefers-color-scheme: dark)").unwrap();
+        assert_eq!(q.features.len(), 1);
+        assert_eq!(q.features[0], MediaFeature::PrefersColorScheme(ColorScheme::Dark));
+    }
+
+    #[test]
+    fn media_context_evaluates_width() {
+        let ctx = MediaContext { viewport_width: 1024.0, viewport_height: 768.0, ..Default::default() };
+        let q = parse_media_query("(min-width: 768px)").unwrap();
+        assert!(ctx.evaluate(&q));
+        let q2 = parse_media_query("(min-width: 1200px)").unwrap();
+        assert!(!ctx.evaluate(&q2));
+    }
+
+    #[test]
+    fn media_context_evaluates_color_scheme() {
+        let ctx = MediaContext { color_scheme: ColorScheme::Dark, ..Default::default() };
+        let q_dark = parse_media_query("(prefers-color-scheme: dark)").unwrap();
+        assert!(ctx.evaluate(&q_dark));
+        let q_light = parse_media_query("(prefers-color-scheme: light)").unwrap();
+        assert!(!ctx.evaluate(&q_light));
+    }
+
+    #[test]
+    fn media_query_negation() {
+        let ctx = MediaContext { color_scheme: ColorScheme::Dark, ..Default::default() };
+        let q = parse_media_query("not (prefers-color-scheme: light)").unwrap();
+        assert!(q.negated);
+        assert!(ctx.evaluate(&q)); // Dark != Light, so negated = true
+    }
+
+    #[test]
+    fn stylesheet_parses_media_rule() {
+        let css = r#"
+            p { color: black; }
+            @media (min-width: 768px) {
+                p { color: blue; }
+            }
+        "#;
+        let sheet = Stylesheet::parse(css).unwrap();
+        assert_eq!(sheet.rules.len(), 1); // only the non-media rule
+        assert_eq!(sheet.media_rules.len(), 1);
+        assert_eq!(sheet.media_rules[0].rules.len(), 1);
+    }
+
+    #[test]
+    fn media_query_applies_when_matching() {
+        let arena = DomArena::new();
+        let document = parse_html(&arena, r#"<p>Text</p>"#).unwrap();
+        let p = document.first_element_by_tag("p").unwrap();
+        let mut engine = StyleEngine::new()
+            .with_media_context(MediaContext { viewport_width: 1024.0, ..Default::default() });
+        engine.add_stylesheet(
+            Stylesheet::parse(r#"
+                p { color: black; }
+                @media (min-width: 768px) { p { color: blue; } }
+            "#).unwrap(),
+        );
+
+        let style = engine.compute_style(p, None);
+        assert_eq!(style.color, Color::rgb(0, 0, 255)); // blue from media query
+    }
+
+    #[test]
+    fn media_query_not_applied_when_not_matching() {
+        let arena = DomArena::new();
+        let document = parse_html(&arena, r#"<p>Text</p>"#).unwrap();
+        let p = document.first_element_by_tag("p").unwrap();
+        let mut engine = StyleEngine::new()
+            .with_media_context(MediaContext { viewport_width: 500.0, ..Default::default() });
+        engine.add_stylesheet(
+            Stylesheet::parse(r#"
+                p { color: black; }
+                @media (min-width: 768px) { p { color: blue; } }
+            "#).unwrap(),
+        );
+
+        let style = engine.compute_style(p, None);
+        assert_eq!(style.color, Color::BLACK); // black, not blue
+    }
+
+    #[test]
+    fn media_query_orientation() {
+        let ctx = MediaContext { viewport_width: 800.0, viewport_height: 600.0, ..Default::default() };
+        let q = parse_media_query("(orientation: landscape)").unwrap();
+        assert!(ctx.evaluate(&q));
+        let q2 = parse_media_query("(orientation: portrait)").unwrap();
+        assert!(!ctx.evaluate(&q2));
+    }
+
+    #[test]
+    fn media_query_reduced_motion() {
+        let ctx = MediaContext { reduced_motion: ReducedMotion::Reduce, ..Default::default() };
+        let q = parse_media_query("(prefers-reduced-motion: reduce)").unwrap();
+        assert!(ctx.evaluate(&q));
     }
 }

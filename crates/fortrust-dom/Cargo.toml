@@ -9,3 +9,4 @@ bumpalo.workspace = true
 compact_str.workspace = true
 html5ever.workspace = true
 smallvec.workspace = true
+url.workspace = true

@@ -8,6 +8,8 @@ license.workspace = true
 fortrust-core = { path = "../fortrust-core" }
 fortrust-layout = { path = "../fortrust-layout" }
 fortrust-style = { path = "../fortrust-style" }
+cosmic-text.workspace = true
+swash.workspace = true
 
 [dev-dependencies]
 fortrust-dom = { path = "../fortrust-dom" }

@@ -4,6 +4,7 @@ pub mod dns;
 pub mod netproc;
 pub mod tls;
 pub mod transport;
+pub mod websocket;
 
 pub use cache::{CacheDecision, CacheEntry, CacheHeaders, HttpCache, ValidationHeaders};
 pub use client::{
@@ -17,3 +18,4 @@ pub use transport::{
     HttpTransport, ReqwestTransport, TransportBodyStream, TransportError, TransportRequest,
     TransportResponse, TransportStreamResponse,
 };
+pub use websocket::{WebSocketClient, WebSocketError, WebSocketEvent, WebSocketMessage};

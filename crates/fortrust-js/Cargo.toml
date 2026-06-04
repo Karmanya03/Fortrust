@@ -11,10 +11,12 @@ chrono.workspace = true
 fortrust-dom = { path = "../fortrust-dom" }
 fortrust-net = { path = "../fortrust-net" }
 fortrust-core = { path = "../fortrust-core" }
+futures-executor.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 thiserror.workspace = true
 tokio.workspace = true
+tokio-tungstenite.workspace = true
 tracing.workspace = true
 url.workspace = true
 lazy_static = "1.4"

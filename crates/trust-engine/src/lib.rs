@@ -405,6 +405,56 @@ impl TrustEngine {
             security,
         })
     }
+
+    /// Re-render a document only if it has been mutated (dirty flags set).
+    /// This is the incremental re-render path used after JS mutations.
+    /// Returns `Some(EnginePage)` if re-rendering occurred, `None` if the
+    /// document was clean and no work was needed.
+    pub fn rerender_if_dirty(
+        &self,
+        document: &fortrust_dom::Document<'_>,
+        url: &str,
+        author_css: &[&str],
+        cosmetic_css: &[&str],
+        viewport: Viewport,
+        images: fortrust_core::ImageRegistry,
+    ) -> Result<Option<EnginePage>, EngineError> {
+        let maybe_rendered = self.renderer.render_if_dirty(
+            document, author_css, cosmetic_css, viewport, images,
+        )?;
+        let Some(rendered) = maybe_rendered else {
+            return Ok(None);
+        };
+        let security = SecurityReport::for_render(
+            PageSource::Cache, 0, &rendered, false, 0, 0, 0, 0,
+        );
+        let title = title_from_html_or_url("", url);
+        Ok(Some(EnginePage { title, url: url.to_owned(), rendered, security }))
+    }
+
+    /// Re-render with damage tracking. Returns the updated page and the
+    /// damage rectangles that were repainted.
+    pub fn rerender_with_damage(
+        &self,
+        document: &fortrust_dom::Document<'_>,
+        url: &str,
+        author_css: &[&str],
+        cosmetic_css: &[&str],
+        viewport: Viewport,
+        images: fortrust_core::ImageRegistry,
+    ) -> Result<(EnginePage, Vec<EngineRect>), EngineError> {
+        let (rendered, damage_rects) = self.renderer.render_with_damage_tracking(
+            document, author_css, cosmetic_css, viewport, images,
+        )?;
+        let security = SecurityReport::for_render(
+            PageSource::Cache, 0, &rendered, false, 0, 0, 0, 0,
+        );
+        let title = title_from_html_or_url("", url);
+        Ok((
+            EnginePage { title, url: url.to_owned(), rendered, security },
+            damage_rects,
+        ))
+    }
 }
 
 #[cfg(feature = "javascript")]
@@ -420,12 +470,13 @@ fn render_with_javascript(
     use fortrust_dom::DomArena;
     use fortrust_js::{EventLoop, JsRuntime, WebApiRegistry};
 
-    let arena = Box::leak(Box::new(DomArena::new()));
+    let arena: &'static DomArena = Box::leak(Box::new(DomArena::new()));
     let document = fortrust_dom::parse_html(arena, html)?;
     let mut event_loop = EventLoop::new();
     let mut js = JsRuntime::new()
         .with_origin(url)
-        .with_registry(WebApiRegistry::new());
+        .with_registry(WebApiRegistry::new())
+        .with_arena(arena);
     js.initialize(&mut event_loop)?;
 
     // Safety: the arena is intentionally leaked so it lives forever.

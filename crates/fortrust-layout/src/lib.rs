@@ -1,6 +1,60 @@
 use fortrust_core::ImageRegistry;
 use fortrust_dom::{NodeKind, NodeRef};
-use fortrust_style::{ComputedStyle, Display, Length, Overflow, StyleEngine};
+use fortrust_style::{ComputedStyle, Display, FontWeight, Length, Overflow, StyleEngine, WhiteSpace};
+
+// ── Text measurement types ─────────────────────────────────────────────────────
+
+/// Metrics returned by text measurement, describing the laid-out text dimensions.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct TextMetrics {
+    /// Total width of the text layout (may be less than max_width).
+    pub width: f32,
+    /// Total height of the text layout (all lines).
+    pub height: f32,
+    /// Number of lines the text was broken into.
+    pub line_count: usize,
+    /// Baseline offset from top of the first line.
+    pub baseline: f32,
+}
+
+/// Cached text layout information stored per text node for paint-phase reuse.
+#[derive(Debug, Clone, PartialEq)]
+pub struct TextLayout {
+    /// The measured metrics for this text node.
+    pub metrics: TextMetrics,
+    /// Font family used for measurement.
+    pub font_family: String,
+    /// Font size in px used for measurement.
+    pub font_size_px: f32,
+    /// Font weight (numeric) used for measurement.
+    pub font_weight: u16,
+    /// Max width constraint used for measurement (None = unconstrained).
+    pub max_width: Option<f32>,
+}
+
+/// Trait for measuring text dimensions using actual font metrics.
+///
+/// Implement this trait to provide real text shaping and measurement
+/// (e.g. via cosmic-text) to the layout engine, replacing heuristic-based
+/// character-count × average-width calculations.
+pub trait TextMeasurer {
+    /// Measure text laid out within an optional max width constraint.
+    ///
+    /// Returns the computed metrics including width, height, line count, and baseline.
+    /// The implementation should shape and layout the text (respecting word wrapping
+    /// when `max_width` is provided) but does NOT need to rasterize it.
+    fn measure_text(
+        &mut self,
+        text: &str,
+        font_family: &str,
+        font_size: f32,
+        font_weight: u16,
+        max_width: Option<f32>,
+    ) -> TextMetrics;
+
+    /// Returns the natural line height for a font at the given size.
+    fn line_height(&mut self, font_family: &str, font_size: f32) -> f32;
+}
 
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct Rect {
@@ -117,6 +171,8 @@ pub struct LayoutBox {
     pub overflow_clip: Option<Rect>,
     pub z_index: i32,
     pub positioned_offset: Option<(f32, f32)>,
+    /// Cached text layout metrics for this text node (used by paint phase).
+    pub text_layout: Option<TextLayout>,
 }
 
 #[derive(Debug, Clone)]
@@ -196,6 +252,7 @@ impl LayoutEngine {
                     overflow_clip: None,
                     z_index: 0,
                     positioned_offset: None,
+                    text_layout: None,
                 })
             }
             _ => {
@@ -294,6 +351,7 @@ impl LayoutEngine {
                     overflow_clip,
                     z_index: style.z_index,
                     positioned_offset: None,
+                    text_layout: None,
                 })
             }
         }

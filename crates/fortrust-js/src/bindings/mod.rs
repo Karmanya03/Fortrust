@@ -6,3 +6,5 @@ pub mod navigator;
 pub mod storage;
 pub mod timers;
 pub mod screen;
+pub mod websocket;
+pub mod xhr;

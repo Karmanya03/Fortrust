@@ -1,15 +1,80 @@
+pub mod event;
+pub mod form;
+
 use std::borrow::Cow;
 use std::cell::{Cell, RefCell};
 
 use bumpalo::Bump;
 use compact_str::CompactString;
+use event::EventListenerSet;
 use html5ever::interface::{Attribute, QualName};
 use html5ever::tendril::{StrTendril, TendrilSink};
 use html5ever::tree_builder::{ElementFlags, NodeOrText, QuirksMode, TreeSink};
-use html5ever::{ParseOpts, parse_document};
+#[allow(unused_imports)]
+use html5ever::{ParseOpts, namespace_url, ns, parse_document, parse_fragment, LocalName};
 use smallvec::SmallVec;
 
 pub const MAX_HTML_BYTES: usize = 8 * 1024 * 1024;
+
+// ─── Mutation Records ───────────────────────────────────────────────────────
+
+/// Represents the type of DOM mutation that occurred.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum MutationType {
+    ChildList,
+    Attributes,
+    CharacterData,
+}
+
+/// A record of a single DOM mutation, modeled after the W3C MutationRecord.
+#[derive(Debug, Clone)]
+pub struct MutationRecord {
+    pub mutation_type: MutationType,
+    /// Description of the target node (tag name or node type).
+    pub target_description: String,
+    /// Descriptions of added nodes.
+    pub added_nodes: Vec<String>,
+    /// Descriptions of removed nodes.
+    pub removed_nodes: Vec<String>,
+    /// Name of changed attribute, if applicable.
+    pub attribute_name: Option<String>,
+    /// Old value of changed attribute or character data.
+    pub old_value: Option<String>,
+}
+
+/// A log that accumulates MutationRecords. Attach to a document to track changes.
+#[derive(Debug, Default)]
+pub struct MutationLog {
+    records: RefCell<Vec<MutationRecord>>,
+}
+
+impl MutationLog {
+    pub fn new() -> Self {
+        Self {
+            records: RefCell::new(Vec::new()),
+        }
+    }
+
+    pub fn push(&self, record: MutationRecord) {
+        self.records.borrow_mut().push(record);
+    }
+
+    pub fn take_records(&self) -> Vec<MutationRecord> {
+        self.records.replace(Vec::new())
+    }
+
+    pub fn records(&self) -> Vec<MutationRecord> {
+        self.records.borrow().clone()
+    }
+
+    pub fn len(&self) -> usize {
+        self.records.borrow().len()
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.records.borrow().is_empty()
+    }
+}
 
 pub type NodeRef<'arena> = &'arena Node<'arena>;
 
@@ -19,6 +84,10 @@ pub enum DomError {
         limit_bytes: usize,
         actual_bytes: usize,
     },
+    /// Attempted to append a node to itself or one of its own descendants.
+    HierarchyRequest,
+    /// The child node was not found in the specified parent.
+    NotFound,
 }
 
 #[derive(Debug)]
@@ -36,7 +105,29 @@ impl DomArena {
             parent: Cell::new(None),
             children: RefCell::new(SmallVec::new()),
             kind,
+            event_listeners: EventListenerSet::new(),
+            dirty: Cell::new(false),
         })
+    }
+
+    /// Create a new element node with the given tag name (HTML namespace).
+    pub fn create_element<'arena>(&'arena self, tag_name: &str) -> NodeRef<'arena> {
+        self.alloc(NodeKind::Element(ElementData {
+            name: QualName::new(None, ns!(html), LocalName::from(tag_name)),
+            attrs: RefCell::new(SmallVec::new()),
+            template_contents: None,
+            mathml_annotation_xml_integration_point: false,
+        }))
+    }
+
+    /// Create a new text node with the given content.
+    pub fn create_text_node<'arena>(&'arena self, text: &str) -> NodeRef<'arena> {
+        self.alloc(NodeKind::Text(RefCell::new(CompactString::from(text))))
+    }
+
+    /// Create a new comment node with the given content.
+    pub fn create_comment<'arena>(&'arena self, text: &str) -> NodeRef<'arena> {
+        self.alloc(NodeKind::Comment(CompactString::from(text)))
     }
 }
 
@@ -72,6 +163,95 @@ impl<'arena> Document<'arena> {
                 .is_some_and(|element| element.local_name().eq_ignore_ascii_case(tag))
         })
     }
+
+    /// Find all descendant elements matching a simple CSS selector.
+    /// Supports: tag name, `.class`, `#id`, and `tag.class` combinations.
+    pub fn query_selector_all(&self, selector: &str) -> Vec<NodeRef<'arena>> {
+        self.descendants()
+            .into_iter()
+            .filter(|node| matches_simple_selector(node, selector))
+            .collect()
+    }
+
+    /// Find the first descendant element matching a simple CSS selector.
+    pub fn query_selector(&self, selector: &str) -> Option<NodeRef<'arena>> {
+        self.descendants()
+            .into_iter()
+            .find(|node| matches_simple_selector(node, selector))
+    }
+
+    /// Find an element by its `id` attribute.
+    pub fn get_element_by_id(&self, id: &str) -> Option<NodeRef<'arena>> {
+        self.descendants().into_iter().find(|node| {
+            node.as_element()
+                .and_then(|el| el.attr("id"))
+                .is_some_and(|attr| attr == id)
+        })
+    }
+
+    /// Find all elements with the given tag name.
+    pub fn get_elements_by_tag_name(&self, tag: &str) -> Vec<NodeRef<'arena>> {
+        self.descendants()
+            .into_iter()
+            .filter(|node| {
+                node.as_element()
+                    .is_some_and(|el| el.local_name().eq_ignore_ascii_case(tag))
+            })
+            .collect()
+    }
+
+    /// Find all elements with the given class name.
+    pub fn get_elements_by_class_name(&self, class: &str) -> Vec<NodeRef<'arena>> {
+        self.descendants()
+            .into_iter()
+            .filter(|node| {
+                node.as_element()
+                    .and_then(|el| el.attr("class"))
+                    .is_some_and(|c| c.split_whitespace().any(|part| part == class))
+            })
+            .collect()
+    }
+
+    /// Check if any node in the document tree is marked dirty.
+    pub fn is_dirty(&self) -> bool {
+        self.descendants().iter().any(|node| node.dirty.get())
+    }
+
+    /// Clear the dirty flag on all nodes in the tree.
+    pub fn clear_dirty(&self) {
+        self.root.dirty.set(false);
+        for node in self.descendants() {
+            node.dirty.set(false);
+        }
+    }
+
+    /// Collect the bounding rectangles of all dirty subtrees.
+    /// These represent the "damage regions" that need repainting.
+    /// Note: This requires a prior layout to have been computed.
+    pub fn dirty_subtree_roots(&self) -> Vec<NodeRef<'arena>> {
+        let mut roots = Vec::new();
+        self.collect_dirty_roots(self.root, &mut roots);
+        roots
+    }
+
+    fn collect_dirty_roots(&self, node: NodeRef<'arena>, out: &mut Vec<NodeRef<'arena>>) {
+        if node.dirty.get() {
+            // Check if any ancestor is also dirty — if so, this node
+            // is already covered by the ancestor's dirty subtree.
+            let mut ancestor = node.parent.get();
+            while let Some(a) = ancestor {
+                if a.dirty.get() {
+                    return; // Covered by ancestor
+                }
+                ancestor = a.parent.get();
+            }
+            out.push(node);
+            return;
+        }
+        for child in node.children.borrow().iter().copied() {
+            self.collect_dirty_roots(child, out);
+        }
+    }
 }
 
 #[derive(Debug)]
@@ -79,6 +259,10 @@ pub struct Node<'arena> {
     parent: Cell<Option<NodeRef<'arena>>>,
     children: RefCell<SmallVec<[NodeRef<'arena>; 8]>>,
     kind: NodeKind<'arena>,
+    /// Event listeners registered on this node via addEventListener.
+    pub event_listeners: EventListenerSet,
+    /// Dirty flag — set when this node or its subtree has been mutated and needs re-render.
+    pub dirty: Cell<bool>,
 }
 
 impl<'arena> Node<'arena> {
@@ -107,6 +291,47 @@ impl<'arena> Node<'arena> {
         }
     }
 
+    /// Returns a short description of this node (for MutationRecord reporting).
+    pub fn describe(&self) -> String {
+        match &self.kind {
+            NodeKind::Document => "#document".to_string(),
+            NodeKind::Doctype { name, .. } => format!("<!DOCTYPE {name}>"),
+            NodeKind::Element(el) => el.local_name().to_string(),
+            NodeKind::Text(_) => "#text".to_string(),
+            NodeKind::Comment(_) => "#comment".to_string(),
+            NodeKind::ProcessingInstruction { target, .. } => format!("?{target}"),
+            NodeKind::Phantom(_) => "#phantom".to_string(),
+        }
+    }
+
+    /// Check if `candidate` is an ancestor of this node (inclusive).
+    fn is_ancestor_of(&'arena self, candidate: NodeRef<'arena>) -> bool {
+        if std::ptr::eq(self, candidate) {
+            return true;
+        }
+        for child in self.children.borrow().iter() {
+            if child.is_ancestor_of(candidate) {
+                return true;
+            }
+        }
+        false
+    }
+
+    /// Append a child node. If the child already has a parent, it is detached first.
+    /// Returns Err(HierarchyRequest) if appending would create a cycle.
+    pub fn append_child_checked(
+        &'arena self,
+        child: NodeRef<'arena>,
+    ) -> Result<(), DomError> {
+        // Prevent circular references: child must not be an ancestor of self
+        if child.is_ancestor_of(self) {
+            return Err(DomError::HierarchyRequest);
+        }
+        self.append_child(child);
+        Ok(())
+    }
+
+    /// Append child (unchecked, existing API preserved for backward compat).
     pub fn append_child(&'arena self, child: NodeRef<'arena>) {
         // detach child from its current parent
         if let Some(parent) = child.parent() {
@@ -119,9 +344,232 @@ impl<'arena> Node<'arena> {
         self.children.borrow_mut().push(child);
     }
 
+    /// Remove a child from this node. Returns Err(NotFound) if child is not a child of self.
+    pub fn remove_child_checked(
+        &'arena self,
+        child: NodeRef<'arena>,
+    ) -> Result<(), DomError> {
+        let mut children = self.children.borrow_mut();
+        let pos = children.iter().position(|c| std::ptr::eq(*c, child));
+        match pos {
+            Some(i) => {
+                children.remove(i);
+                child.parent.set(None);
+                Ok(())
+            }
+            None => Err(DomError::NotFound),
+        }
+    }
+
+    /// Remove child (unchecked, existing API preserved).
     pub fn remove_child(&'arena self, child: NodeRef<'arena>) {
-        self.children.borrow_mut().retain(|c| !std::ptr::eq(*c, child));
+        self.children
+            .borrow_mut()
+            .retain(|c| !std::ptr::eq(*c, child));
         child.parent.set(None);
+    }
+
+    /// Insert `new_child` before `reference` in this node's children.
+    /// If `reference` is None, appends to the end (same as append_child).
+    /// Returns Err(HierarchyRequest) if it would create a cycle,
+    /// or Err(NotFound) if reference is not a child of self.
+    pub fn insert_before(
+        &'arena self,
+        new_child: NodeRef<'arena>,
+        reference: Option<NodeRef<'arena>>,
+    ) -> Result<(), DomError> {
+        // Prevent circular references
+        if new_child.is_ancestor_of(self) {
+            return Err(DomError::HierarchyRequest);
+        }
+
+        let Some(ref_node) = reference else {
+            // No reference → append
+            self.append_child(new_child);
+            return Ok(());
+        };
+
+        // Verify reference is a child of self
+        {
+            let children = self.children.borrow();
+            if !children.iter().any(|c| std::ptr::eq(*c, ref_node)) {
+                return Err(DomError::NotFound);
+            }
+        }
+
+        // Detach new_child from current parent
+        if let Some(parent) = new_child.parent() {
+            parent
+                .children
+                .borrow_mut()
+                .retain(|c| !std::ptr::eq(*c, new_child));
+        }
+        new_child.parent.set(Some(self));
+
+        // Re-find index (may have shifted if new_child was already a child of self)
+        let mut children = self.children.borrow_mut();
+        let insert_idx = children
+            .iter()
+            .position(|c| std::ptr::eq(*c, ref_node))
+            .unwrap_or(children.len());
+        children.insert(insert_idx, new_child);
+        Ok(())
+    }
+
+    /// Replace `old_child` with `new_child`. Returns Err(NotFound) if old_child is not here,
+    /// or Err(HierarchyRequest) if it would create a cycle.
+    pub fn replace_child(
+        &'arena self,
+        new_child: NodeRef<'arena>,
+        old_child: NodeRef<'arena>,
+    ) -> Result<NodeRef<'arena>, DomError> {
+        if new_child.is_ancestor_of(self) {
+            return Err(DomError::HierarchyRequest);
+        }
+
+        // Verify old_child is a child of self
+        {
+            let children = self.children.borrow();
+            if !children.iter().any(|c| std::ptr::eq(*c, old_child)) {
+                return Err(DomError::NotFound);
+            }
+        }
+
+        // Detach new_child from its current parent
+        if let Some(parent) = new_child.parent() {
+            parent
+                .children
+                .borrow_mut()
+                .retain(|c| !std::ptr::eq(*c, new_child));
+        }
+
+        // Replace at the position (re-find since removal above may shift)
+        let mut children = self.children.borrow_mut();
+        let replace_idx = children
+            .iter()
+            .position(|c| std::ptr::eq(*c, old_child))
+            .ok_or(DomError::NotFound)?;
+        children[replace_idx] = new_child;
+        new_child.parent.set(Some(self));
+        old_child.parent.set(None);
+        Ok(old_child)
+    }
+
+    /// Remove all children and set the text content of this node.
+    pub fn set_text_content(&'arena self, arena: &'arena DomArena, text: &str) {
+        // Detach all existing children
+        let old_children = self.children.replace(SmallVec::new());
+        for child in &old_children {
+            child.parent.set(None);
+        }
+        // If text is non-empty, create a text node child
+        if !text.is_empty() {
+            let text_node = arena.create_text_node(text);
+            text_node.parent.set(Some(self));
+            self.children.borrow_mut().push(text_node);
+        }
+        self.mark_dirty();
+    }
+
+    /// Mark this node and all its ancestors as dirty (needing re-render).
+    pub fn mark_dirty(&'arena self) {
+        self.dirty.set(true);
+        let mut current = self.parent.get();
+        while let Some(node) = current {
+            if node.dirty.get() {
+                break; // Already marked
+            }
+            node.dirty.set(true);
+            current = node.parent.get();
+        }
+    }
+
+    /// Check and clear the dirty flag.
+    pub fn take_dirty(&self) -> bool {
+        let was_dirty = self.dirty.get();
+        self.dirty.set(false);
+        was_dirty
+    }
+
+    /// Count depth in the tree (number of ancestors).
+    pub fn depth(&'arena self) -> usize {
+        let mut depth = 0usize;
+        let mut current = self.parent.get();
+        while let Some(node) = current {
+            depth += 1;
+            current = node.parent.get();
+        }
+        depth
+    }
+
+    /// Parse an HTML fragment and replace this node's children with the parsed nodes.
+    pub fn set_inner_html(&'arena self, arena: &'arena DomArena, html: &str) {
+        // Detach all existing children
+        let old_children = self.children.replace(SmallVec::new());
+        for child in &old_children {
+            child.parent.set(None);
+        }
+
+        if html.is_empty() {
+            self.mark_dirty();
+            return;
+        }
+
+        // Determine context element for fragment parsing
+        let context_name = match &self.kind {
+            NodeKind::Element(el) => el.name.clone(),
+            _ => QualName::new(None, ns!(html), LocalName::from("body")),
+        };
+
+        // Parse the fragment
+        let sink = DomBuilder::new(arena);
+        let dom = parse_fragment(sink, ParseOpts::default(), context_name, Vec::new(), false)
+            .one(html);
+
+        // Move the parsed children from the fragment root's <html> into self
+        // Fragment parsing creates a document with the parsed nodes inside
+        let parsed_children = collect_fragment_children(dom.root);
+        for child in parsed_children {
+            child.parent.set(Some(self));
+            self.children.borrow_mut().push(child);
+        }
+        self.mark_dirty();
+    }
+
+    /// Append child and mark dirty.
+    pub fn append_child_dirty(&'arena self, child: NodeRef<'arena>) {
+        self.append_child(child);
+        self.mark_dirty();
+    }
+
+    /// Remove child and mark dirty.
+    pub fn remove_child_dirty(&'arena self, child: NodeRef<'arena>) {
+        self.remove_child(child);
+        self.mark_dirty();
+    }
+
+    /// Find the first descendant element matching a simple CSS selector.
+    pub fn query_selector(&self, selector: &str) -> Option<NodeRef<'arena>> {
+        collect_descendants_list(self).into_iter().find(|node| matches_simple_selector(node, selector))
+    }
+
+    /// Find all descendant elements matching a simple CSS selector.
+    pub fn query_selector_all(&self, selector: &str) -> Vec<NodeRef<'arena>> {
+        collect_descendants_list(self).into_iter().filter(|node| matches_simple_selector(node, selector)).collect()
+    }
+
+    /// Find all elements with the given tag name among descendants.
+    pub fn get_elements_by_tag_name(&self, tag: &str) -> Vec<NodeRef<'arena>> {
+        collect_descendants_list(self).into_iter().filter(|node| {
+            node.as_element().is_some_and(|el| el.local_name().eq_ignore_ascii_case(tag))
+        }).collect()
+    }
+
+    /// Find all elements with the given class name among descendants.
+    pub fn get_elements_by_class_name(&self, class: &str) -> Vec<NodeRef<'arena>> {
+        collect_descendants_list(self).into_iter().filter(|node| {
+            node.as_element().and_then(|el| el.attr("class")).is_some_and(|c| c.split_whitespace().any(|part| part == class))
+        }).collect()
     }
 }
 
@@ -479,11 +927,113 @@ fn attrs_to_smallvec(attrs: Vec<Attribute>) -> SmallVec<[(CompactString, Compact
         .collect()
 }
 
+/// Build the ancestor chain from a node up to the root (inclusive).
+/// Returns nodes ordered from the given node up to root.
+pub fn ancestor_chain<'arena>(node: NodeRef<'arena>) -> Vec<NodeRef<'arena>> {
+    let mut chain = Vec::new();
+    let mut current: Option<NodeRef<'arena>> = Some(node);
+    while let Some(n) = current {
+        chain.push(n);
+        current = n.parent.get();
+    }
+    chain
+}
+
 fn collect_descendants<'arena>(node: NodeRef<'arena>, out: &mut Vec<NodeRef<'arena>>) {
     for child in node.children.borrow().iter().copied() {
         out.push(child);
         collect_descendants(child, out);
     }
+}
+
+/// Collect all descendants of a node (not including the node itself).
+fn collect_descendants_list<'arena>(node: &Node<'arena>) -> Vec<NodeRef<'arena>> {
+    let mut out = Vec::new();
+    for child in node.children.borrow().iter().copied() {
+        out.push(child);
+        collect_descendants(child, &mut out);
+    }
+    out
+}
+
+/// Match a node against a simple CSS selector string.
+/// Supports: tag, `.class`, `#id`, `tag.class`, `tag#id`, `.class1.class2`.
+fn matches_simple_selector(node: NodeRef<'_>, selector: &str) -> bool {
+    let selector = selector.trim();
+    if selector.is_empty() || selector == "*" {
+        return true;
+    }
+
+    let Some(element) = node.as_element() else {
+        return false;
+    };
+
+    let mut remaining = selector;
+    let mut tag_required: Option<&str> = None;
+
+    // Parse tag name at start
+    if !remaining.starts_with('.') && !remaining.starts_with('#') {
+        let end = remaining
+            .find(|c: char| c == '.' || c == '#')
+            .unwrap_or(remaining.len());
+        if end > 0 {
+            tag_required = Some(&remaining[..end]);
+            remaining = &remaining[end..];
+        }
+    }
+
+    // Check tag
+    if let Some(tag) = tag_required {
+        if !element.local_name().eq_ignore_ascii_case(tag) {
+            return false;
+        }
+    }
+
+    // Parse remaining .class and #id parts
+    let mut required_classes: Vec<&str> = Vec::new();
+    let mut required_id: Option<&str> = None;
+
+    while !remaining.is_empty() {
+        if let Some(rest) = remaining.strip_prefix('.') {
+            let end = rest
+                .find(|c: char| c == '.' || c == '#')
+                .unwrap_or(rest.len());
+            if end > 0 {
+                required_classes.push(&rest[..end]);
+            }
+            remaining = &rest[end..];
+        } else if let Some(rest) = remaining.strip_prefix('#') {
+            let end = rest
+                .find(|c: char| c == '.' || c == '#')
+                .unwrap_or(rest.len());
+            if end > 0 {
+                required_id = Some(&rest[..end]);
+            }
+            remaining = &rest[end..];
+        } else {
+            break;
+        }
+    }
+
+    // Check ID
+    if let Some(id) = required_id {
+        if element.attr("id").as_deref() != Some(id) {
+            return false;
+        }
+    }
+
+    // Check classes
+    if !required_classes.is_empty() {
+        let class_attr = element.attr("class").unwrap_or_default();
+        let node_classes: Vec<&str> = class_attr.split_whitespace().collect();
+        for required in &required_classes {
+            if !node_classes.iter().any(|c| *c == *required) {
+                return false;
+            }
+        }
+    }
+
+    true
 }
 
 fn collect_text(node: NodeRef<'_>, out: &mut String) {
@@ -494,6 +1044,52 @@ fn collect_text(node: NodeRef<'_>, out: &mut String) {
     for child in node.children.borrow().iter().copied() {
         collect_text(child, out);
     }
+}
+
+/// After fragment parsing, collect the actual content nodes.
+/// Fragment parsing produces a document node whose children contain the parsed content.
+/// We recursively collect all leaf content nodes from the tree.
+fn collect_fragment_children<'arena>(root: NodeRef<'arena>) -> Vec<NodeRef<'arena>> {
+    // Fragment parsing wraps content in <html><body>...</body></html>
+    // We need to find the deepest container that holds the user's content.
+    // Strategy: walk down html > body and return its children, or just
+    // return the root's direct children if the structure differs.
+    let children = root.children.borrow().clone();
+
+    // Look for <html> element
+    for child in &children {
+        if let NodeKind::Element(el) = &child.kind {
+            if el.local_name().eq_ignore_ascii_case("html") {
+                // Look for <body> inside <html>
+                let html_children = child.children.borrow().clone();
+                for html_child in &html_children {
+                    if let NodeKind::Element(body_el) = &html_child.kind {
+                        if body_el.local_name().eq_ignore_ascii_case("body") {
+                            let body_children = html_child.children.borrow().clone();
+                            // Detach from body parent
+                            for bc in &body_children {
+                                bc.parent.set(None);
+                            }
+                            return body_children.to_vec();
+                        }
+                    }
+                }
+                // No body found, return html's children
+                let html_children_vec = html_children.to_vec();
+                for hc in &html_children_vec {
+                    hc.parent.set(None);
+                }
+                return html_children_vec;
+            }
+        }
+    }
+
+    // No html wrapper, return direct children
+    let result = children.to_vec();
+    for c in &result {
+        c.parent.set(None);
+    }
+    result
 }
 
 #[cfg(test)]

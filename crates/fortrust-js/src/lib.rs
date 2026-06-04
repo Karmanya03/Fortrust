@@ -2,10 +2,12 @@ pub mod bindings;
 mod event_loop;
 mod runtime;
 mod hooks;
+pub mod sandbox;
 pub use hooks::{set_title_handler, set_event_handler};
 
 pub use event_loop::{EventLoop, TaskQueue, TimerHandle, TimerKind};
 pub use runtime::{JsError, JsRuntime, JsValue, WebApiRegistry};
+pub use sandbox::{SandboxConfig, SandboxedRuntime, SandboxResult};
 
 use std::cell::RefCell;
 use std::rc::Rc;

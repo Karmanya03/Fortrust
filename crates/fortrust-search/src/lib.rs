@@ -99,21 +99,22 @@ impl SearchCache {
     async fn get(&self, key: &str) -> Option<Vec<SearchResult>> {
         let mut state = self.state.lock().await;
         let now = Instant::now();
-        let Some(entry) = state.entries.get(key) else {
-            return None;
-        };
-        if now > entry.expires_at {
-            state.entries.remove(key);
+        if let Some(entry) = state.entries.get(key) {
+            if now > entry.expires_at {
+                state.entries.remove(key);
+                if let Some(idx) = state.order.iter().position(|k| k == key) {
+                    state.order.remove(idx);
+                }
+                return None;
+            }
+            let results = entry.results.clone();
             if let Some(idx) = state.order.iter().position(|k| k == key) {
                 state.order.remove(idx);
             }
-            return None;
+            state.order.push_back(key.to_owned());
+            return Some(results);
         }
-        if let Some(idx) = state.order.iter().position(|k| k == key) {
-            state.order.remove(idx);
-        }
-        state.order.push_back(key.to_owned());
-        Some(entry.results.clone())
+        None
     }
 
     async fn insert(&self, key: String, results: Vec<SearchResult>) {

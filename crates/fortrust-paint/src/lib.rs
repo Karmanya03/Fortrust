@@ -1,6 +1,10 @@
+pub mod text;
+
+pub use text::{TextRenderer, TextRun, RasterizedText};
+
 use fortrust_core::ImageRegistry;
 use fortrust_layout::{BoxKind, LayoutBox, LayoutTree, Rect};
-use fortrust_style::{BorderStyle, Color, FontWeight, FontStyle, Length, OutlineStyle};
+use fortrust_style::{BorderStyle, Color, FontWeight, FontStyle, Length, OutlineStyle, CssTransform};
 
 #[derive(Debug, Clone, PartialEq)]
 pub enum DisplayCommand {
@@ -59,6 +63,16 @@ pub enum DisplayCommand {
         color: Color,
         style: OutlineStyle,
     },
+    /// Push a 2D affine transform onto the transform stack.
+    /// The matrix is [a, b, c, d, tx, ty] mapping (x,y) → (ax+cy+tx, bx+dy+ty).
+    PushTransform {
+        matrix: [f32; 6],
+        /// Center point for the transform (element center for rotation/scale).
+        origin_x: f32,
+        origin_y: f32,
+    },
+    /// Pop the most recently pushed transform from the stack.
+    PopTransform,
     ClipPush(Rect),
     ClipPop,
 }
@@ -148,6 +162,19 @@ impl Painter {
 
 fn paint_box(layout_box: &LayoutBox, images: &ImageRegistry, list: &mut DisplayList, options: PaintOptions) {
     let visible = is_visible_rect(layout_box.rect);
+    let has_transform = !layout_box.style.transform.is_none();
+
+    // Push transform if this element has one
+    if has_transform {
+        let matrix = layout_box.style.transform.combined_matrix();
+        let origin_x = layout_box.rect.x + layout_box.rect.width / 2.0;
+        let origin_y = layout_box.rect.y + layout_box.rect.height / 2.0;
+        list.push(DisplayCommand::PushTransform {
+            matrix,
+            origin_x,
+            origin_y,
+        });
+    }
 
     if visible {
         if layout_box.style.background_color.a > 0 {
@@ -259,6 +286,11 @@ fn paint_box(layout_box: &LayoutBox, images: &ImageRegistry, list: &mut DisplayL
 
     for child in &layout_box.children {
         paint_box(child, images, list, options);
+    }
+
+    // Pop transform if we pushed one
+    if has_transform {
+        list.push(DisplayCommand::PopTransform);
     }
 }
 

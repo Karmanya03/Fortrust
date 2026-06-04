@@ -1,15 +1,18 @@
-#![allow(dead_code, unused_imports, unused_variables)]
+use std::cell::RefCell;
 
 use fortrust_core::TabId;
 use fortrust_dom::DomArena;
-use fortrust_ipc::{BincodeCodec, BrowserToRenderer, RendererToBrowser};
-use fortrust_js::{EventLoop, JsRuntime, WebApiRegistry, new_shared_runtime};
-use fortrust_layout::{LayoutConstraints, LayoutEngine};
+use fortrust_ipc::RendererToBrowser;
+use fortrust_js::EventLoop;
 use fortrust_net::NetworkClient;
-use fortrust_paint::{DisplayCommand, PaintOptions, Painter};
+use fortrust_paint::{DisplayCommand, TextRenderer};
 use fortrust_renderer::{RenderedPage, StaticRenderer};
-use fortrust_style::{StyleEngine, Stylesheet};
-use tracing::{debug, error, info, warn};
+use fortrust_style::{FontWeight, FontStyle};
+use tracing::info;
+
+thread_local! {
+    static TEXT_RENDERER: RefCell<TextRenderer> = RefCell::new(TextRenderer::new());
+}
 
 struct RendererInstance {
     tab_id: TabId,
@@ -140,9 +143,18 @@ fn render_page_frame(page: &RenderedPage, width: u32, height: u32, title: &str) 
     }
 
     let mut clip_stack = vec![fortrust_layout::Rect { x: 0.0, y: 0.0, width: width as f32, height: height as f32 }];
+    let mut transform_stack: Vec<([f32; 6], f32, f32)> = vec![([1.0, 0.0, 0.0, 1.0, 0.0, 0.0], 0.0, 0.0)];
 
     for command in page.display_list.commands() {
         match command {
+            DisplayCommand::PushTransform { matrix, origin_x, origin_y } => {
+                transform_stack.push((*matrix, *origin_x, *origin_y));
+            }
+            DisplayCommand::PopTransform => {
+                if transform_stack.len() > 1 {
+                    transform_stack.pop();
+                }
+            }
             DisplayCommand::ClipPush(rect) => {
                 let next = intersect_rect(*clip_stack.last().unwrap(), *rect);
                 clip_stack.push(next);
@@ -171,16 +183,19 @@ fn render_page_frame(page: &RenderedPage, width: u32, height: u32, title: &str) 
                 let outer = fortrust_layout::Rect { x: rect.x - *outline_width, y: rect.y - *outline_width, width: rect.width + *outline_width * 2.0, height: rect.height + *outline_width * 2.0 };
                 paint_rect(&mut pixels, width, height, clip, outer, color_to_rgba(*color));
             }
-            DisplayCommand::DrawText { rect, text, color, .. } => {
+            DisplayCommand::DrawText { rect, text, color, font_size_px, font_weight, font_style } => {
                 let clip = clip_stack.last().copied().unwrap();
-                paint_text_block(&mut pixels, width, height, clip, *rect, text, color_to_rgba(*color));
+                if !text.is_empty() {
+                    render_text_cosmic(&mut pixels, width, height, clip, *rect, text, *font_size_px, *font_weight, *font_style, color_to_rgba(*color));
+                }
             }
             DisplayCommand::DrawImage { rect, image_id, natural_width, natural_height, alt } => {
                 let clip = clip_stack.last().copied().unwrap();
                 if let Some(img) = page.images.get(*image_id) {
                     paint_image(&mut pixels, width, height, clip, *rect, img, *natural_width, *natural_height);
                 } else if !alt.is_empty() {
-                    paint_text_block(&mut pixels, width, height, clip, *rect, &format!("[image: {alt}]"), [160, 160, 160, 255]);
+                    let alt_text = format!("[image: {alt}]");
+                    render_text_cosmic(&mut pixels, width, height, clip, *rect, &alt_text, 12.0, FontWeight::Normal, FontStyle::Normal, [160, 160, 160, 255]);
                 } else {
                     paint_rect(&mut pixels, width, height, clip, *rect, [40, 44, 52, 255]);
                 }
@@ -225,18 +240,16 @@ fn paint_title_banner(pixels: &mut [u8], width: usize, height: usize, label: &st
         }
     }
 
-    let text_width = label.len().saturating_mul(7).min(width.saturating_sub(16));
-    let start_x = 8usize.min(width.saturating_sub(1));
-    let start_y = (banner_height / 2).saturating_sub(6);
-    for y in 0..12.min(height) {
-        for x in 0..text_width {
-            let idx = ((start_y + y).min(height.saturating_sub(1)) * width + (start_x + x).min(width.saturating_sub(1))) * 4;
-            pixels[idx] = 77;
-            pixels[idx + 1] = 159;
-            pixels[idx + 2] = 255;
-            pixels[idx + 3] = 255;
-        }
-    }
+    let banner_fb_width = width;
+    let banner_fb_height = height;
+    let banner_rect = fortrust_layout::Rect {
+        x: 8.0,
+        y: (banner_height as f32 / 2.0) - 8.0,
+        width: (label.len() as f32 * 9.0).min(width as f32 - 16.0),
+        height: 16.0,
+    };
+    let clip = fortrust_layout::Rect { x: 0.0, y: 0.0, width: width as f32, height: banner_height as f32 };
+    render_text_cosmic(pixels, banner_fb_width, banner_fb_height, clip, banner_rect, label, 14.0, FontWeight::Normal, FontStyle::Normal, [77, 159, 255, 255]);
 }
 
 fn paint_rect(pixels: &mut [u8], width: usize, height: usize, clip: fortrust_layout::Rect, rect: fortrust_layout::Rect, rgba: [u8; 4]) {
@@ -253,17 +266,23 @@ fn paint_rect(pixels: &mut [u8], width: usize, height: usize, clip: fortrust_lay
     }
 }
 
-fn paint_text_block(pixels: &mut [u8], width: usize, height: usize, clip: fortrust_layout::Rect, rect: fortrust_layout::Rect, text: &str, rgba: [u8; 4]) {
-    let char_width = (rect.width / text.chars().count().max(1) as f32).max(4.0);
-    for (index, _) in text.chars().enumerate() {
-        let char_rect = fortrust_layout::Rect {
-            x: rect.x + index as f32 * char_width,
-            y: rect.y,
-            width: (char_width * 0.72).max(3.0),
-            height: rect.height.max(8.0),
-        };
-        paint_rect(pixels, width, height, clip, char_rect, rgba);
-    }
+fn render_text_cosmic(
+    pixels: &mut [u8],
+    fb_width: usize,
+    fb_height: usize,
+    clip: fortrust_layout::Rect,
+    rect: fortrust_layout::Rect,
+    text: &str,
+    font_size: f32,
+    font_weight: FontWeight,
+    font_style: FontStyle,
+    rgba: [u8; 4],
+) {
+    TEXT_RENDERER.with(|tr| {
+        tr.borrow_mut().render_into(
+            pixels, fb_width, fb_height, clip, rect, text, font_size, font_weight, font_style, rgba,
+        );
+    });
 }
 
 /// Render a decoded image into the given rect, scaling bilinearly. The image

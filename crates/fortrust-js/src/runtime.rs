@@ -52,6 +52,7 @@ pub struct WebApiRegistry {
     fetch_enabled: bool,
     storage_enabled: bool,
     dom_bridge_enabled: bool,
+    websocket_enabled: bool,
     allowed_origins: Vec<String>,
     max_heap_bytes: usize,
     max_execution_ms: u64,
@@ -65,6 +66,7 @@ impl WebApiRegistry {
             fetch_enabled: true,
             storage_enabled: true,
             dom_bridge_enabled: true,
+            websocket_enabled: true,
             allowed_origins: Vec::new(),
             max_heap_bytes: 64 * 1024 * 1024,
             max_execution_ms: 10_000,
@@ -73,6 +75,41 @@ impl WebApiRegistry {
 
     pub fn with_console(mut self, enabled: bool) -> Self {
         self.console_enabled = enabled;
+        self
+    }
+
+    pub fn with_timers(mut self, enabled: bool) -> Self {
+        self.timers_enabled = enabled;
+        self
+    }
+
+    pub fn with_fetch(mut self, enabled: bool) -> Self {
+        self.fetch_enabled = enabled;
+        self
+    }
+
+    pub fn with_storage(mut self, enabled: bool) -> Self {
+        self.storage_enabled = enabled;
+        self
+    }
+
+    pub fn with_dom_bridge(mut self, enabled: bool) -> Self {
+        self.dom_bridge_enabled = enabled;
+        self
+    }
+
+    pub fn with_websocket(mut self, enabled: bool) -> Self {
+        self.websocket_enabled = enabled;
+        self
+    }
+
+    pub fn with_max_heap(mut self, bytes: usize) -> Self {
+        self.max_heap_bytes = bytes;
+        self
+    }
+
+    pub fn with_max_execution_time(mut self, ms: u64) -> Self {
+        self.max_execution_ms = ms;
         self
     }
 
@@ -104,6 +141,7 @@ pub struct JsRuntime {
     registry: WebApiRegistry,
     origin: String,
     network: Option<fortrust_net::NetworkClient>,
+    arena: Option<&'static fortrust_dom::DomArena>,
 }
 
 impl JsRuntime {
@@ -117,6 +155,7 @@ impl JsRuntime {
             registry: WebApiRegistry::new(),
             origin: String::new(),
             network: None,
+            arena: None,
         }
     }
 
@@ -135,9 +174,18 @@ impl JsRuntime {
         self
     }
 
+    pub fn with_arena(mut self, arena: &'static fortrust_dom::DomArena) -> Self {
+        self.arena = Some(arena);
+        self
+    }
+
+    pub fn arena(&self) -> Option<&'static fortrust_dom::DomArena> {
+        self.arena
+    }
+
     pub fn attach_document(&mut self, document: &Document<'static>) -> Result<(), JsError> {
         if self.registry.dom_bridge_enabled {
-            bindings::dom_api::register(&mut self.context, document)?;
+            bindings::dom_api::register(&mut self.context, document, self.arena)?;
         }
         // Expose `document.title` as a proper accessor that delegates to getTitle/setTitle.
         let _ = self.eval(
@@ -173,6 +221,14 @@ impl JsRuntime {
             )?;
         }
 
+        // XMLHttpRequest — legacy HTTP request API
+        bindings::xhr::register(
+            &mut self.context,
+            origin.clone(),
+            event_loop,
+            self.network.clone(),
+        )?;
+
         bindings::navigator::register(&mut self.context)?;
         bindings::screen::register(&mut self.context)?;
 
@@ -180,6 +236,10 @@ impl JsRuntime {
 
         if registry.storage_enabled {
             bindings::storage::register(&mut self.context)?;
+        }
+
+        if registry.websocket_enabled {
+            bindings::websocket::register(&mut self.context)?;
         }
 
         debug!("JS runtime initialized for origin: {}", origin);

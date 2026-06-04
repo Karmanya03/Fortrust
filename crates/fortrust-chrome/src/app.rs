@@ -2207,7 +2207,8 @@ impl FortrustApp {
                         );
                     }
                 }
-                DisplayCommand::ClipPush(_) | DisplayCommand::ClipPop => {}
+                DisplayCommand::ClipPush(_) | DisplayCommand::ClipPop
+                | DisplayCommand::PushTransform { .. } | DisplayCommand::PopTransform => {}
             }
         }
     }
