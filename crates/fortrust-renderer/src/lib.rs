@@ -1,7 +1,11 @@
+use std::cell::RefCell;
+use std::collections::HashMap;
+
 use fortrust_core::ImageRegistry;
 use fortrust_dom::{Document, DomArena, DomError, NodeRef, parse_html};
 use fortrust_layout::{LayoutConstraints, LayoutEngine, LayoutTree, Rect};
 use fortrust_paint::{DisplayList, PaintOptions, Painter};
+use fortrust_style::animation::AnimationController;
 use fortrust_style::{Color, StyleEngine, StyleError, Stylesheet};
 
 #[derive(Debug, Clone, PartialEq)]
@@ -45,12 +49,40 @@ pub struct RenderedPage {
 #[derive(Debug, Clone, Default)]
 pub struct StaticRenderer {
     painter: Painter,
+    /// Cached state for animation-driven re-rendering.
+    anim_state: RefCell<Option<Box<AnimRenderCache>>>,
+}
+
+/// Cached state for animation-driven re-rendering.
+#[derive(Clone)]
+struct AnimRenderCache {
+    author_css: Vec<String>,
+    cosmetic_css: Vec<String>,
+    viewport: Viewport,
+    images: ImageRegistry,
+    layout: LayoutTree,
+    viewport_fill: Color,
+    clock: f32,
+    controllers: HashMap<String, AnimationController>,
+    keyframes: Vec<fortrust_style::KeyframesRule>,
+}
+
+impl std::fmt::Debug for AnimRenderCache {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("AnimRenderCache")
+            .field("viewport", &self.viewport)
+            .field("clock", &self.clock)
+            .field("controller_count", &self.controllers.len())
+            .field("keyframe_count", &self.keyframes.len())
+            .finish()
+    }
 }
 
 impl StaticRenderer {
     pub fn new() -> Self {
         Self {
             painter: Painter::new(),
+            anim_state: RefCell::new(None),
         }
     }
 
@@ -226,6 +258,239 @@ impl StaticRenderer {
 
         document.clear_dirty();
         Ok((page, damage_rects))
+    }
+
+    /// Render and cache animation state. After this, `tick_animations` can be
+    /// called to advance animation time and produce updated frames.
+    pub fn render_with_animation_cache(
+        &self,
+        html: &str,
+        author_css: &[&str],
+        cosmetic_css: &[&str],
+        viewport: Viewport,
+        images: ImageRegistry,
+    ) -> Result<RenderedPage, RenderError> {
+        let arena = DomArena::new();
+        let document = parse_html(&arena, html)?;
+
+        let mut style = StyleEngine::new();
+        for embedded_css in embedded_styles(&document) {
+            style.add_stylesheet(Stylesheet::parse(&embedded_css)?);
+        }
+        for css in author_css {
+            style.add_stylesheet(Stylesheet::parse(css)?);
+        }
+        for css in cosmetic_css {
+            style.add_stylesheet(Stylesheet::parse(css)?);
+        }
+
+        let viewport_fill = document
+            .first_element_by_tag("html")
+            .map(|n| style.compute_style(n, None))
+            .filter(|s| s.background_color.a > 0)
+            .map(|s| s.background_color)
+            .or_else(|| {
+                document
+                    .first_element_by_tag("body")
+                    .map(|n| style.compute_style(n, None))
+                    .filter(|s| s.background_color.a > 0)
+                    .map(|s| s.background_color)
+            })
+            .unwrap_or(Color::TRANSPARENT);
+
+        let root = render_root(&document).ok_or(RenderError::EmptyDocument)?;
+
+        // Initialize animation controllers for elements with animation/transition
+        let mut controllers = HashMap::new();
+        let clock = 0.0;
+        let keyframes = style.keyframes.clone();
+        AnimationTracker::scan(&mut style, &document, &mut controllers);
+
+        let layout = LayoutEngine::new(style)
+            .layout(
+                root,
+                LayoutConstraints {
+                    viewport_width: viewport.width,
+                    viewport_height: viewport.height,
+                    containing_block: None,
+                },
+                &images,
+            )
+            .ok_or(RenderError::EmptyDocument)?;
+
+        let display_list = self.painter.paint(
+            &layout,
+            &images,
+            PaintOptions {
+                viewport: Rect {
+                    x: 0.0,
+                    y: 0.0,
+                    width: viewport.width,
+                    height: viewport.height,
+                },
+                include_debug_borders: false,
+                viewport_fill,
+            },
+        );
+
+        let page = RenderedPage {
+            layout: layout.clone(),
+            display_list,
+            text_content: document.text_content(),
+            parse_error_count: document.parse_errors.len(),
+            injected_css: cosmetic_css.iter().map(|&s| s.to_owned()).collect(),
+            images: images.clone(),
+        };
+
+        *self.anim_state.borrow_mut() = Some(Box::new(AnimRenderCache {
+            author_css: author_css.iter().map(|&s| s.to_owned()).collect(),
+            cosmetic_css: cosmetic_css.iter().map(|&s| s.to_owned()).collect(),
+            viewport,
+            images,
+            layout,
+            viewport_fill,
+            clock,
+            controllers,
+            keyframes,
+        }));
+
+        Ok(page)
+    }
+
+    /// Advance animation time and re-render if any animations are active.
+    /// Returns `Some(RenderedPage)` if the display list changed, `None` if no
+    /// animations were active and nothing was re-rendered.
+    pub fn tick_animations(&self, dt: f32) -> Option<RenderedPage> {
+        let mut cache_borrow = self.anim_state.borrow_mut();
+        let cache = cache_borrow.as_mut()?;
+        cache.clock += dt;
+
+        let mut any_active = false;
+        for (node_name, controller) in &mut cache.controllers {
+            controller.tick(dt);
+            if controller.is_active() {
+                any_active = true;
+            }
+            apply_controller_to_layout(
+                &mut cache.layout,
+                node_name,
+                controller,
+                &cache.keyframes,
+            );
+        }
+
+        if !any_active {
+            return None;
+        }
+
+        let display_list = self.painter.paint(
+            &cache.layout,
+            &cache.images,
+            PaintOptions {
+                viewport: Rect {
+                    x: 0.0,
+                    y: 0.0,
+                    width: cache.viewport.width,
+                    height: cache.viewport.height,
+                },
+                include_debug_borders: false,
+                viewport_fill: cache.viewport_fill,
+            },
+        );
+
+        Some(RenderedPage {
+            layout: cache.layout.clone(),
+            display_list,
+            text_content: String::new(),
+            parse_error_count: 0,
+            injected_css: cache.cosmetic_css.clone(),
+            images: cache.images.clone(),
+        })
+    }
+
+    /// Returns true if there are active animations that need ticking.
+    pub fn has_active_animations(&self) -> bool {
+        self.anim_state
+            .borrow()
+            .as_ref()
+            .is_some_and(|c| c.controllers.values().any(|ctrl| ctrl.is_active()))
+    }
+
+    /// Clear cached animation state.
+    pub fn clear_animation_cache(&self) {
+        *self.anim_state.borrow_mut() = None;
+    }
+}
+
+/// Scans the document for elements with CSS `animation` or `transition`
+/// properties and creates `AnimationController` entries.
+impl AnimationTracker {
+    fn scan(
+        style: &mut StyleEngine,
+        document: &Document<'_>,
+        controllers: &mut HashMap<String, AnimationController>,
+    ) {
+        for node in document.descendants() {
+            let Some(element) = node.as_element() else {
+                continue;
+            };
+            let el_name = element.local_name().to_owned();
+            let computed = style.compute_style(node, None);
+
+            let has_animation = !computed.animations.is_empty();
+            let has_transition = !computed.transitions.is_empty();
+
+            if !has_animation && !has_transition {
+                continue;
+            }
+
+            let mut controller = AnimationController::new();
+
+            for anim in &computed.animations {
+                controller.start_animation(anim.clone());
+            }
+            for trans in &computed.transitions {
+                let property = &trans.property;
+                let val = fortrust_style::animation::AnimatableValue::from_computed_style(
+                    property,
+                    &computed,
+                );
+                controller.start_transition(
+                    property.clone(),
+                    val.clone(),
+                    val,
+                    trans.clone(),
+                );
+            }
+
+            controllers.insert(el_name, controller);
+        }
+    }
+}
+
+struct AnimationTracker;
+
+/// Apply an AnimationController's values to the layout tree for a specific element.
+fn apply_controller_to_layout(
+    layout: &mut LayoutTree,
+    node_name: &str,
+    controller: &AnimationController,
+    keyframes: &[fortrust_style::KeyframesRule],
+) {
+    apply_to_box(&mut layout.root, node_name, controller, keyframes);
+}
+
+fn apply_to_box(
+    box_: &mut fortrust_layout::LayoutBox,
+    target_name: &str,
+    controller: &AnimationController,
+    keyframes: &[fortrust_style::KeyframesRule],
+) {
+    if box_.node_name == target_name {
+        controller.apply_to_style(&mut box_.style, keyframes);
+    }
+    for child in &mut box_.children {
+        apply_to_box(child, target_name, controller, keyframes);
     }
 }
 

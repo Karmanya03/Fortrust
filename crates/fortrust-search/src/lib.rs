@@ -4,6 +4,7 @@ use std::time::{Duration, Instant};
 
 use tokio::sync::Mutex;
 use tokio::task::JoinSet;
+use url::Url;
 
 pub struct FortrustSearch {
     client: reqwest::Client,
@@ -20,6 +21,11 @@ pub struct SearchConfig {
     pub cache_enabled: bool,
     pub cache_max_entries: usize,
     pub cache_ttl_secs: u64,
+    pub strict_result_safety: bool,
+    pub block_non_https_results: bool,
+    pub block_ip_address_hosts: bool,
+    pub block_local_network_hosts: bool,
+    pub strip_result_tracking_params: bool,
 }
 
 impl Default for SearchConfig {
@@ -37,6 +43,11 @@ impl Default for SearchConfig {
             cache_enabled: true,
             cache_max_entries: 128,
             cache_ttl_secs: 300,
+            strict_result_safety: true,
+            block_non_https_results: false,
+            block_ip_address_hosts: true,
+            block_local_network_hosts: true,
+            strip_result_tracking_params: true,
         }
     }
 }
@@ -58,14 +69,46 @@ pub enum SafeSearchMode {
     Strict,
 }
 
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum ResultSafety {
+    Trusted,
+    Neutral,
+    Warning,
+    Blocked,
+}
+
 #[derive(Clone)]
 pub struct SearchResult {
     pub title: String,
     pub url: String,
+    pub display_url: String,
+    pub host: String,
     pub archive_url: Option<String>,
     pub snippet: String,
     pub source_backend: SearchBackend,
     pub relevance_score: f32,
+    pub privacy_score: u8,
+    pub safety: ResultSafety,
+    pub safety_notes: Vec<String>,
+    pub stripped_tracking_params: usize,
+}
+
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct SearchReport {
+    pub query: String,
+    pub page: usize,
+    pub requested_backends: usize,
+    pub raw_results: usize,
+    pub returned_results: usize,
+    pub filtered_results: usize,
+    pub duplicate_results: usize,
+    pub cache_hit: bool,
+}
+
+#[derive(Clone)]
+pub struct SearchResponse {
+    pub results: Vec<SearchResult>,
+    pub report: SearchReport,
 }
 
 struct SearchCache {
@@ -153,16 +196,60 @@ impl FortrustSearch {
         Self { client, config, cache }
     }
 
-    pub async fn search(&self, query: &str, page: usize) -> Vec<SearchResult> {
+    /// Fetch autocomplete suggestions for a partial query using DuckDuckGo's
+    /// privacy-respecting autocomplete API. Returns up to 8 suggestions.
+    pub async fn suggest(&self, query: &str) -> Vec<String> {
         let query = query.trim();
+        if query.len() < 2 {
+            return vec![];
+        }
+        let url = format!(
+            "https://duckduckgo.com/ac/?q={}&type=list",
+            urlencoding::encode(query)
+        );
+        let Ok(resp) = self
+            .client
+            .get(&url)
+            .header("DNT", "1")
+            .header("Sec-GPC", "1")
+            .timeout(Duration::from_secs(2))
+            .send()
+            .await
+        else {
+            return vec![];
+        };
+        let Ok(json) = resp.json::<Vec<serde_json::Value>>().await else {
+            return vec![];
+        };
+        json.iter()
+            .filter_map(|item| item["phrase"].as_str().map(|s| s.to_owned()))
+            .take(8)
+            .collect()
+    }
+
+    pub async fn search(&self, query: &str, page: usize) -> Vec<SearchResult> {
+        self.search_with_report(query, page).await.results
+    }
+
+    pub async fn search_with_report(&self, query: &str, page: usize) -> SearchResponse {
+        let query = query.trim();
+        let mut report = SearchReport {
+            query: query.to_owned(),
+            page,
+            requested_backends: self.config.enabled_backends.len(),
+            ..SearchReport::default()
+        };
         if query.is_empty() {
-            return Vec::new();
+            return SearchResponse { results: Vec::new(), report };
         }
 
         let cache_key = self.cache.as_ref().map(|_| self.cache_key(query, page));
         if let (Some(cache), Some(key)) = (&self.cache, cache_key.as_ref()) {
             if let Some(results) = cache.get(key).await {
-                return results;
+                report.raw_results = results.len();
+                report.returned_results = results.len();
+                report.cache_hit = true;
+                return SearchResponse { results, report };
             }
         }
 
@@ -195,10 +282,20 @@ impl FortrustSearch {
             all_results.append(&mut results);
         }
 
+        report.raw_results = all_results.len();
+        let before_safety = all_results.len();
+        all_results = all_results
+            .into_iter()
+            .filter_map(|result| sanitize_result(result, &self.config))
+            .collect();
+        report.filtered_results = before_safety.saturating_sub(all_results.len());
+
         rank_results(&mut all_results);
 
         if self.config.deduplicate {
+            let before_dedup = all_results.len();
             dedup_results(&mut all_results);
+            report.duplicate_results = before_dedup.saturating_sub(all_results.len());
         }
 
         all_results.truncate(self.config.max_results);
@@ -213,7 +310,8 @@ impl FortrustSearch {
             cache.insert(key, all_results.clone()).await;
         }
 
-        all_results
+        report.returned_results = all_results.len();
+        SearchResponse { results: all_results, report }
     }
 }
 
@@ -327,10 +425,16 @@ fn parse_ddg_html(html: &str, max: usize) -> Vec<SearchResult> {
             results.push(SearchResult {
                 title,
                 url,
+                display_url: String::new(),
+                host: String::new(),
                 snippet: html_unescape(&snippet),
                 source_backend: SearchBackend::DuckDuckGo,
                 archive_url: None,
                 relevance_score: 0.6,
+                privacy_score: 0,
+                safety: ResultSafety::Neutral,
+                safety_notes: Vec::new(),
+                stripped_tracking_params: 0,
             });
         }
     }
@@ -379,10 +483,16 @@ async fn fetch_brave(client: &reqwest::Client, query: &str, max: usize, page: us
                     Some(SearchResult {
                         title: r["title"].as_str()?.to_string(),
                         url: r["url"].as_str()?.to_string(),
+                        display_url: String::new(),
+                        host: String::new(),
                         snippet: r["description"].as_str().unwrap_or("").to_string(),
                         source_backend: SearchBackend::BraveSearch,
                         archive_url: None,
                         relevance_score: r["age"].as_str().map(|_| 0.8).unwrap_or(0.6),
+                        privacy_score: 0,
+                        safety: ResultSafety::Neutral,
+                        safety_notes: Vec::new(),
+                        stripped_tracking_params: 0,
                     })
                 })
                 .collect()
@@ -420,10 +530,16 @@ async fn fetch_mojeek(client: &reqwest::Client, query: &str, max: usize, page: u
                     Some(SearchResult {
                         title: r["t"].as_str()?.to_string(),
                         url: r["u"].as_str()?.to_string(),
+                        display_url: String::new(),
+                        host: String::new(),
                         snippet: r["s"].as_str().unwrap_or("").to_string(),
                         source_backend: SearchBackend::Mojeek,
                         archive_url: None,
                         relevance_score: 0.7,
+                        privacy_score: 0,
+                        safety: ResultSafety::Neutral,
+                        safety_notes: Vec::new(),
+                        stripped_tracking_params: 0,
                     })
                 })
                 .collect()
@@ -461,10 +577,16 @@ async fn fetch_stract(client: &reqwest::Client, query: &str, max: usize, page: u
                     Some(SearchResult {
                         title: r["title"].as_str()?.to_string(),
                         url: r["url"].as_str()?.to_string(),
+                        display_url: String::new(),
+                        host: String::new(),
                         snippet: r["snippet"].as_str().unwrap_or("").to_string(),
                         source_backend: SearchBackend::Stract,
                         archive_url: None,
                         relevance_score: 0.75,
+                        privacy_score: 0,
+                        safety: ResultSafety::Neutral,
+                        safety_notes: Vec::new(),
+                        stripped_tracking_params: 0,
                     })
                 })
                 .collect()
@@ -504,10 +626,16 @@ async fn fetch_wikipedia(client: &reqwest::Client, query: &str) -> Vec<SearchRes
                             "https://en.wikipedia.org/wiki/{}",
                             urlencoding::encode(r["title"].as_str()?)
                         ),
+                        display_url: String::new(),
+                        host: String::new(),
                         snippet: r["snippet"].as_str().unwrap_or("").to_string(),
                         source_backend: SearchBackend::Wikipedia,
                         archive_url: None,
                         relevance_score: 0.5,
+                        privacy_score: 0,
+                        safety: ResultSafety::Neutral,
+                        safety_notes: Vec::new(),
+                        stripped_tracking_params: 0,
                     })
                 })
                 .collect()
@@ -561,15 +689,217 @@ async fn fetch_searxng(
                     Some(SearchResult {
                         title: r["title"].as_str()?.to_string(),
                         url: r["url"].as_str()?.to_string(),
+                        display_url: String::new(),
+                        host: String::new(),
                         snippet: r["content"].as_str().unwrap_or("").to_string(),
                         source_backend: SearchBackend::SearXNG(instance_str),
                         archive_url: None,
                         relevance_score: r["score"].as_f64().map(|s| (s as f32) / 10.0).unwrap_or(0.7),
+                        privacy_score: 0,
+                        safety: ResultSafety::Neutral,
+                        safety_notes: Vec::new(),
+                        stripped_tracking_params: 0,
                     })
                 })
                 .collect()
         })
         .unwrap_or_default()
+}
+
+fn sanitize_result(mut result: SearchResult, config: &SearchConfig) -> Option<SearchResult> {
+    result.title = collapse_whitespace(&html_unescape(&strip_tags(&result.title)));
+    result.snippet = collapse_whitespace(&html_unescape(&strip_tags(&result.snippet)));
+
+    if result.title.is_empty() {
+        return None;
+    }
+
+    let mut url = Url::parse(result.url.trim()).ok()?;
+    if !matches!(url.scheme(), "http" | "https") {
+        return None;
+    }
+
+    let host = url.host_str()?.trim_end_matches('.').to_ascii_lowercase();
+    let mut notes = Vec::new();
+    let mut safety = ResultSafety::Trusted;
+    let mut privacy_score: i32 = 100;
+
+    if url.scheme() != "https" {
+        notes.push("Plain HTTP result".to_owned());
+        privacy_score -= 25;
+        safety = ResultSafety::Warning;
+        if config.block_non_https_results && config.strict_result_safety {
+            return None;
+        }
+    }
+
+    if is_ip_address_host(&host) {
+        notes.push("IP-address host hidden from private search results".to_owned());
+        privacy_score -= 35;
+        safety = ResultSafety::Blocked;
+        if config.block_ip_address_hosts && config.strict_result_safety {
+            return None;
+        }
+    }
+
+    if is_local_network_host(&host) {
+        notes.push("Local-network host hidden from private search results".to_owned());
+        privacy_score -= 45;
+        safety = ResultSafety::Blocked;
+        if config.block_local_network_hosts && config.strict_result_safety {
+            return None;
+        }
+    }
+
+    let stripped_tracking_params = if config.strip_result_tracking_params {
+        strip_tracking_params_from_url(&mut url)
+    } else {
+        0
+    };
+    if stripped_tracking_params > 0 {
+        notes.push(format!(
+            "{stripped_tracking_params} tracking parameter{} stripped",
+            if stripped_tracking_params == 1 { "" } else { "s" }
+        ));
+        privacy_score -= 2 * stripped_tracking_params as i32;
+    }
+
+    if host_has_suspicious_shape(&host) {
+        notes.push("Unusual hostname shape".to_owned());
+        privacy_score -= 15;
+        if safety == ResultSafety::Trusted {
+            safety = ResultSafety::Warning;
+        }
+    }
+
+    if title_looks_like_ad(&result.title) || title_looks_like_ad(&result.snippet) {
+        notes.push("Ad-like result text".to_owned());
+        privacy_score -= 12;
+        if safety == ResultSafety::Trusted {
+            safety = ResultSafety::Warning;
+        }
+    }
+
+    if notes.is_empty() {
+        notes.push("HTTPS result with tracking cleanup applied".to_owned());
+    }
+
+    result.url = url.to_string();
+    result.host = host.clone();
+    result.display_url = display_url(&url);
+    result.privacy_score = privacy_score.clamp(0, 100) as u8;
+    result.safety = safety;
+    result.safety_notes = notes;
+    result.stripped_tracking_params = stripped_tracking_params;
+    Some(result)
+}
+
+fn strip_tracking_params_from_url(url: &mut Url) -> usize {
+    let Some(_) = url.query() else {
+        return 0;
+    };
+    let original = url
+        .query_pairs()
+        .map(|(k, v)| (k.into_owned(), v.into_owned()))
+        .collect::<Vec<_>>();
+    let before = original.len();
+    let kept = original
+        .into_iter()
+        .filter(|(key, _)| !is_tracking_query_param(key))
+        .collect::<Vec<_>>();
+    let stripped = before.saturating_sub(kept.len());
+    if stripped > 0 {
+        url.query_pairs_mut().clear().extend_pairs(kept);
+    }
+    stripped
+}
+
+fn is_tracking_query_param(key: &str) -> bool {
+    let key = key.to_ascii_lowercase();
+    key.starts_with("utm_")
+        || matches!(
+            key.as_str(),
+            "fbclid"
+                | "gclid"
+                | "dclid"
+                | "msclkid"
+                | "mc_cid"
+                | "mc_eid"
+                | "igshid"
+                | "vero_id"
+                | "_hsenc"
+                | "_hsmi"
+                | "yclid"
+                | "twclid"
+                | "scid"
+                | "rb_clickid"
+        )
+}
+
+fn is_ip_address_host(host: &str) -> bool {
+    host.parse::<std::net::IpAddr>().is_ok()
+        || (host.starts_with('[') && host.ends_with(']'))
+}
+
+fn is_local_network_host(host: &str) -> bool {
+    host == "localhost"
+        || host.ends_with(".local")
+        || host.ends_with(".localhost")
+        || host.starts_with("127.")
+        || host.starts_with("10.")
+        || host.starts_with("192.168.")
+        || is_private_172(host)
+        || host == "::1"
+        || host.eq_ignore_ascii_case("[::1]")
+}
+
+fn is_private_172(host: &str) -> bool {
+    let mut parts = host.split('.');
+    let Some("172") = parts.next() else {
+        return false;
+    };
+    let Some(second) = parts.next().and_then(|part| part.parse::<u8>().ok()) else {
+        return false;
+    };
+    (16..=31).contains(&second)
+}
+
+fn host_has_suspicious_shape(host: &str) -> bool {
+    host.len() > 80
+        || host.matches('-').count() > 6
+        || host.split('.').any(|label| label.len() > 40)
+        || host.contains("xn--")
+}
+
+fn title_looks_like_ad(text: &str) -> bool {
+    let lower = text.to_ascii_lowercase();
+    [
+        "sponsored",
+        "advertisement",
+        "coupon code",
+        "limited time offer",
+        "download now",
+    ]
+    .iter()
+    .any(|needle| lower.contains(needle))
+}
+
+fn display_url(url: &Url) -> String {
+    let host = url.host_str().unwrap_or_default();
+    let mut path = url.path().trim_end_matches('/').to_owned();
+    if path.len() > 56 {
+        path.truncate(56);
+        path.push_str("...");
+    }
+    if path.is_empty() || path == "/" {
+        host.to_owned()
+    } else {
+        format!("{host}{path}")
+    }
+}
+
+fn collapse_whitespace(input: &str) -> String {
+    input.split_whitespace().collect::<Vec<_>>().join(" ")
 }
 
 fn title_similarity(a: &str, b: &str) -> f32 {
@@ -731,5 +1061,80 @@ mod tests {
         assert!(config.enabled_backends.contains(&SearchBackend::DuckDuckGo));
         assert!(config.enabled_backends.contains(&SearchBackend::Wikipedia));
         assert!(!config.enabled_backends.contains(&SearchBackend::BraveSearch));
+    }
+
+    #[test]
+    fn sanitizer_strips_tracking_params_and_scores_https_results() {
+        let result = SearchResult {
+            title: " Example   Result ".to_owned(),
+            url: "https://example.com/article?utm_source=news&keep=1&fbclid=abc#section".to_owned(),
+            display_url: String::new(),
+            host: String::new(),
+            archive_url: None,
+            snippet: " Useful &amp; private ".to_owned(),
+            source_backend: SearchBackend::DuckDuckGo,
+            relevance_score: 0.5,
+            privacy_score: 0,
+            safety: ResultSafety::Neutral,
+            safety_notes: Vec::new(),
+            stripped_tracking_params: 0,
+        };
+
+        let sanitized = sanitize_result(result, &SearchConfig::default()).unwrap();
+        assert_eq!(sanitized.host, "example.com");
+        assert_eq!(sanitized.url, "https://example.com/article?keep=1#section");
+        assert_eq!(sanitized.stripped_tracking_params, 2);
+        assert_eq!(sanitized.safety, ResultSafety::Trusted);
+        assert!(sanitized.privacy_score >= 90);
+        assert!(sanitized.display_url.starts_with("example.com/article"));
+    }
+
+    #[test]
+    fn sanitizer_blocks_local_and_ip_hosts_in_strict_mode() {
+        let mut result = SearchResult {
+            title: "Local admin".to_owned(),
+            url: "https://127.0.0.1:8443/private".to_owned(),
+            display_url: String::new(),
+            host: String::new(),
+            archive_url: None,
+            snippet: String::new(),
+            source_backend: SearchBackend::Stract,
+            relevance_score: 0.5,
+            privacy_score: 0,
+            safety: ResultSafety::Neutral,
+            safety_notes: Vec::new(),
+            stripped_tracking_params: 0,
+        };
+
+        assert!(sanitize_result(result.clone(), &SearchConfig::default()).is_none());
+        result.url = "https://192.168.1.1/router".to_owned();
+        assert!(sanitize_result(result, &SearchConfig::default()).is_none());
+    }
+
+    #[test]
+    fn sanitizer_can_warn_on_http_without_filtering() {
+        let config = SearchConfig {
+            block_non_https_results: false,
+            strict_result_safety: false,
+            ..SearchConfig::default()
+        };
+        let result = SearchResult {
+            title: "HTTP Result".to_owned(),
+            url: "http://example.org/".to_owned(),
+            display_url: String::new(),
+            host: String::new(),
+            archive_url: None,
+            snippet: String::new(),
+            source_backend: SearchBackend::Mojeek,
+            relevance_score: 0.5,
+            privacy_score: 0,
+            safety: ResultSafety::Neutral,
+            safety_notes: Vec::new(),
+            stripped_tracking_params: 0,
+        };
+
+        let sanitized = sanitize_result(result, &config).unwrap();
+        assert_eq!(sanitized.safety, ResultSafety::Warning);
+        assert!(sanitized.privacy_score < 100);
     }
 }

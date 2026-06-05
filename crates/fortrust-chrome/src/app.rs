@@ -78,6 +78,16 @@ pub struct FortrustApp {
     download_manager: DownloadManager,
     download_dir: String,
 
+    // Search suggest debounce state
+    suggest_debounce_start: Option<std::time::Instant>,
+    suggest_last_text: String,
+    suggest_pending_id: Option<u64>,
+
+    // Animation tick state
+    anim_tick_pending_id: Option<u64>,
+    last_anim_tick: std::time::Instant,
+    animations_active: bool,
+
     // Workspace management
     workspaces: WorkspaceManager,
 }
@@ -246,11 +256,15 @@ struct TabRendererEntry {
 enum EngineCommand {
     Load { request_id: u64, url: String, viewport: Viewport, cosmetic_css: Vec<String> },
     Search { request_id: u64, query: String },
+    Suggest { request_id: u64, query: String },
+    AnimationTick { request_id: u64, dt: f32 },
 }
 
 enum EngineEvent {
     Loaded { request_id: u64, page: Box<EnginePage> },
     SearchLoaded { request_id: u64, query: String, results: Vec<SearchResult> },
+    SuggestLoaded { request_id: u64, suggestions: Vec<String> },
+    AnimationFrame { request_id: u64, page: Option<Box<EnginePage>> },
     Failed { request_id: u64, url: String, error: String },
     RendererMsg { tab_id: TabId, msg: fortrust_ipc::RendererToBrowser },
 }
@@ -315,6 +329,20 @@ impl EngineWorker {
                             request_id,
                             query,
                             results,
+                        });
+                    }
+                    EngineCommand::Suggest { request_id, query } => {
+                        let suggestions = runtime.block_on(search.suggest(&query));
+                        let _ = event_sender.send(EngineEvent::SuggestLoaded {
+                            request_id,
+                            suggestions,
+                        });
+                    }
+                    EngineCommand::AnimationTick { request_id, dt } => {
+                        let page = engine.tick_animations(dt);
+                        let _ = event_sender.send(EngineEvent::AnimationFrame {
+                            request_id,
+                            page: page.map(Box::new),
                         });
                     }
                 }
@@ -719,6 +747,18 @@ fn drain_failed_worker(
                     error: error.clone(),
                 });
             }
+            EngineCommand::Suggest { request_id, .. } => {
+                let _ = event_sender.send(EngineEvent::SuggestLoaded {
+                    request_id,
+                    suggestions: Vec::new(),
+                });
+            }
+            EngineCommand::AnimationTick { request_id, .. } => {
+                let _ = event_sender.send(EngineEvent::AnimationFrame {
+                    request_id,
+                    page: None,
+                });
+            }
         }
     }
 }
@@ -792,6 +832,14 @@ impl FortrustApp {
             download_dir: default_download_dir(),
 
             workspaces: WorkspaceManager::default(),
+
+            suggest_debounce_start: None,
+            suggest_last_text: String::new(),
+            suggest_pending_id: None,
+
+            anim_tick_pending_id: None,
+            last_anim_tick: std::time::Instant::now(),
+            animations_active: false,
         };
 
         // Restore persisted download state and auto-resume pending downloads
@@ -1265,6 +1313,12 @@ impl FortrustApp {
                             let _ = storage.history.store(&entry);
                         }
                         self.total_memory_mb = memory_estimate;
+
+                        // Start animation tick loop for non-internal pages
+                        if !url.starts_with("fortrust://") && !url.starts_with("about:") {
+                            self.animations_active = true;
+                            self.last_anim_tick = std::time::Instant::now();
+                        }
                     }
                 }
                 EngineEvent::SearchLoaded { request_id, query, results } => {
@@ -1278,6 +1332,32 @@ impl FortrustApp {
                         self.total_memory_mb = (count as f32 * 0.04).max(0.15);
                     }
                 }
+                EngineEvent::SuggestLoaded { request_id, suggestions } => {
+                    if self.suggest_pending_id == Some(request_id) {
+                        self.suggest_pending_id = None;
+                        self.suggest_debounce_start = None;
+                        self.omnibox.remote_suggestions = suggestions;
+                        let history = self.history_suggestions();
+                        self.omnibox.update_suggestions(&history);
+                        ctx.request_repaint();
+                    }
+                }
+                EngineEvent::AnimationFrame { request_id, page } => {
+                    if self.anim_tick_pending_id == Some(request_id) {
+                        self.anim_tick_pending_id = None;
+                        if let Some(page) = page {
+                            if let Some(tab_id) = self.active_tab_id() {
+                                if let Some(state) = self.tab_pages.get_mut(&tab_id) {
+                                    state.page = Some(*page);
+                                    state.renderer_frame = None;
+                                }
+                            }
+                            ctx.request_repaint();
+                        } else {
+                            self.animations_active = false;
+                        }
+                    }
+                }
                 EngineEvent::Failed { request_id, url, error } => {
                     let Some(tab_id) = self.request_owner.remove(&request_id) else { continue; };
                     let err_msg = error.clone();
@@ -1289,6 +1369,49 @@ impl FortrustApp {
                 }
             }
         }
+
+        // Debounced search suggestion fetching
+        let now = std::time::Instant::now();
+        if self.omnibox.focused && self.suggest_pending_id.is_none() {
+            let trimmed = self.omnibox.text.trim().to_lowercase();
+            if trimmed != self.suggest_last_text {
+                self.suggest_last_text = trimmed.clone();
+                self.suggest_debounce_start = Some(now);
+                self.omnibox.remote_suggestions.clear();
+            }
+            if let Some(start) = self.suggest_debounce_start {
+                if now - start > Duration::from_millis(200) && trimmed.len() >= 2 {
+                    let request_id = self.engine_worker.next_request_id;
+                    self.engine_worker.next_request_id = self.engine_worker.next_request_id.saturating_add(1);
+                    let _ = self.engine_worker.sender.send(EngineCommand::Suggest {
+                        request_id,
+                        query: trimmed.clone(),
+                    });
+                    self.suggest_pending_id = Some(request_id);
+                    self.suggest_debounce_start = None;
+                }
+            }
+        } else if !self.omnibox.focused {
+            self.suggest_debounce_start = None;
+            self.suggest_pending_id = None;
+        }
+
+        // Animation tick driver: send ticks at ~60fps while animations are active
+        if self.animations_active && self.anim_tick_pending_id.is_none() {
+            let now = std::time::Instant::now();
+            if now - self.last_anim_tick >= Duration::from_millis(16) {
+                let request_id = self.engine_worker.next_request_id;
+                self.engine_worker.next_request_id = self.engine_worker.next_request_id.saturating_add(1);
+                let dt = now.duration_since(self.last_anim_tick).as_secs_f32().min(0.05);
+                self.last_anim_tick = now;
+                let _ = self.engine_worker.sender.send(EngineCommand::AnimationTick {
+                    request_id,
+                    dt,
+                });
+                self.anim_tick_pending_id = Some(request_id);
+            }
+        }
+
         if self.tab_pages.values().any(|state| state.loading_url.is_some()) {
             ctx.request_repaint_after(Duration::from_millis(16));
         }
@@ -1878,7 +2001,7 @@ impl FortrustApp {
             egui::FontId::proportional(15.0),
             self.theme.text_primary,
         );
-        let privacy_text = if is_loading { "Searching privately..." } else { "Trackers stripped before result navigation" };
+        let privacy_text = if is_loading { "Searching privately..." } else { "Results are sanitized before navigation" };
         content_ui.painter().text(
             Pos2::new(status_rect.max.x - 14.0, status_rect.center().y),
             egui::Align2::RIGHT_CENTER,
@@ -1915,7 +2038,7 @@ impl FortrustApp {
             .auto_shrink([false, false])
             .show(&mut content_ui, |ui| {
                 for result in results {
-                    let item_h = 102.0;
+                    let item_h = 126.0;
                     let item_rect = Rect::from_min_size(
                         ui.cursor().min,
                         Vec2::new(content_w, item_h),
@@ -1934,26 +2057,60 @@ impl FortrustApp {
                         egui::StrokeKind::Inside,
                     );
 
+                    let safety_color = match result.safety {
+                        fortrust_search::ResultSafety::Trusted => self.theme.accent_shield,
+                        fortrust_search::ResultSafety::Neutral => self.theme.text_muted,
+                        fortrust_search::ResultSafety::Warning => self.theme.accent_shield_warn,
+                        fortrust_search::ResultSafety::Blocked => self.theme.accent_shield_off,
+                    };
+                    let safety_label = match result.safety {
+                        fortrust_search::ResultSafety::Trusted => "trusted",
+                        fortrust_search::ResultSafety::Neutral => "neutral",
+                        fortrust_search::ResultSafety::Warning => "review",
+                        fortrust_search::ResultSafety::Blocked => "blocked",
+                    };
+                    let title_max = if content_w > 700.0 { 82 } else { 56 };
                     ui.painter().text(
                         Pos2::new(item_rect.min.x + 18.0, item_rect.min.y + 18.0),
                         egui::Align2::LEFT_TOP,
-                        &result.title,
+                        elide_text(&result.title, title_max),
                         egui::FontId::proportional(16.0),
                         self.theme.text_primary,
                     );
                     ui.painter().text(
                         Pos2::new(item_rect.min.x + 18.0, item_rect.min.y + 42.0),
                         egui::Align2::LEFT_TOP,
-                        elide_text(&result.url, 92),
+                        elide_text(if result.display_url.is_empty() { &result.url } else { &result.display_url }, 92),
                         egui::FontId::monospace(11.0),
                         self.theme.accent_shield,
                     );
                     ui.painter().text(
                         Pos2::new(item_rect.min.x + 18.0, item_rect.min.y + 64.0),
                         egui::Align2::LEFT_TOP,
-                        elide_text(&result.snippet, 150),
+                        elide_text(&result.snippet, if content_w > 700.0 { 150 } else { 105 }),
                         egui::FontId::proportional(12.0),
                         self.theme.text_secondary,
+                    );
+                    let chip_rect = Rect::from_min_size(
+                        Pos2::new(item_rect.min.x + 18.0, item_rect.max.y - 30.0),
+                        Vec2::new(118.0, 20.0),
+                    );
+                    ui.painter().rect_filled(chip_rect, 5.0, Color32::from_rgba_unmultiplied(safety_color.r(), safety_color.g(), safety_color.b(), 28));
+                    ui.painter().rect_stroke(chip_rect, 5.0, Stroke::new(1.0, safety_color), egui::StrokeKind::Inside);
+                    ui.painter().text(
+                        chip_rect.center(),
+                        egui::Align2::CENTER_CENTER,
+                        format!("{safety_label} / {}%", result.privacy_score),
+                        egui::FontId::proportional(10.5),
+                        safety_color,
+                    );
+                    let notes = result.safety_notes.join(" - ");
+                    ui.painter().text(
+                        Pos2::new(chip_rect.max.x + 10.0, chip_rect.center().y),
+                        egui::Align2::LEFT_CENTER,
+                        elide_text(&notes, if content_w > 700.0 { 82 } else { 44 }),
+                        egui::FontId::proportional(10.5),
+                        self.theme.text_muted,
                     );
                     ui.painter().text(
                         Pos2::new(item_rect.max.x - 18.0, item_rect.min.y + 18.0),

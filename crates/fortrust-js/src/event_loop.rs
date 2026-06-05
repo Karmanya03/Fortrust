@@ -89,6 +89,8 @@ pub struct EventLoop {
     timers: Rc<RefCell<Vec<TimerEntry>>>,
     task_queue: Rc<RefCell<TaskQueue>>,
     next_timer_id: Rc<Cell<u64>>,
+    raf_callbacks: Rc<RefCell<Vec<(u64, JsValue)>>>,
+    next_raf_id: Rc<Cell<u64>>,
 }
 
 impl EventLoop {
@@ -97,6 +99,8 @@ impl EventLoop {
             timers: Rc::new(RefCell::new(Vec::new())),
             task_queue: Rc::new(RefCell::new(TaskQueue::new())),
             next_timer_id: Rc::new(Cell::new(1)),
+            raf_callbacks: Rc::new(RefCell::new(Vec::new())),
+            next_raf_id: Rc::new(Cell::new(1)),
         }
     }
 
@@ -194,6 +198,34 @@ impl EventLoop {
         let id = self.next_timer_id.get();
         self.next_timer_id.set(id + 1);
         id
+    }
+
+    /// Register a requestAnimationFrame callback. Returns the frame request ID.
+    pub fn request_animation_frame(&self, handler: JsValue) -> u64 {
+        let id = self.next_raf_id.get();
+        self.next_raf_id.set(id + 1);
+        self.raf_callbacks.borrow_mut().push((id, handler));
+        debug!(raf_id = id, "requestAnimationFrame registered");
+        id
+    }
+
+    /// Cancel a pending requestAnimationFrame by ID.
+    pub fn cancel_animation_frame(&self, id: u64) {
+        self.raf_callbacks
+            .borrow_mut()
+            .retain(|(cb_id, _)| *cb_id != id);
+        debug!(raf_id = id, "cancelAnimationFrame executed");
+    }
+
+    /// Drain all pending rAF callbacks, returning them for execution.
+    /// Called once per animation frame.
+    pub fn drain_animation_frame_callbacks(&self) -> Vec<(u64, JsValue)> {
+        self.raf_callbacks.borrow_mut().drain(..).collect()
+    }
+
+    /// Returns true if there are pending rAF callbacks.
+    pub fn has_pending_animation_frame(&self) -> bool {
+        !self.raf_callbacks.borrow().is_empty()
     }
 }
 

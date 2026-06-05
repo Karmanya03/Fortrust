@@ -5,6 +5,7 @@ use fortrust_dom::{DomArena, NodeRef, parse_html};
 use fortrust_net::{FetchSource, NetprocClient, NetworkClient, NetworkError};
 use fortrust_renderer::{RenderError, RenderedPage, StaticRenderer};
 use futures_util::StreamExt;
+use std::cell::RefCell;
 use url::Url;
 
 pub use fortrust_layout::Rect as EngineRect;
@@ -54,6 +55,11 @@ pub struct SecurityReport {
     pub external_subresources_enabled: bool,
     pub sandboxed_static_render: bool,
     pub source: PageSource,
+    pub trust_score: u8,
+    pub secure_context: bool,
+    pub mixed_content_blocked: usize,
+    pub subresources_loaded: usize,
+    pub subresources_blocked: usize,
     pub body_bytes: usize,
     pub display_commands: usize,
     pub parse_error_count: usize,
@@ -85,6 +91,11 @@ impl SecurityReport {
                 || external_images_blocked > 0,
             sandboxed_static_render: true,
             source,
+            trust_score: 0,
+            secure_context: false,
+            mixed_content_blocked: 0,
+            subresources_loaded: external_stylesheets_loaded + external_images_loaded,
+            subresources_blocked: external_stylesheets_blocked + external_images_blocked,
             body_bytes,
             display_commands: rendered.display_list.len(),
             parse_error_count: rendered.parse_error_count,
@@ -148,6 +159,21 @@ pub struct TrustEngine {
     // runtime flags to control optional capabilities
     pub javascript_enabled: bool,
     pub allow_external_subresources: bool,
+    /// Cached page info for animation-driven re-rendering
+    anim_page: RefCell<Option<AnimPageState>>,
+}
+
+/// State kept between animation ticks so we can re-render without re-fetching.
+struct AnimPageState {
+    html: String,
+    url: String,
+    viewport: Viewport,
+    source: PageSource,
+    external_stylesheets_loaded: usize,
+    external_stylesheets_blocked: usize,
+    external_images_loaded: usize,
+    external_images_blocked: usize,
+    last_security: SecurityReport,
 }
 
 impl TrustEngine {
@@ -159,6 +185,7 @@ impl TrustEngine {
             mode: EngineMode::Offline,
             javascript_enabled: cfg!(feature = "javascript"),
             allow_external_subresources: true,
+            anim_page: RefCell::new(None),
         }
     }
 
@@ -171,6 +198,7 @@ impl TrustEngine {
             mode: EngineMode::Networked,
             javascript_enabled: cfg!(feature = "javascript"),
             allow_external_subresources: true,
+            anim_page: RefCell::new(None),
         })
     }
 
@@ -188,6 +216,7 @@ impl TrustEngine {
             mode: EngineMode::Networked,
             javascript_enabled: cfg!(feature = "javascript"),
             allow_external_subresources: true,
+            anim_page: RefCell::new(None),
         })
     }
 
@@ -383,7 +412,9 @@ impl TrustEngine {
                 render_with_javascript(html, author_css, cosmetic_css, external_scripts, viewport, &url, images)?
             } else {
                 let all_css = [author_css, cosmetic_css].concat();
-                (self.renderer.render_with_images(html, &all_css, viewport, images)?, None)
+                // Use the animation-aware renderer to cache state for potential animation ticks
+                let page = self.renderer.render_with_animation_cache(html, &all_css, &[], viewport, images)?;
+                (page, None)
             };
         let security = SecurityReport::for_render(
             source,
@@ -395,6 +426,23 @@ impl TrustEngine {
             external_images_loaded,
             external_images_blocked,
         );
+        let security = security.with_url(&url);
+
+        // Cache animation state for potential future ticks
+        if !javascript_enabled && self.renderer.has_active_animations() {
+            *self.anim_page.borrow_mut() = Some(AnimPageState {
+                html: html.to_owned(),
+                url: url.clone(),
+                viewport,
+                source,
+                external_stylesheets_loaded,
+                external_stylesheets_blocked,
+                external_images_loaded,
+                external_images_blocked,
+                last_security: security.clone(),
+            });
+        }
+
         let title = js_title_opt
             .unwrap_or_else(|| title_from_html_or_url(html, &url));
 
@@ -455,6 +503,84 @@ impl TrustEngine {
             damage_rects,
         ))
     }
+}
+
+impl TrustEngine {
+    /// Advance animation clock and re-render if animations are active.
+    /// Returns `Some(EnginePage)` if the display list changed, `None` if no
+    /// animations were active.
+    pub fn tick_animations(&self, dt: f32) -> Option<EnginePage> {
+        let page_borrow = self.anim_page.borrow();
+        let page_state = page_borrow.as_ref()?;
+
+        let updated = self.renderer.tick_animations(dt)?;
+
+        // Temporarily get the URL while page_borrow is alive
+        let url = page_state.url.clone();
+        let html_len = page_state.html.len();
+        let source = page_state.source;
+        let ext_ss_loaded = page_state.external_stylesheets_loaded;
+        let ext_ss_blocked = page_state.external_stylesheets_blocked;
+        let ext_img_loaded = page_state.external_images_loaded;
+        let ext_img_blocked = page_state.external_images_blocked;
+        let last_trust_score = page_state.last_security.trust_score;
+        drop(page_borrow);
+
+        let security = SecurityReport::for_render(
+            source,
+            html_len,
+            &updated,
+            false,
+            ext_ss_loaded,
+            ext_ss_blocked,
+            ext_img_loaded,
+            ext_img_blocked,
+        )
+        .with_url(&url);
+
+        Some(EnginePage {
+            title: last_trust_score.to_string(),
+            url,
+            rendered: updated,
+            security,
+        })
+    }
+
+    /// Returns true if there are active CSS animations/transitions on the
+    /// currently loaded page that need ticking.
+    pub fn has_active_animations(&self) -> bool {
+        self.anim_page.borrow().is_some() && self.renderer.has_active_animations()
+    }
+}
+
+impl SecurityReport {
+    fn with_url(mut self, url: &str) -> Self {
+        self.secure_context = url.starts_with("https://")
+            || url.starts_with("fortrust://")
+            || url.starts_with("about:");
+        self.mixed_content_blocked = self.subresources_blocked;
+        self.trust_score = compute_trust_score(&self);
+        self
+    }
+}
+
+fn compute_trust_score(report: &SecurityReport) -> u8 {
+    let mut score = 100i32;
+    if !report.privacy_pipeline_enforced {
+        score -= 40;
+    }
+    if !report.sandboxed_static_render {
+        score -= 35;
+    }
+    if !report.secure_context {
+        score -= 25;
+    }
+    if report.javascript_enabled {
+        score -= 8;
+    }
+    score -= (report.subresources_blocked.min(8) as i32) * 3;
+    score -= (report.parse_error_count.min(8) as i32) * 2;
+    score.clamp(0, 100) as u8
 }
 
 #[cfg(feature = "javascript")]
@@ -1058,6 +1184,16 @@ const COMMON_STYLES: &str = r#"
     border-color: rgba(187, 128, 9, 0.4);
     color: #d29922;
   }
+  .badge-neutral {
+    background: rgba(139, 148, 158, 0.12);
+    border-color: rgba(139, 148, 158, 0.35);
+    color: #8b949e;
+  }
+  .badge-block {
+    background: rgba(248, 81, 73, 0.14);
+    border-color: rgba(248, 81, 73, 0.38);
+    color: #ff7b72;
+  }
   .url { font-family: monospace; font-size: 12px; color: #58a6ff; word-break: break-all; }
 "#;
 
@@ -1070,14 +1206,34 @@ fn build_search_results_html(query: &str, results: &[fortrust_search::SearchResu
             let title = escape_text(&res.title);
             let snippet = escape_text(&res.snippet);
             let url = escape_text(&res.url);
+            let display_url = escape_text(if res.display_url.is_empty() { &res.url } else { &res.display_url });
+            let notes = escape_text(&res.safety_notes.join(" - "));
+            let safety = match res.safety {
+                fortrust_search::ResultSafety::Trusted => "Trusted",
+                fortrust_search::ResultSafety::Neutral => "Neutral",
+                fortrust_search::ResultSafety::Warning => "Review",
+                fortrust_search::ResultSafety::Blocked => "Blocked",
+            };
+            let safety_class = match res.safety {
+                fortrust_search::ResultSafety::Trusted => "badge",
+                fortrust_search::ResultSafety::Neutral => "badge badge-neutral",
+                fortrust_search::ResultSafety::Warning => "badge badge-warn",
+                fortrust_search::ResultSafety::Blocked => "badge badge-block",
+            };
             results_html.push_str(&format!(
-                r#"<div class="card" style="padding: 16px; margin-bottom: 12px; max-width: 680px;">
+                r#"<div class="card" style="padding: 16px; margin-bottom: 12px; max-width: 760px;">
   <a href="{url}" style="text-decoration: none;">
     <h2 style="color: #58a6ff; font-size: 18px; margin-bottom: 4px;">{title}</h2>
   </a>
-  <p class="url" style="margin-bottom: 6px; color: #3fb950;">{url}</p>
+  <p class="url" style="margin-bottom: 6px; color: #3fb950;">{display_url}</p>
   <p style="color: #8b949e; font-size: 14px; line-height: 1.5;">{snippet}</p>
+  <p style="margin-top: 10px;">
+    <span class="{safety_class}">{safety} / {score}% private</span>
+    <span style="color: #8b949e; font-size: 12px;">{notes}</span>
+  </p>
 </div>"#
+                ,
+                score = res.privacy_score,
             ));
         }
     }
@@ -1094,7 +1250,7 @@ fn build_search_results_html(query: &str, results: &[fortrust_search::SearchResu
 <body>
   <div style="margin-bottom: 24px;">
     <h1>&#128269; Search Results</h1>
-    <p>Showing private results for "<strong>{safe_query}</strong>"</p>
+    <p>Showing sanitized private results for "<strong>{safe_query}</strong>"</p>
   </div>
   {results_html}
 </body>
@@ -1224,8 +1380,25 @@ mod tests {
 
         assert!(page.security.javascript_enabled);
         assert!(page.security.sandboxed_static_render);
+        assert!(page.security.trust_score > 50);
+        assert!(!page.security.secure_context);
         assert!(page.security.body_bytes > 0);
         assert!(page.security.display_commands > 0);
+    }
+
+    #[test]
+    fn internal_pages_are_secure_contexts_with_trust_scores() {
+        let page = TrustEngine::offline()
+            .internal_page(
+                "fortrust://start",
+                Viewport { width: 320.0, height: 200.0 },
+            )
+            .unwrap();
+
+        assert!(page.security.secure_context);
+        assert!(page.security.privacy_pipeline_enforced);
+        assert!(page.security.sandboxed_static_render);
+        assert!(page.security.trust_score >= 80);
     }
 
     #[test]

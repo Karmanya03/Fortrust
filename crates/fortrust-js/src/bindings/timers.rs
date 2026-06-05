@@ -166,6 +166,70 @@ pub fn register(
         context,
     )?;
 
-    debug!("Timer Web API bindings registered");
+    // ── requestAnimationFrame / cancelAnimationFrame ──────────────────────
+
+    thread_local! {
+        static RAF_STATE: std::cell::RefCell<Option<Rc<RafState>>> = const { std::cell::RefCell::new(None) };
+    }
+
+    struct RafState {
+        event_loop: EventLoop,
+    }
+
+    {
+        let state = Rc::new(RafState {
+            event_loop: event_loop.clone(),
+        });
+
+        RAF_STATE.with(|rs| {
+            *rs.borrow_mut() = Some(state);
+        });
+    }
+
+    let raf_fn = unsafe {
+        NativeFunction::from_closure(|_this, args, _ctx| {
+            let handler = args.first().cloned().unwrap_or(JsValue::undefined());
+            if !handler.is_callable() {
+                return Ok(JsValue::from(0));
+            }
+            let id = RAF_STATE.with(|rs| {
+                let state = rs.borrow();
+                let state = state.as_ref().unwrap();
+                state.event_loop.request_animation_frame(handler)
+            });
+            Ok(JsValue::from(id as f64))
+        })
+    };
+
+    let cancel_raf_fn = unsafe {
+        NativeFunction::from_closure(|_this, args, _ctx| {
+            if let Some(id_val) = args.first().and_then(|v| v.as_number()) {
+                let id = id_val as u64;
+                RAF_STATE.with(|rs| {
+                    let state = rs.borrow();
+                    let state = state.as_ref().unwrap();
+                    state.event_loop.cancel_animation_frame(id);
+                });
+            }
+            Ok(JsValue::undefined())
+        })
+    };
+
+    let raf_val: JsValue = FunctionObjectBuilder::new(context.realm(), raf_fn)
+        .build()
+        .into();
+    let cancel_raf_val: JsValue = FunctionObjectBuilder::new(context.realm(), cancel_raf_fn)
+        .build()
+        .into();
+
+    global.set(js_string!("requestAnimationFrame"), raf_val, false, context)?;
+    global.set(
+        js_string!("cancelAnimationFrame"),
+        cancel_raf_val,
+        false,
+        context,
+    )?;
+
+    debug!("Timer + rAF Web API bindings registered");
     Ok(())
 }

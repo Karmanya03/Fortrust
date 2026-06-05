@@ -8,6 +8,7 @@ pub struct OmniboxState {
     pub suggestions: Vec<SuggestionItem>,
     pub selected_suggestion: i32,
     pub show_suggestions: bool,
+    pub remote_suggestions: Vec<String>,
 }
 
 pub struct SuggestionItem {
@@ -26,6 +27,7 @@ pub enum SuggestionKind {
 impl OmniboxState {
     pub fn clear_suggestions(&mut self) {
         self.suggestions.clear();
+        self.remote_suggestions.clear();
         self.selected_suggestion = -1;
         self.show_suggestions = false;
     }
@@ -45,6 +47,15 @@ impl OmniboxState {
             text: format!("Search for \"{}\"", self.text.trim()),
             url: private_search_url(self.text.trim()),
         });
+
+        // Add remote autocomplete suggestions (between "Search for" and history)
+        for phrase in &self.remote_suggestions {
+            self.suggestions.push(SuggestionItem {
+                kind: SuggestionKind::Search,
+                text: phrase.clone(),
+                url: private_search_url(phrase),
+            });
+        }
 
         // Add matching history/bookmarks
         for entry in history_entries {
