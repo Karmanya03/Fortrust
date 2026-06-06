@@ -28,17 +28,12 @@ pub fn poll_websocket_events(ctx: &mut Context) {
     {
         let clients = WS_CLIENTS.lock().unwrap();
         for (&id, client) in clients.iter() {
-            loop {
-                match futures_executor::block_on(client.try_recv()) {
-                    Some(event) => {
-                        let is_close = matches!(event, WebSocketEvent::Close(_, _));
-                        events_to_fire.push(event);
-                        ids_with_events.push(id);
-                        if is_close {
-                            disconnected.push(id);
-                        }
-                    }
-                    None => break,
+            while let Some(event) = futures_executor::block_on(client.try_recv()) {
+                let is_close = matches!(event, WebSocketEvent::Close(_, _));
+                events_to_fire.push(event);
+                ids_with_events.push(id);
+                if is_close {
+                    disconnected.push(id);
                 }
             }
         }
@@ -166,7 +161,7 @@ pub fn register(context: &mut Context) -> JsResult<()> {
             WS_CLIENTS.lock().unwrap().insert(id, client);
 
             let id_send = id;
-            let send_fn = unsafe {
+            let send_fn = {
                 NativeFunction::from_closure(move |_t, a, c| {
                     let data = a
                         .first()
@@ -191,9 +186,9 @@ pub fn register(context: &mut Context) -> JsResult<()> {
             };
 
             let id_close = id;
-            let close_fn = unsafe {
+            let close_fn = {
                 NativeFunction::from_closure(move |_t, a, _c| {
-                    let code = a.get(0).and_then(|v| v.as_number()).map(|n| n as u16);
+                    let code = a.first().and_then(|v| v.as_number()).map(|n| n as u16);
                     let reason = a
                         .get(1)
                         .and_then(|v| v.as_string())

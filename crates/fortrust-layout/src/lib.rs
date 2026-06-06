@@ -1,6 +1,6 @@
 use fortrust_core::ImageRegistry;
 use fortrust_dom::{NodeKind, NodeRef};
-use fortrust_style::{ComputedStyle, Display, FontWeight, Length, Overflow, StyleEngine, WhiteSpace};
+use fortrust_style::{ComputedStyle, Display, Length, Overflow, StyleEngine};
 
 // ── Text measurement types ─────────────────────────────────────────────────────
 

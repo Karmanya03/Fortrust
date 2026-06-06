@@ -72,10 +72,6 @@ fn get_arena() -> Option<&'static fortrust_dom::DomArena> {
     unsafe { ARENA_REF }
 }
 
-fn get_document() -> Option<&'static Document<'static>> {
-    unsafe { DOC_REF }
-}
-
 fn build_document_object(
     context: &mut Context,
     document: &Document<'static>,
@@ -125,7 +121,7 @@ fn build_document_object(
             let nodes = doc_for_qsa.query_selector_all(&selector);
             let arr = boa_engine::object::builtins::JsArray::new(ctx);
             for node in &nodes {
-                let el = wrap_element(ctx, *node)?;
+                let el = wrap_element(ctx, node)?;
                 let _ = arr.push(el, ctx);
             }
             Ok(JsValue::from(arr))
@@ -145,7 +141,7 @@ fn build_document_object(
             let nodes = doc_for_gbtn.get_elements_by_tag_name(&tag);
             let arr = boa_engine::object::builtins::JsArray::new(ctx);
             for node in &nodes {
-                let el = wrap_element(ctx, *node)?;
+                let el = wrap_element(ctx, node)?;
                 let _ = arr.push(el, ctx);
             }
             Ok(JsValue::from(arr))
@@ -165,7 +161,7 @@ fn build_document_object(
             let nodes = doc_for_gbcn.get_elements_by_class_name(&class);
             let arr = boa_engine::object::builtins::JsArray::new(ctx);
             for node in &nodes {
-                let el = wrap_element(ctx, *node)?;
+                let el = wrap_element(ctx, node)?;
                 let _ = arr.push(el, ctx);
             }
             Ok(JsValue::from(arr))
@@ -204,7 +200,7 @@ fn build_document_object(
         })
     };
 
-    let doc_ptr_usize = &*document as *const Document<'static> as usize;
+    let doc_ptr_usize = document as *const Document<'static> as usize;
     let initial_title = document.first_element_by_tag("title")
         .map(|n| n.text_content())
         .unwrap_or_default();
@@ -329,7 +325,7 @@ fn wrap_element(context: &mut Context, node: fortrust_dom::NodeRef<'static>) -> 
                     let value = args.get(1).map(|v| v.to_string(ctx).map(|s| s.to_std_string_escaped())).unwrap_or(Ok(String::new()))?;
                     if name.is_empty() { return Ok(JsValue::undefined()); }
                     let node_ptr = node_ptr_usize as *const fortrust_dom::Node<'static>;
-                    let node_ref: &fortrust_dom::Node<'static> = unsafe { &*node_ptr };
+                    let node_ref: &fortrust_dom::Node<'static> = { &*node_ptr };
                     if let Some(el) = node_ref.as_element() {
                         el.set_attr(&name, &value);
                         mark_dom_dirty();
@@ -345,7 +341,7 @@ fn wrap_element(context: &mut Context, node: fortrust_dom::NodeRef<'static>) -> 
                     let name = args.first().map(|v| v.to_string(ctx).map(|s| s.to_std_string_escaped())).unwrap_or(Ok(String::new()))?;
                     if name.is_empty() { return Ok(JsValue::null()); }
                     let node_ptr = node_ptr_usize as *const fortrust_dom::Node<'static>;
-                    let node_ref: &fortrust_dom::Node<'static> = unsafe { &*node_ptr };
+                    let node_ref: &fortrust_dom::Node<'static> = { &*node_ptr };
                     match node_ref.as_element().and_then(|el| el.attr(&name)) {
                         Some(val) => Ok(JsValue::from(JsString::from(val.as_str()))),
                         None => Ok(JsValue::null()),
@@ -360,7 +356,7 @@ fn wrap_element(context: &mut Context, node: fortrust_dom::NodeRef<'static>) -> 
                     let name = args.first().map(|v| v.to_string(ctx).map(|s| s.to_std_string_escaped())).unwrap_or(Ok(String::new()))?;
                     if name.is_empty() { return Ok(JsValue::undefined()); }
                     let node_ptr = node_ptr_usize as *const fortrust_dom::Node<'static>;
-                    let node_ref: &fortrust_dom::Node<'static> = unsafe { &*node_ptr };
+                    let node_ref: &fortrust_dom::Node<'static> = { &*node_ptr };
                     if let Some(el) = node_ref.as_element() {
                         el.remove_attr(&name);
                         mark_dom_dirty();
@@ -641,7 +637,7 @@ fn wrap_element(context: &mut Context, node: fortrust_dom::NodeRef<'static>) -> 
                     let nodes = node_ref.query_selector_all(&selector);
                     let arr = boa_engine::object::builtins::JsArray::new(ctx);
                     for n in &nodes {
-                        let el = wrap_element(ctx, *n)?;
+                        let el = wrap_element(ctx, n)?;
                         let _ = arr.push(el, ctx);
                     }
                     Ok(JsValue::from(arr))
@@ -659,8 +655,8 @@ fn wrap_element(context: &mut Context, node: fortrust_dom::NodeRef<'static>) -> 
                     let node_ref: &fortrust_dom::Node<'static> = &*node_ptr;
                     if let Some(el) = node_ref.as_element() {
                         let current = el.attr("class").unwrap_or_default();
-                        let mut classes: Vec<&str> = current.split_whitespace().collect();
-                        if !classes.iter().any(|c| *c == class_name.as_str()) {
+                        let classes: Vec<&str> = current.split_whitespace().collect();
+                        if !classes.contains(&class_name.as_str()) {
                             let new_class = format!("{} {}", current, class_name).trim().to_owned();
                             el.set_attr("class", &new_class);
                             mark_dom_dirty();
@@ -777,7 +773,7 @@ fn register_form_data(context: &mut Context) -> JsResult<()> {
             });
 
             let id_append = id;
-            let append_fn = unsafe {
+            let append_fn = {
                 NativeFunction::from_closure(move |_this, args, ctx| {
                     let name = args.first()
                         .map(|v| v.to_string(ctx).map(|s| s.to_std_string_escaped()))
@@ -795,7 +791,7 @@ fn register_form_data(context: &mut Context) -> JsResult<()> {
             };
 
             let id_get = id;
-            let get_fn = unsafe {
+            let get_fn = {
                 NativeFunction::from_closure(move |_this, args, ctx| {
                     let name = args.first()
                         .map(|v| v.to_string(ctx).map(|s| s.to_std_string_escaped()))
@@ -814,7 +810,7 @@ fn register_form_data(context: &mut Context) -> JsResult<()> {
             };
 
             let id_getall = id;
-            let get_all_fn = unsafe {
+            let get_all_fn = {
                 NativeFunction::from_closure(move |_this, args, ctx| {
                     let name = args.first()
                         .map(|v| v.to_string(ctx).map(|s| s.to_std_string_escaped()))
@@ -837,7 +833,7 @@ fn register_form_data(context: &mut Context) -> JsResult<()> {
             };
 
             let id_has = id;
-            let has_fn = unsafe {
+            let has_fn = {
                 NativeFunction::from_closure(move |_this, args, ctx| {
                     let name = args.first()
                         .map(|v| v.to_string(ctx).map(|s| s.to_std_string_escaped()))
@@ -853,7 +849,7 @@ fn register_form_data(context: &mut Context) -> JsResult<()> {
             };
 
             let id_delete = id;
-            let delete_fn = unsafe {
+            let delete_fn = {
                 NativeFunction::from_closure(move |_this, args, ctx| {
                     let name = args.first()
                         .map(|v| v.to_string(ctx).map(|s| s.to_std_string_escaped()))
@@ -868,7 +864,7 @@ fn register_form_data(context: &mut Context) -> JsResult<()> {
             };
 
             let id_set = id;
-            let set_fn = unsafe {
+            let set_fn = {
                 NativeFunction::from_closure(move |_this, args, ctx| {
                     let name = args.first()
                         .map(|v| v.to_string(ctx).map(|s| s.to_std_string_escaped()))

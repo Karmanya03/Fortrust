@@ -9,8 +9,10 @@
 
 use crate::{
     AnimationDirection, AnimationFillMode, AnimationPlayState, Color, ComputedStyle,
-    EasingFunction, KeyframesRule, Length, SingleAnimation, SingleTransition,
+    KeyframesRule, Length, SingleAnimation, SingleTransition,
 };
+#[cfg(test)]
+use crate::EasingFunction;
 
 // ── Interpolatable property values ───────────────────────────────────────────
 
@@ -229,7 +231,7 @@ fn parse_transform_value(value: &str) -> Option<TransformValue> {
             remaining = rest;
         } else if let Some(rest) = remaining.strip_prefix("translate(") {
             let (val, rest) = extract_paren_value(rest)?;
-            let parts: Vec<&str> = val.split(|c| c == ',' || c == ' ').map(str::trim).filter(|s| !s.is_empty()).collect();
+            let parts: Vec<&str> = val.split([',', ' ']).map(str::trim).filter(|s| !s.is_empty()).collect();
             tv.translate_x = parts.first().map(|s| parse_px_or_zero(s)).unwrap_or(0.0);
             tv.translate_y = parts.get(1).map(|s| parse_px_or_zero(s)).unwrap_or(0.0);
             remaining = rest;
@@ -247,7 +249,7 @@ fn parse_transform_value(value: &str) -> Option<TransformValue> {
             remaining = rest;
         } else if let Some(rest) = remaining.strip_prefix("scale(") {
             let (val, rest) = extract_paren_value(rest)?;
-            let parts: Vec<&str> = val.split(|c| c == ',' || c == ' ').map(str::trim).filter(|s| !s.is_empty()).collect();
+            let parts: Vec<&str> = val.split([',', ' ']).map(str::trim).filter(|s| !s.is_empty()).collect();
             let sx = parts.first().and_then(|s| s.parse::<f32>().ok()).unwrap_or(1.0);
             let sy = parts.get(1).and_then(|s| s.parse::<f32>().ok()).unwrap_or(sx);
             tv.scale_x = sx;

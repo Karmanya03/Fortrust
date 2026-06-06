@@ -34,6 +34,7 @@ pub enum WebSocketError {
 
 pub struct WebSocketClient {
     url: Url,
+    #[allow(dead_code)]
     inner: Arc<Mutex<Option<WebSocketConnectionInner>>>,
     receiver: Arc<Mutex<tokio::sync::mpsc::Receiver<WebSocketEvent>>>,
     sender: tokio::sync::mpsc::Sender<WebSocketCommand>,

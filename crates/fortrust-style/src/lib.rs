@@ -451,7 +451,9 @@ impl OutlineSizes {
 
 /// How a font-face should behave while loading.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Default)]
 pub enum FontDisplay {
+    #[default]
     Auto,
     Block,
     Swap,
@@ -459,11 +461,6 @@ pub enum FontDisplay {
     Optional,
 }
 
-impl Default for FontDisplay {
-    fn default() -> Self {
-        Self::Auto
-    }
-}
 
 /// A single source entry in `src:` of an @font-face rule.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -494,8 +491,10 @@ pub struct FontFaceRule {
 // ── Animation / Transition types ──────────────────────────────────────────────
 
 #[derive(Debug, Clone, Copy, PartialEq)]
+#[derive(Default)]
 pub enum EasingFunction {
     Linear,
+    #[default]
     Ease,
     EaseIn,
     EaseOut,
@@ -506,9 +505,6 @@ pub enum EasingFunction {
     Steps(i32),
 }
 
-impl Default for EasingFunction {
-    fn default() -> Self { Self::Ease }
-}
 
 impl EasingFunction {
     pub fn apply(&self, t: f32) -> f32 {
@@ -545,38 +541,35 @@ fn cubic_bezier(x1: f32, y1: f32, x2: f32, y2: f32, t: f32) -> f32 {
 }
 
 #[derive(Debug, Clone, PartialEq)]
+#[derive(Default)]
 pub enum AnimationDirection {
+    #[default]
     Normal,
     Reverse,
     Alternate,
     AlternateReverse,
 }
 
-impl Default for AnimationDirection {
-    fn default() -> Self { Self::Normal }
-}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Default)]
 pub enum AnimationFillMode {
+    #[default]
     None,
     Forwards,
     Backwards,
     Both,
 }
 
-impl Default for AnimationFillMode {
-    fn default() -> Self { Self::None }
-}
 
 #[derive(Debug, Clone, PartialEq)]
+#[derive(Default)]
 pub enum AnimationPlayState {
+    #[default]
     Running,
     Paused,
 }
 
-impl Default for AnimationPlayState {
-    fn default() -> Self { Self::Running }
-}
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct SingleAnimation {
@@ -1040,6 +1033,22 @@ enum PropertyValue {
     BoxShadow(BoxShadow),
     Outline(OutlineSizes),
     Transform(CssTransform),
+    Animation(Vec<SingleAnimation>),
+    Transition(Vec<SingleTransition>),
+    // Individual animation sub-properties (for non-shorthand usage)
+    AnimationNames(Vec<String>),
+    AnimationDurations(Vec<f32>),
+    AnimationEasings(Vec<EasingFunction>),
+    AnimationDelays(Vec<f32>),
+    AnimationIterationCounts(Vec<f32>),
+    AnimationDirections(Vec<AnimationDirection>),
+    AnimationFillModes(Vec<AnimationFillMode>),
+    AnimationPlayStates(Vec<AnimationPlayState>),
+    // Individual transition sub-properties
+    TransitionProperties(Vec<String>),
+    TransitionDurations(Vec<f32>),
+    TransitionEasings(Vec<EasingFunction>),
+    TransitionDelays(Vec<f32>),
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -1096,11 +1105,10 @@ impl Stylesheet {
         let mut rest = input;
         'outer: while !rest.is_empty() {
             let trimmed = rest.trim_start();
-            let at_offset = rest.len() - trimmed.len();
 
             // ── @font-face ──
-            if trimmed.starts_with("@font-face") {
-                let after_at = &trimmed["@font-face".len()..].trim_start();
+            if let Some(after_font_face) = trimmed.strip_prefix("@font-face") {
+                let after_at = after_font_face.trim_start();
                 if let Some(open) = after_at.find('{') {
                     let body_start = open + 1;
                     let rest_after = &after_at[body_start..];
@@ -1121,16 +1129,18 @@ impl Stylesheet {
             }
 
             if trimmed.starts_with("@keyframes") || trimmed.starts_with("@-webkit-keyframes") {
-                let after_at = if trimmed.starts_with("@-webkit-keyframes") {
-                    &trimmed["@-webkit-keyframes".len()..]
+                let after_at = if let Some(rest) = trimmed.strip_prefix("@-webkit-keyframes") {
+                    rest
+                } else if let Some(rest) = trimmed.strip_prefix("@keyframes") {
+                    rest
                 } else {
-                    &trimmed["@keyframes".len()..]
+                    continue;
                 };
                 let name_end = after_at.find(|c: char| c.is_whitespace() || c == '{').unwrap_or(after_at.len());
                 let name = after_at[..name_end].trim().to_owned();
                 let after_name = after_at[name_end..].trim_start();
-                if !name.is_empty() {
-                    if let Some(open) = after_name.find('{') {
+                if !name.is_empty()
+                    && let Some(open) = after_name.find('{') {
                         let body_start = open + 1;
                         let rest_after = &after_name[body_start..];
                         let rest_after_len = rest_after.len();
@@ -1184,12 +1194,11 @@ impl Stylesheet {
                         rest = &rest[consumed..];
                         continue;
                     }
-                }
             }
 
             // ── @media ──
-            if trimmed.starts_with("@media") {
-                let after_at = &trimmed["@media".len()..].trim_start();
+            if let Some(after_media) = trimmed.strip_prefix("@media") {
+                let after_at = after_media.trim_start();
                 // Find the opening brace of the media block
                 if let Some(open) = after_at.find('{') {
                     let query_str = after_at[..open].trim();
@@ -1357,12 +1366,11 @@ impl StyleEngine {
         // First pass: collect all custom property definitions
         for (_, _, declarations) in &matched {
             for decl in declarations.iter() {
-                if decl.property.starts_with("--") {
-                    if let PropertyValue::String(val) = &decl.value {
+                if decl.property.starts_with("--")
+                    && let PropertyValue::String(val) = &decl.value {
                         let resolved = resolve_var_references(val, &style.custom_properties);
                         style.custom_properties.insert(decl.property.to_string(), resolved);
                     }
-                }
             }
         }
 
@@ -1376,12 +1384,11 @@ impl StyleEngine {
             let declarations = parse_declarations(&inline);
             // Collect inline custom properties first
             for decl in &declarations {
-                if decl.property.starts_with("--") {
-                    if let PropertyValue::String(val) = &decl.value {
+                if decl.property.starts_with("--")
+                    && let PropertyValue::String(val) = &decl.value {
                         let resolved = resolve_var_references(val, &style.custom_properties);
                         style.custom_properties.insert(decl.property.to_string(), resolved);
                     }
-                }
             }
             apply_declarations(&mut style, &declarations);
         }
@@ -1551,11 +1558,9 @@ impl SimpleSelector {
                             if idx % 2 != 0 { return false; }
                         } else if pseudo == "nth-child(odd)" {
                             if idx % 2 == 0 { return false; }
-                        } else if let Some(n_str) = pseudo.strip_prefix("nth-child(").and_then(|s| s.strip_suffix(")")) {
-                            if let Ok(n) = n_str.parse::<usize>() {
-                                if idx != n { return false; }
-                            }
-                        }
+                        } else if let Some(n_str) = pseudo.strip_prefix("nth-child(").and_then(|s| s.strip_suffix(")"))
+                            && let Ok(n) = n_str.parse::<usize>()
+                                && idx != n { return false; }
                     } else {
                         return false;
                     }
@@ -1657,6 +1662,308 @@ fn parse_declarations(input: &str) -> SmallVec<[Declaration; 6]> {
             })
         })
         .collect()
+}
+
+// ── Animation / Transition parsing helpers ─────────────────────────────────
+
+fn parse_css_time(value: &str) -> Option<f32> {
+    let value = value.trim();
+    if let Some(rest) = value.strip_suffix("ms") {
+        rest.trim().parse::<f32>().ok()
+    } else if let Some(rest) = value.strip_suffix('s') {
+        rest.trim().parse::<f32>().ok().map(|v| v * 1000.0)
+    } else {
+        value.parse::<f32>().ok()
+    }
+}
+
+fn parse_easing_function(value: &str) -> Option<EasingFunction> {
+    let lowered = value.trim().to_ascii_lowercase();
+    match lowered.as_str() {
+        "linear" => Some(EasingFunction::Linear),
+        "ease" => Some(EasingFunction::Ease),
+        "ease-in" => Some(EasingFunction::EaseIn),
+        "ease-out" => Some(EasingFunction::EaseOut),
+        "ease-in-out" => Some(EasingFunction::EaseInOut),
+        "step-start" => Some(EasingFunction::StepStart),
+        "step-end" => Some(EasingFunction::StepEnd),
+        _ => {
+            if lowered.starts_with("cubic-bezier(") {
+                let inner = lowered.trim_start_matches("cubic-bezier(").trim_end_matches(')');
+                let nums: Vec<f32> = inner.split(',').filter_map(|n| n.trim().parse::<f32>().ok()).collect();
+                if nums.len() == 4 {
+                    Some(EasingFunction::CubicBezier(nums[0], nums[1], nums[2], nums[3]))
+                } else {
+                    None
+                }
+            } else if lowered.starts_with("steps(") {
+                let inner = lowered.trim_start_matches("steps(").trim_end_matches(')');
+                if let Ok(n) = inner.trim().parse::<i32>() {
+                    Some(EasingFunction::Steps(n))
+                } else {
+                    None
+                }
+            } else {
+                None
+            }
+        }
+    }
+}
+
+fn parse_animation_direction(value: &str) -> Option<AnimationDirection> {
+    match value.trim().to_ascii_lowercase().as_str() {
+        "normal" => Some(AnimationDirection::Normal),
+        "reverse" => Some(AnimationDirection::Reverse),
+        "alternate" => Some(AnimationDirection::Alternate),
+        "alternate-reverse" => Some(AnimationDirection::AlternateReverse),
+        _ => None,
+    }
+}
+
+fn parse_animation_fill_mode(value: &str) -> Option<AnimationFillMode> {
+    match value.trim().to_ascii_lowercase().as_str() {
+        "none" => Some(AnimationFillMode::None),
+        "forwards" => Some(AnimationFillMode::Forwards),
+        "backwards" => Some(AnimationFillMode::Backwards),
+        "both" => Some(AnimationFillMode::Both),
+        _ => None,
+    }
+}
+
+fn parse_animation_play_state(value: &str) -> Option<AnimationPlayState> {
+    match value.trim().to_ascii_lowercase().as_str() {
+        "running" => Some(AnimationPlayState::Running),
+        "paused" => Some(AnimationPlayState::Paused),
+        _ => None,
+    }
+}
+
+fn is_easing_keyword(w: &str) -> bool {
+    matches!(
+        w.to_ascii_lowercase().as_str(),
+        "linear" | "ease" | "ease-in" | "ease-out" | "ease-in-out"
+        | "step-start" | "step-end"
+    )
+}
+
+fn is_direction_keyword(w: &str) -> bool {
+    matches!(
+        w.to_ascii_lowercase().as_str(),
+        "normal" | "reverse" | "alternate" | "alternate-reverse"
+    )
+}
+
+fn is_fill_mode_keyword(w: &str) -> bool {
+    matches!(
+        w.to_ascii_lowercase().as_str(),
+        "none" | "forwards" | "backwards" | "both"
+    )
+}
+
+fn is_play_state_keyword(w: &str) -> bool {
+    matches!(
+        w.to_ascii_lowercase().as_str(),
+        "running" | "paused"
+    )
+}
+
+fn is_animation_ident(w: &str) -> bool {
+    let lowered = w.to_ascii_lowercase();
+    !(lowered == "none"
+        || is_easing_keyword(w)
+        || is_direction_keyword(w)
+        || is_fill_mode_keyword(w)
+        || is_play_state_keyword(w)
+        || lowered == "infinite"
+        || lowered == "initial"
+        || lowered == "inherit"
+        || lowered == "unset")
+}
+
+/// Parse a single animation shorthand value (non-comma-separated piece).
+fn parse_single_animation(value: &str) -> Option<SingleAnimation> {
+    let mut anim = SingleAnimation::default();
+    let tokens: Vec<&str> = value.split_whitespace().collect();
+    let mut duration_found = false;
+
+    for token in tokens {
+        let token = token.trim();
+        if token.is_empty() { continue; }
+
+        // Try to parse as a time value (duration or delay)
+        if let Some(time) = parse_css_time(token) {
+            if !duration_found {
+                anim.duration = time;
+                duration_found = true;
+            } else {
+                anim.delay = time;
+            }
+            continue;
+        }
+
+        // Try easing function
+        if (token.starts_with("cubic-bezier(") || token.starts_with("steps("))
+            && let Some(easing) = parse_easing_function(token) {
+                anim.timing_function = easing;
+                continue;
+            }
+
+        let lowered = token.to_ascii_lowercase();
+        match lowered.as_str() {
+            "infinite" => anim.iteration_count = f32::INFINITY,
+            _ if is_easing_keyword(token) => {
+                if let Some(easing) = parse_easing_function(token) {
+                    anim.timing_function = easing;
+                }
+            }
+            _ if is_direction_keyword(token) => {
+                if let Some(dir) = parse_animation_direction(token) {
+                    anim.direction = dir;
+                }
+            }
+            _ if is_fill_mode_keyword(token) => {
+                if let Some(fm) = parse_animation_fill_mode(token) {
+                    anim.fill_mode = fm;
+                }
+            }
+            _ if is_play_state_keyword(token) => {
+                if let Some(ps) = parse_animation_play_state(token) {
+                    anim.play_state = ps;
+                }
+            }
+            _ if is_animation_ident(token) => {
+                anim.name = token.to_owned();
+            }
+            _ => {
+                // Try numeric iteration count
+                if let Ok(n) = token.parse::<f32>() {
+                    anim.iteration_count = n;
+                }
+            }
+        }
+    }
+
+    if anim.name.is_empty() || anim.duration == 0.0 {
+        // animation without a name or duration is invalid / no-op
+        return None;
+    }
+    Some(anim)
+}
+
+/// Parse the `animation` shorthand: comma-separated list of single animations.
+fn parse_animation_shorthand(value: &str) -> Option<PropertyValue> {
+    let animations: Vec<SingleAnimation> = value
+        .split(',')
+        .filter_map(|part| parse_single_animation(part.trim()))
+        .collect();
+    if animations.is_empty() { None } else { Some(PropertyValue::Animation(animations)) }
+}
+
+/// Parse a comma-separated list of names for `animation-name`.
+fn parse_animation_name_list(value: &str) -> Vec<String> {
+    value.split(',')
+        .map(|s| s.trim().to_owned())
+        .filter(|s| !s.is_empty() && !s.eq_ignore_ascii_case("none"))
+        .collect()
+}
+
+/// Parse a comma-separated list of time values.
+fn parse_time_list(value: &str) -> Vec<f32> {
+    value.split(',')
+        .filter_map(|s| parse_css_time(s.trim()))
+        .collect()
+}
+
+/// Parse a comma-separated list of easing functions.
+fn parse_easing_list(value: &str) -> Vec<EasingFunction> {
+    value.split(',')
+        .filter_map(|s| parse_easing_function(s.trim()))
+        .collect()
+}
+
+/// Parse `animation-iteration-count` list (numbers and "infinite")
+fn parse_iteration_count_list(value: &str) -> Vec<f32> {
+    value.split(',')
+        .map(|s| {
+            let s = s.trim();
+            if s.eq_ignore_ascii_case("infinite") { f32::INFINITY }
+            else { s.parse::<f32>().unwrap_or(1.0) }
+        })
+        .collect()
+}
+
+/// Parse a comma-separated list of animation directions.
+fn parse_direction_list(value: &str) -> Vec<AnimationDirection> {
+    value.split(',')
+        .filter_map(|s| parse_animation_direction(s.trim()))
+        .collect()
+}
+
+/// Parse a comma-separated list of fill modes.
+fn parse_fill_mode_list(value: &str) -> Vec<AnimationFillMode> {
+    value.split(',')
+        .filter_map(|s| parse_animation_fill_mode(s.trim()))
+        .collect()
+}
+
+/// Parse a comma-separated list of play states.
+fn parse_play_state_list(value: &str) -> Vec<AnimationPlayState> {
+    value.split(',')
+        .filter_map(|s| parse_animation_play_state(s.trim()))
+        .collect()
+}
+
+/// Parse a single transition shorthand value.
+fn parse_single_transition(value: &str) -> Option<SingleTransition> {
+    let mut trans = SingleTransition::default();
+    let tokens: Vec<&str> = value.split_whitespace().collect();
+    let mut duration_found = false;
+    let mut property_found = false;
+
+    for token in &tokens {
+        let token = token.trim();
+        if token.is_empty() { continue; }
+
+        if let Some(time) = parse_css_time(token) {
+            if !duration_found {
+                trans.duration = time;
+                duration_found = true;
+            } else {
+                trans.delay = time;
+            }
+            continue;
+        }
+
+        if (token.starts_with("cubic-bezier(") || token.starts_with("steps("))
+            && let Some(easing) = parse_easing_function(token) {
+                trans.timing_function = easing;
+                continue;
+            }
+
+        let lowered = token.to_ascii_lowercase();
+        if is_easing_keyword(token) {
+            if let Some(easing) = parse_easing_function(token) {
+                trans.timing_function = easing;
+            }
+        } else if lowered == "none" || lowered == "all" || !property_found {
+            trans.property = token.to_owned();
+            property_found = true;
+        }
+    }
+
+    if trans.property.is_empty() || trans.property == "none" {
+        return None;
+    }
+    Some(trans)
+}
+
+/// Parse the `transition` shorthand.
+fn parse_transition_shorthand(value: &str) -> Option<PropertyValue> {
+    let transitions: Vec<SingleTransition> = value
+        .split(',')
+        .filter_map(|part| parse_single_transition(part.trim()))
+        .collect();
+    if transitions.is_empty() { None } else { Some(PropertyValue::Transition(transitions)) }
 }
 
 fn parse_property_value(property: &str, value: &str) -> Option<PropertyValue> {
@@ -1766,6 +2073,60 @@ fn parse_property_value(property: &str, value: &str) -> Option<PropertyValue> {
         | "border-bottom-width"
         | "border-left-width" => parse_length(value).map(PropertyValue::Length),
         "transform" => parse_css_transform(value).map(PropertyValue::Transform),
+        // ── Animation and transition properties ──
+        "animation" => parse_animation_shorthand(value),
+        "animation-name" => {
+            let names = parse_animation_name_list(value);
+            if names.is_empty() { None } else { Some(PropertyValue::AnimationNames(names)) }
+        }
+        "animation-duration" => {
+            let durations = parse_time_list(value);
+            if durations.is_empty() { None } else { Some(PropertyValue::AnimationDurations(durations)) }
+        }
+        "animation-timing-function" => {
+            let easings = parse_easing_list(value);
+            if easings.is_empty() { None } else { Some(PropertyValue::AnimationEasings(easings)) }
+        }
+        "animation-delay" => {
+            let delays = parse_time_list(value);
+            if delays.is_empty() { None } else { Some(PropertyValue::AnimationDelays(delays)) }
+        }
+        "animation-iteration-count" => {
+            let counts = parse_iteration_count_list(value);
+            if counts.is_empty() { None } else { Some(PropertyValue::AnimationIterationCounts(counts)) }
+        }
+        "animation-direction" => {
+            let dirs = parse_direction_list(value);
+            if dirs.is_empty() { None } else { Some(PropertyValue::AnimationDirections(dirs)) }
+        }
+        "animation-fill-mode" => {
+            let modes = parse_fill_mode_list(value);
+            if modes.is_empty() { None } else { Some(PropertyValue::AnimationFillModes(modes)) }
+        }
+        "animation-play-state" => {
+            let states = parse_play_state_list(value);
+            if states.is_empty() { None } else { Some(PropertyValue::AnimationPlayStates(states)) }
+        }
+        "transition" => parse_transition_shorthand(value),
+        "transition-property" => {
+            let props: Vec<String> = value.split(',')
+                .map(|s| s.trim().to_owned())
+                .filter(|s| !s.is_empty() && !s.eq_ignore_ascii_case("none"))
+                .collect();
+            if props.is_empty() { None } else { Some(PropertyValue::TransitionProperties(props)) }
+        }
+        "transition-duration" => {
+            let durations = parse_time_list(value);
+            if durations.is_empty() { None } else { Some(PropertyValue::TransitionDurations(durations)) }
+        }
+        "transition-timing-function" => {
+            let easings = parse_easing_list(value);
+            if easings.is_empty() { None } else { Some(PropertyValue::TransitionEasings(easings)) }
+        }
+        "transition-delay" => {
+            let delays = parse_time_list(value);
+            if delays.is_empty() { None } else { Some(PropertyValue::TransitionDelays(delays)) }
+        }
         _ => None,
     }
 }
@@ -1975,6 +2336,117 @@ fn apply_declarations(style: &mut ComputedStyle, declarations: &[Declaration]) {
             }
             ("transform", PropertyValue::Transform(value)) => {
                 style.transform = value.clone();
+            }
+            // ── Animation and transition handling ──
+            ("animation", PropertyValue::Animation(value)) => {
+                style.animations = value.clone();
+            }
+            ("animation-name", PropertyValue::AnimationNames(value)) => {
+                let count = value.len();
+                style.animations.resize_with(count, Default::default);
+                for (i, name) in value.iter().enumerate() {
+                    style.animations[i].name = name.clone();
+                }
+            }
+            ("animation-duration", PropertyValue::AnimationDurations(value)) => {
+                for (i, dur) in value.iter().enumerate() {
+                    let idx = i % style.animations.len().max(1);
+                    if idx >= style.animations.len() {
+                        style.animations.resize_with(idx + 1, Default::default);
+                    }
+                    style.animations[idx].duration = *dur;
+                }
+            }
+            ("animation-timing-function", PropertyValue::AnimationEasings(value)) => {
+                for (i, easing) in value.iter().enumerate() {
+                    let idx = i % style.animations.len().max(1);
+                    if idx >= style.animations.len() {
+                        style.animations.resize_with(idx + 1, Default::default);
+                    }
+                    style.animations[idx].timing_function = *easing;
+                }
+            }
+            ("animation-delay", PropertyValue::AnimationDelays(value)) => {
+                for (i, delay) in value.iter().enumerate() {
+                    let idx = i % style.animations.len().max(1);
+                    if idx >= style.animations.len() {
+                        style.animations.resize_with(idx + 1, Default::default);
+                    }
+                    style.animations[idx].delay = *delay;
+                }
+            }
+            ("animation-iteration-count", PropertyValue::AnimationIterationCounts(value)) => {
+                for (i, count) in value.iter().enumerate() {
+                    let idx = i % style.animations.len().max(1);
+                    if idx >= style.animations.len() {
+                        style.animations.resize_with(idx + 1, Default::default);
+                    }
+                    style.animations[idx].iteration_count = *count;
+                }
+            }
+            ("animation-direction", PropertyValue::AnimationDirections(value)) => {
+                for (i, dir) in value.iter().enumerate() {
+                    let idx = i % style.animations.len().max(1);
+                    if idx >= style.animations.len() {
+                        style.animations.resize_with(idx + 1, Default::default);
+                    }
+                    style.animations[idx].direction = dir.clone();
+                }
+            }
+            ("animation-fill-mode", PropertyValue::AnimationFillModes(value)) => {
+                for (i, mode) in value.iter().enumerate() {
+                    let idx = i % style.animations.len().max(1);
+                    if idx >= style.animations.len() {
+                        style.animations.resize_with(idx + 1, Default::default);
+                    }
+                    style.animations[idx].fill_mode = *mode;
+                }
+            }
+            ("animation-play-state", PropertyValue::AnimationPlayStates(value)) => {
+                for (i, state) in value.iter().enumerate() {
+                    let idx = i % style.animations.len().max(1);
+                    if idx >= style.animations.len() {
+                        style.animations.resize_with(idx + 1, Default::default);
+                    }
+                    style.animations[idx].play_state = state.clone();
+                }
+            }
+            ("transition", PropertyValue::Transition(value)) => {
+                style.transitions = value.clone();
+            }
+            ("transition-property", PropertyValue::TransitionProperties(value)) => {
+                let count = value.len();
+                style.transitions.resize_with(count, Default::default);
+                for (i, prop) in value.iter().enumerate() {
+                    style.transitions[i].property = prop.clone();
+                }
+            }
+            ("transition-duration", PropertyValue::TransitionDurations(value)) => {
+                for (i, dur) in value.iter().enumerate() {
+                    let idx = i % style.transitions.len().max(1);
+                    if idx >= style.transitions.len() {
+                        style.transitions.resize_with(idx + 1, Default::default);
+                    }
+                    style.transitions[idx].duration = *dur;
+                }
+            }
+            ("transition-timing-function", PropertyValue::TransitionEasings(value)) => {
+                for (i, easing) in value.iter().enumerate() {
+                    let idx = i % style.transitions.len().max(1);
+                    if idx >= style.transitions.len() {
+                        style.transitions.resize_with(idx + 1, Default::default);
+                    }
+                    style.transitions[idx].timing_function = *easing;
+                }
+            }
+            ("transition-delay", PropertyValue::TransitionDelays(value)) => {
+                for (i, delay) in value.iter().enumerate() {
+                    let idx = i % style.transitions.len().max(1);
+                    if idx >= style.transitions.len() {
+                        style.transitions.resize_with(idx + 1, Default::default);
+                    }
+                    style.transitions[idx].delay = *delay;
+                }
             }
             _ => {}
         }

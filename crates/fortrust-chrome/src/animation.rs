@@ -106,53 +106,6 @@ impl Spring {
     }
 }
 
-#[cfg(test)]
-mod spring_tests {
-    use super::*;
-
-    #[test]
-    fn spring_reaches_target() {
-        let mut s = Spring::new(0.0);
-        s.set_target(100.0);
-        let mut steps = 0;
-        while s.tick(1.0 / 60.0) && steps < 600 {
-            steps += 1;
-        }
-        assert!(s.is_settled());
-        assert!((s.value() - 100.0).abs() < 0.5);
-    }
-
-    #[test]
-    fn spring_critical_damping_has_no_overshoot() {
-        let mut s = Spring::new(0.0).with_damping(1.0);
-        s.set_target(100.0);
-        let mut max_overshoot = f32::MIN;
-        for _ in 0..600 {
-            s.tick(1.0 / 60.0);
-            if s.value() > max_overshoot {
-                max_overshoot = s.value();
-            }
-        }
-        // Critically damped springs should not exceed the target.
-        assert!(max_overshoot <= 100.5, "max was {max_overshoot}");
-    }
-
-    #[test]
-    fn spring_underdamped_overshoots() {
-        let mut s = Spring::new(0.0).with_damping(0.4);
-        s.set_target(100.0);
-        let mut max_overshoot = f32::MIN;
-        for _ in 0..1200 {
-            s.tick(1.0 / 60.0);
-            if s.value() > max_overshoot {
-                max_overshoot = s.value();
-            }
-        }
-        // Underdamped: should overshoot by at least 1%.
-        assert!(max_overshoot > 101.0, "max was {max_overshoot}");
-    }
-}
-
 #[allow(dead_code)]
 pub struct TabAnimation {
     pub width: Animated,
@@ -253,5 +206,50 @@ impl SidebarAnimation {
 impl Default for SidebarAnimation {
     fn default() -> Self {
         Self::new()
+    }
+}
+
+#[cfg(test)]
+mod spring_tests {
+    use super::*;
+
+    #[test]
+    fn spring_reaches_target() {
+        let mut s = Spring::new(0.0);
+        s.set_target(100.0);
+        let mut steps = 0;
+        while s.tick(1.0 / 60.0) && steps < 600 {
+            steps += 1;
+        }
+        assert!(s.is_settled());
+        assert!((s.value() - 100.0).abs() < 0.5);
+    }
+
+    #[test]
+    fn spring_critical_damping_has_no_overshoot() {
+        let mut s = Spring::new(0.0).with_damping(1.0);
+        s.set_target(100.0);
+        let mut max_overshoot = f32::MIN;
+        for _ in 0..600 {
+            s.tick(1.0 / 60.0);
+            if s.value() > max_overshoot {
+                max_overshoot = s.value();
+            }
+        }
+        assert!(max_overshoot <= 100.5, "max was {max_overshoot}");
+    }
+
+    #[test]
+    fn spring_underdamped_overshoots() {
+        let mut s = Spring::new(0.0).with_damping(0.4);
+        s.set_target(100.0);
+        let mut max_overshoot = f32::MIN;
+        for _ in 0..1200 {
+            s.tick(1.0 / 60.0);
+            if s.value() > max_overshoot {
+                max_overshoot = s.value();
+            }
+        }
+        assert!(max_overshoot > 101.0, "max was {max_overshoot}");
     }
 }

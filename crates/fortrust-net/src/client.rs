@@ -213,16 +213,13 @@ impl NetworkClient {
             );
 
             // Handle redirects
-            if (300..400).contains(&response.status) {
-                if let Some(location) = response.headers.get("location") {
-                    if let Ok(loc_str) = location.to_str() {
-                        if let Ok(next_url) = response.url.join(loc_str) {
+            if (300..400).contains(&response.status)
+                && let Some(location) = response.headers.get("location")
+                    && let Ok(loc_str) = location.to_str()
+                        && let Ok(next_url) = response.url.join(loc_str) {
                             context.url = next_url.to_string();
                             continue;
                         }
-                    }
-                }
-            }
 
             return Ok(response);
         }

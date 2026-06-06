@@ -7,7 +7,6 @@
 //!                   onloadstart, onprogress, onloadend
 
 use std::cell::RefCell;
-use std::collections::HashMap;
 use std::sync::atomic::{AtomicU64, Ordering};
 
 use boa_engine::{
@@ -16,7 +15,7 @@ use boa_engine::{
 };
 use fortrust_core::{RequestContext, ResourceType};
 use fortrust_net::NetworkClient;
-use tracing::{debug, warn};
+use tracing::debug;
 use url::Url;
 
 use crate::event_loop::EventLoop;
@@ -74,7 +73,7 @@ pub fn register(
 }
 
 fn build_xhr_instance(ctx: &mut Context, base_origin: &str) -> JsResult<JsValue> {
-    let id = NEXT_XHR_ID.fetch_add(1, Ordering::Relaxed);
+    let _id = NEXT_XHR_ID.fetch_add(1, Ordering::Relaxed);
     let origin = base_origin.to_owned();
 
     // State storage in thread-local per XHR instance
@@ -152,7 +151,7 @@ fn build_xhr_instance(ctx: &mut Context, base_origin: &str) -> JsResult<JsValue>
     };
 
     let state_send = state.clone();
-    let origin_send = origin.clone();
+    let _origin_send = origin.clone();
     let send_fn = unsafe {
         NativeFunction::from_closure(move |_this, args, ctx| {
             let body = args.first()
@@ -266,7 +265,7 @@ fn build_xhr_instance(ctx: &mut Context, base_origin: &str) -> JsResult<JsValue>
 
     let state_get_all = state.clone();
     let get_all_response_headers_fn = unsafe {
-        NativeFunction::from_closure(move |_this, _args, ctx| {
+        NativeFunction::from_closure(move |_this, _args, _ctx| {
             let s = state_get_all.borrow();
             let mut result = String::new();
             for (name, value) in &s.response_headers {
@@ -296,7 +295,7 @@ fn build_xhr_instance(ctx: &mut Context, base_origin: &str) -> JsResult<JsValue>
 
     let state_resp_text = state.clone();
     let get_response_text_fn = unsafe {
-        NativeFunction::from_closure(move |_this, _args, ctx| {
+        NativeFunction::from_closure(move |_this, _args, _ctx| {
             let s = state_resp_text.borrow();
             if s.ready_state == LOADING || s.ready_state == DONE {
                 let text = String::from_utf8_lossy(&s.response_body).to_string();
@@ -325,7 +324,7 @@ fn build_xhr_instance(ctx: &mut Context, base_origin: &str) -> JsResult<JsValue>
 
     let state_status_text = state.clone();
     let get_status_text_fn = unsafe {
-        NativeFunction::from_closure(move |_this, _args, ctx| {
+        NativeFunction::from_closure(move |_this, _args, _ctx| {
             let s = state_status_text.borrow();
             Ok(JsValue::from(JsString::from(s.status_text.as_str())))
         })
@@ -333,7 +332,7 @@ fn build_xhr_instance(ctx: &mut Context, base_origin: &str) -> JsResult<JsValue>
 
     let state_resp_url = state.clone();
     let get_response_url_fn = unsafe {
-        NativeFunction::from_closure(move |_this, _args, ctx| {
+        NativeFunction::from_closure(move |_this, _args, _ctx| {
             let s = state_resp_url.borrow();
             Ok(JsValue::from(JsString::from(s.url.as_str())))
         })
@@ -460,10 +459,10 @@ struct XhrResponse {
 }
 
 fn perform_xhr_request(
-    method: &str,
+    _method: &str,
     url: &str,
-    headers: &[(String, String)],
-    body: Option<&str>,
+    _headers: &[(String, String)],
+    _body: Option<&str>,
 ) -> Result<XhrResponse, String> {
     let client_rc = XHR_CLIENT.with(|c| c.borrow().clone());
     let Some(client_rc) = client_rc else {

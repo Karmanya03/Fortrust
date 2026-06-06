@@ -491,7 +491,7 @@ mod tests {
         let mut v = value(true);
         v.secure = true;
         jar.set(key("example.com", "session"), v, &https);
-        assert!(!jar.get_for_url(&http).is_empty() == false);
+        assert!(jar.get_for_url(&http).is_empty());
         // The above is just for symmetry — main check:
         let visible_http = jar.get_for_url(&http);
         assert!(visible_http.is_empty(), "secure cookies must not be sent over http");

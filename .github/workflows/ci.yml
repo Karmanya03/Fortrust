@@ -17,6 +17,9 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
 
+      - name: Install system dependencies (Linux)
+        run: sudo apt-get update && sudo apt-get install -y libx11-dev libx11-xcb-dev libxkbcommon-dev libwayland-dev libxcb-dri2-0-dev libxcb-icccm4-dev libxcb-present-dev libxcb-composite0-dev libxcb-keysyms1-dev libxcb-xfixes0-dev libxcb-xinput-dev libxcb-randr0-dev libxcb-shm0-dev libxcb-xinerama0-dev libxcb-xkb-dev
+
       - name: Set up Rust toolchain
         uses: actions-rs/toolchain@v1
         with:
@@ -29,7 +32,8 @@ jobs:
           path: |
             ~/.cargo/registry
             ~/.cargo/git
-          key: ${{ runner.os }}-cargo-registry-${{ hashFiles('**/Cargo.lock') }}
+            target
+          key: ${{ runner.os }}-cargo-${{ hashFiles('**/Cargo.lock') }}
 
       - name: Install components
         run: rustup component add clippy rustfmt || true

@@ -244,14 +244,13 @@ impl FortrustSearch {
         }
 
         let cache_key = self.cache.as_ref().map(|_| self.cache_key(query, page));
-        if let (Some(cache), Some(key)) = (&self.cache, cache_key.as_ref()) {
-            if let Some(results) = cache.get(key).await {
+        if let (Some(cache), Some(key)) = (&self.cache, cache_key.as_ref())
+            && let Some(results) = cache.get(key).await {
                 report.raw_results = results.len();
                 report.returned_results = results.len();
                 report.cache_hit = true;
                 return SearchResponse { results, report };
             }
-        }
 
         let mut join_set = JoinSet::new();
 

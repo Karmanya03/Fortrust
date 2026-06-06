@@ -330,11 +330,10 @@ pub fn dispatch_event_chain(
 
     // Phase 1: Capture (root → parent of target)
     event.phase = EventPhase::Capturing;
-    for i in 0..target_idx {
+    for &(node_ptr, listeners) in &ancestor_chain[..target_idx] {
         if event.propagation_stopped {
             break;
         }
-        let (node_ptr, listeners) = ancestor_chain[i];
         event.current_target_ptr = node_ptr;
         let matching = listeners.get_matching(&event.event_type, ListenerPhase::Capture);
         let once_ids: Vec<CallbackId> = matching.iter().filter(|l| l.once).map(|l| l.callback_id).collect();
@@ -352,8 +351,8 @@ pub fn dispatch_event_chain(
     }
 
     // Phase 2: At target — fire all listeners regardless of phase
-    if !event.propagation_stopped {
-        if let Some((node_ptr, listeners)) = ancestor_chain.get(target_idx) {
+    if !event.propagation_stopped
+        && let Some((node_ptr, listeners)) = ancestor_chain.get(target_idx) {
             event.phase = EventPhase::AtTarget;
             event.current_target_ptr = *node_ptr;
             let matching = listeners.get_matching(&event.event_type, ListenerPhase::Both);
@@ -370,16 +369,14 @@ pub fn dispatch_event_chain(
                 listeners.remove_once_fired(&event.event_type, &once_ids);
             }
         }
-    }
 
     // Phase 3: Bubble (parent of target → root), only if event.bubbles
     if event.bubbles && !event.propagation_stopped {
         event.phase = EventPhase::Bubbling;
-        for i in (0..target_idx).rev() {
+        for &(node_ptr, listeners) in ancestor_chain[..target_idx].iter().rev() {
             if event.propagation_stopped {
                 break;
             }
-            let (node_ptr, listeners) = ancestor_chain[i];
             event.current_target_ptr = node_ptr;
             let matching = listeners.get_matching(&event.event_type, ListenerPhase::Bubble);
             let once_ids: Vec<CallbackId> = matching.iter().filter(|l| l.once).map(|l| l.callback_id).collect();
@@ -639,7 +636,7 @@ mod tests {
 
         struct StopInvoker;
         impl EventCallbackInvoker for StopInvoker {
-            fn invoke(&mut self, callback_id: CallbackId, event: &DomEvent) -> CallbackResult {
+            fn invoke(&mut self, callback_id: CallbackId, _event: &DomEvent) -> CallbackResult {
                 if callback_id == 2 {
                     CallbackResult {
                         stop_propagation: true,

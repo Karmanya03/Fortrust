@@ -8,8 +8,8 @@
 //! Enforces memory limits, execution time limits, and API restrictions.
 
 use std::time::{Duration, Instant};
-use boa_engine::{Context, JsValue, Source};
-use tracing::{debug, warn};
+use boa_engine::JsValue;
+use tracing::warn;
 
 use crate::runtime::{JsError, JsRuntime, WebApiRegistry};
 use crate::event_loop::EventLoop;
@@ -204,13 +204,12 @@ impl SandboxedRuntime {
     /// Evaluate a script in the sandbox with time and resource enforcement.
     pub fn eval(&mut self, source: &str) -> SandboxResult {
         // Check policy before execution
-        if !self.config.allow_dynamic_code {
-            if source.contains("eval(") || source.contains("Function(") {
+        if !self.config.allow_dynamic_code
+            && (source.contains("eval(") || source.contains("Function(")) {
                 return SandboxResult::PolicyViolation(
                     "Dynamic code execution (eval/Function) is not allowed in this sandbox".into()
                 );
             }
-        }
 
         let start = Instant::now();
 

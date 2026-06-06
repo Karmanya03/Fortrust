@@ -14,6 +14,7 @@ thread_local! {
     static TEXT_RENDERER: RefCell<TextRenderer> = RefCell::new(TextRenderer::new());
 }
 
+#[allow(dead_code)]
 struct RendererInstance {
     tab_id: TabId,
     url: String,
@@ -266,6 +267,7 @@ fn paint_rect(pixels: &mut [u8], width: usize, height: usize, clip: fortrust_lay
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 fn render_text_cosmic(
     pixels: &mut [u8],
     fb_width: usize,
@@ -287,6 +289,7 @@ fn render_text_cosmic(
 
 /// Render a decoded image into the given rect, scaling bilinearly. The image
 /// data lives in `image.rgba` as 4 bytes per pixel in (R, G, B, A) order.
+#[allow(clippy::too_many_arguments)]
 fn paint_image(
     pixels: &mut [u8],
     width: usize,
@@ -363,10 +366,6 @@ fn blend_rgba(dst: &mut [u8], src: [u8; 4]) {
     dst[1] = (src[1] as f32 * alpha + dst[1] as f32 * inverse) as u8;
     dst[2] = (src[2] as f32 * alpha + dst[2] as f32 * inverse) as u8;
     dst[3] = 255;
-}
-
-async fn handle_renderer_commands() {
-    info!("Renderer process starting");
 }
 
 #[tokio::main]

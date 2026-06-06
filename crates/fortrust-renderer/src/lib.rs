@@ -56,6 +56,7 @@ pub struct StaticRenderer {
 /// Cached state for animation-driven re-rendering.
 #[derive(Clone)]
 struct AnimRenderCache {
+    #[allow(dead_code)]
     author_css: Vec<String>,
     cosmetic_css: Vec<String>,
     viewport: Viewport,
@@ -300,11 +301,8 @@ impl StaticRenderer {
 
         let root = render_root(&document).ok_or(RenderError::EmptyDocument)?;
 
-        // Initialize animation controllers for elements with animation/transition
-        let mut controllers = HashMap::new();
         let clock = 0.0;
         let keyframes = style.keyframes.clone();
-        AnimationTracker::scan(&mut style, &document, &mut controllers);
 
         let layout = LayoutEngine::new(style)
             .layout(
@@ -317,6 +315,10 @@ impl StaticRenderer {
                 &images,
             )
             .ok_or(RenderError::EmptyDocument)?;
+
+        // Build animation controllers from the layout tree (not DOM), so
+        // `tag_name#counter` keys match during tick_animations.
+        let controllers = scan_controllers(&layout);
 
         let display_list = self.painter.paint(
             &layout,
@@ -366,15 +368,16 @@ impl StaticRenderer {
         cache.clock += dt;
 
         let mut any_active = false;
-        for (node_name, controller) in &mut cache.controllers {
+        for controller in cache.controllers.values_mut() {
             controller.tick(dt);
             if controller.is_active() {
                 any_active = true;
             }
-            apply_controller_to_layout(
+        }
+        if any_active {
+            apply_controllers_to_layout(
                 &mut cache.layout,
-                node_name,
-                controller,
+                &cache.controllers,
                 &cache.keyframes,
             );
         }
@@ -422,75 +425,75 @@ impl StaticRenderer {
     }
 }
 
-/// Scans the document for elements with CSS `animation` or `transition`
+/// Scans a layout tree for elements with CSS `animation` or `transition`
 /// properties and creates `AnimationController` entries.
-impl AnimationTracker {
-    fn scan(
-        style: &mut StyleEngine,
-        document: &Document<'_>,
-        controllers: &mut HashMap<String, AnimationController>,
-    ) {
-        for node in document.descendants() {
-            let Some(element) = node.as_element() else {
-                continue;
-            };
-            let el_name = element.local_name().to_owned();
-            let computed = style.compute_style(node, None);
+/// Uses `tag_name#counter` keys to support multiple elements with the same tag.
+fn scan_controllers(layout: &LayoutTree) -> HashMap<String, AnimationController> {
+    let mut controllers = HashMap::new();
+    let mut counters: HashMap<String, usize> = HashMap::new();
+    scan_box(&layout.root, &mut counters, &mut controllers);
+    controllers
+}
 
-            let has_animation = !computed.animations.is_empty();
-            let has_transition = !computed.transitions.is_empty();
+fn scan_box(
+    box_: &fortrust_layout::LayoutBox,
+    counters: &mut HashMap<String, usize>,
+    controllers: &mut HashMap<String, AnimationController>,
+) {
+    if !box_.style.animations.is_empty() || !box_.style.transitions.is_empty() {
+        let count = counters.entry(box_.node_name.clone()).or_insert(0);
+        let key = format!("{}#{}", box_.node_name, count);
+        *count += 1;
 
-            if !has_animation && !has_transition {
-                continue;
-            }
-
-            let mut controller = AnimationController::new();
-
-            for anim in &computed.animations {
-                controller.start_animation(anim.clone());
-            }
-            for trans in &computed.transitions {
-                let property = &trans.property;
-                let val = fortrust_style::animation::AnimatableValue::from_computed_style(
-                    property,
-                    &computed,
-                );
-                controller.start_transition(
-                    property.clone(),
-                    val.clone(),
-                    val,
-                    trans.clone(),
-                );
-            }
-
-            controllers.insert(el_name, controller);
+        let mut controller = AnimationController::new();
+        for anim in &box_.style.animations {
+            controller.start_animation(anim.clone());
         }
+        for trans in &box_.style.transitions {
+            let property = &trans.property;
+            let val = fortrust_style::animation::AnimatableValue::from_computed_style(
+                property,
+                &box_.style,
+            );
+            controller.start_transition(
+                property.clone(),
+                val.clone(),
+                val,
+                trans.clone(),
+            );
+        }
+        controllers.insert(key, controller);
+    }
+    for child in &box_.children {
+        scan_box(child, counters, controllers);
     }
 }
 
-struct AnimationTracker;
-
-/// Apply an AnimationController's values to the layout tree for a specific element.
-fn apply_controller_to_layout(
+/// Apply AnimationControllers to the layout tree using `tag_name#counter` keys.
+fn apply_controllers_to_layout(
     layout: &mut LayoutTree,
-    node_name: &str,
-    controller: &AnimationController,
+    controllers: &HashMap<String, AnimationController>,
     keyframes: &[fortrust_style::KeyframesRule],
 ) {
-    apply_to_box(&mut layout.root, node_name, controller, keyframes);
+    let mut counters: HashMap<String, usize> = HashMap::new();
+    apply_to_box_animated(&mut layout.root, &mut counters, controllers, keyframes);
 }
 
-fn apply_to_box(
+fn apply_to_box_animated(
     box_: &mut fortrust_layout::LayoutBox,
-    target_name: &str,
-    controller: &AnimationController,
+    counters: &mut HashMap<String, usize>,
+    controllers: &HashMap<String, AnimationController>,
     keyframes: &[fortrust_style::KeyframesRule],
 ) {
-    if box_.node_name == target_name {
+    let count = counters.entry(box_.node_name.clone()).or_insert(0);
+    let key = format!("{}#{}", box_.node_name, count);
+    *count += 1;
+
+    if let Some(controller) = controllers.get(&key) {
         controller.apply_to_style(&mut box_.style, keyframes);
     }
     for child in &mut box_.children {
-        apply_to_box(child, target_name, controller, keyframes);
+        apply_to_box_animated(child, counters, controllers, keyframes);
     }
 }
 
@@ -522,11 +525,10 @@ fn embedded_styles(document: &Document<'_>) -> Vec<String> {
 /// Walk the layout tree and collect rects of boxes matching the given node name.
 /// Used by damage tracking to identify regions that need repainting.
 fn collect_damage_rects(layout_box: &fortrust_layout::LayoutBox, node_name: &str, out: &mut Vec<Rect>) {
-    if layout_box.node_name.eq_ignore_ascii_case(node_name) {
-        if layout_box.rect.width > 0.0 && layout_box.rect.height > 0.0 {
+    if layout_box.node_name.eq_ignore_ascii_case(node_name)
+        && layout_box.rect.width > 0.0 && layout_box.rect.height > 0.0 {
             out.push(layout_box.rect);
         }
-    }
     for child in &layout_box.children {
         collect_damage_rects(child, node_name, out);
     }

@@ -1144,12 +1144,12 @@ impl FortrustApp {
         if self.shield.is_enabled_for(&shield_site) {
             // Check against adblock-rust engine first (comprehensive blocking)
             let source_url = top_level.as_deref().unwrap_or("");
-            if let Some(ref filter) = self.privacy_filter {
-                if filter.should_block(&target, source_url, "document") {
-                    self.shield.ads_blocked = self.shield.ads_blocked.saturating_add(1);
-                    self.show_blocked_page(target, BlockReason::AdDomain, history_mode);
-                    return;
-                }
+            if let Some(ref filter) = self.privacy_filter
+                && filter.should_block(&target, source_url, "document")
+            {
+                self.shield.ads_blocked = self.shield.ads_blocked.saturating_add(1);
+                self.show_blocked_page(target, BlockReason::AdDomain, history_mode);
+                return;
             }
 
             let decision = self.privacy.inspect(&RequestContext {
@@ -1346,11 +1346,11 @@ impl FortrustApp {
                     if self.anim_tick_pending_id == Some(request_id) {
                         self.anim_tick_pending_id = None;
                         if let Some(page) = page {
-                            if let Some(tab_id) = self.active_tab_id() {
-                                if let Some(state) = self.tab_pages.get_mut(&tab_id) {
-                                    state.page = Some(*page);
-                                    state.renderer_frame = None;
-                                }
+                            if let Some(tab_id) = self.active_tab_id()
+                                && let Some(state) = self.tab_pages.get_mut(&tab_id)
+                            {
+                                state.page = Some(*page);
+                                state.renderer_frame = None;
                             }
                             ctx.request_repaint();
                         } else {
@@ -1379,17 +1379,17 @@ impl FortrustApp {
                 self.suggest_debounce_start = Some(now);
                 self.omnibox.remote_suggestions.clear();
             }
-            if let Some(start) = self.suggest_debounce_start {
-                if now - start > Duration::from_millis(200) && trimmed.len() >= 2 {
-                    let request_id = self.engine_worker.next_request_id;
-                    self.engine_worker.next_request_id = self.engine_worker.next_request_id.saturating_add(1);
-                    let _ = self.engine_worker.sender.send(EngineCommand::Suggest {
-                        request_id,
-                        query: trimmed.clone(),
-                    });
-                    self.suggest_pending_id = Some(request_id);
-                    self.suggest_debounce_start = None;
-                }
+            if let Some(start) = self.suggest_debounce_start
+                && now - start > Duration::from_millis(200) && trimmed.len() >= 2
+            {
+                let request_id = self.engine_worker.next_request_id;
+                self.engine_worker.next_request_id = self.engine_worker.next_request_id.saturating_add(1);
+                let _ = self.engine_worker.sender.send(EngineCommand::Suggest {
+                    request_id,
+                    query: trimmed.clone(),
+                });
+                self.suggest_pending_id = Some(request_id);
+                self.suggest_debounce_start = None;
             }
         } else if !self.omnibox.focused {
             self.suggest_debounce_start = None;
@@ -2372,6 +2372,7 @@ impl FortrustApp {
 
     /// Cache decoded images as egui textures and paint one into the given rect.
     /// The first call decodes; subsequent calls reuse the texture id.
+    #[allow(clippy::too_many_arguments)]
     fn paint_decoded_image(
         &mut self,
         ctx: &Context,
@@ -2558,7 +2559,7 @@ impl eframe::App for FortrustApp {
                         corner_radius: CornerRadius::same(18),
                         stroke: Stroke::new(1.0, self.theme.glass_border),
                         shadow: egui::epaint::Shadow {
-                            offset: [0, 12].into(), blur: 32, spread: 0,
+                            offset: [0, 12], blur: 32, spread: 0,
                             color: Color32::from_black_alpha(50),
                         },
                         ..Default::default()

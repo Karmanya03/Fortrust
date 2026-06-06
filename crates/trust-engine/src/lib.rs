@@ -167,6 +167,7 @@ pub struct TrustEngine {
 struct AnimPageState {
     html: String,
     url: String,
+    #[allow(dead_code)]
     viewport: Viewport,
     source: PageSource,
     external_stylesheets_loaded: usize,
@@ -922,12 +923,11 @@ fn external_script_srcs(document_url: &str, html: &str) -> Vec<String> {
         let Some(tag_end_rel) = html_lower[start_abs..].find('>') else { break };
         let tag_end_abs = start_abs + tag_end_rel + 1;
         let tag_content = &html[start_abs..tag_end_abs];
-        if let Some(src) = extract_attr_value(tag_content, "src") {
-            if let Ok(url) = base_url.join(src.trim()) {
-                if matches!(url.scheme(), "http" | "https") {
-                    srcs.push(url.to_string());
-                }
-            }
+        if let Some(src) = extract_attr_value(tag_content, "src")
+            && let Ok(url) = base_url.join(src.trim())
+            && matches!(url.scheme(), "http" | "https")
+        {
+            srcs.push(url.to_string());
         }
         pos = tag_end_abs;
         if srcs.len() >= MAX_EXTERNAL_SCRIPTS_PER_DOCUMENT {
@@ -943,10 +943,10 @@ fn extract_attr_value<'a>(tag_content: &'a str, attr: &str) -> Option<&'a str> {
     let attr_start = lower.find(search.as_str())?;
     let value_start = attr_start + search.len();
     let rest = &tag_content[value_start..];
-    if rest.starts_with('"') {
-        rest[1..].find('"').map(|end| &rest[1..1 + end])
-    } else if rest.starts_with('\'') {
-        rest[1..].find('\'').map(|end| &rest[1..1 + end])
+    if let Some(inner) = rest.strip_prefix('"') {
+        inner.find('"').map(|end| &inner[..end])
+    } else if let Some(inner) = rest.strip_prefix('\'') {
+        inner.find('\'').map(|end| &inner[..end])
     } else {
         // unquoted attribute — up to next whitespace or >
         let end = rest.find(|c: char| c.is_ascii_whitespace() || c == '>');

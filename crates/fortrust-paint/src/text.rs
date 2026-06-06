@@ -125,6 +125,7 @@ impl TextRenderer {
     /// This is the hot-path used by the renderer: it writes glyphs at the
     /// position specified by `rect` into the given `pixels` buffer of size
     /// `fb_width × fb_height`, respecting the `clip` rectangle.
+    #[allow(clippy::too_many_arguments)]
     pub fn render_into(
         &mut self,
         pixels: &mut [u8],
@@ -181,6 +182,7 @@ impl TextRenderer {
 
     /// Simplified render-into for callers that only have color as `[u8; 4]`
     /// and no font weight/style info (uses defaults).
+    #[allow(clippy::too_many_arguments)]
     pub fn render_into_simple(
         &mut self,
         pixels: &mut [u8],

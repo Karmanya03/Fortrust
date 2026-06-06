@@ -4,7 +4,7 @@ pub use text::{TextRenderer, TextRun, RasterizedText};
 
 use fortrust_core::ImageRegistry;
 use fortrust_layout::{BoxKind, LayoutBox, LayoutTree, Rect};
-use fortrust_style::{BorderStyle, Color, FontWeight, FontStyle, Length, OutlineStyle, CssTransform};
+use fortrust_style::{BorderStyle, Color, FontWeight, FontStyle, Length, OutlineStyle};
 
 #[derive(Debug, Clone, PartialEq)]
 pub enum DisplayCommand {

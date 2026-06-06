@@ -3,8 +3,7 @@
 //! Implements form data collection from `<form>` elements, input validation,
 //! and URL-encoded / multipart form data encoding for submission.
 
-use crate::{Document, ElementData, Node, NodeKind, NodeRef};
-use smallvec::SmallVec;
+use crate::NodeRef;
 
 /// A single form field (name-value pair) collected from a form.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -321,15 +320,14 @@ fn find_selected_option<'arena>(select_node: NodeRef<'arena>) -> String {
         }
     }
     // If no option is explicitly selected, use the first option's value
-    for child in children.iter().copied() {
-        if let Some(el) = child.as_element() {
-            if el.local_name() == "option" {
+    for child in children.iter() {
+        if let Some(el) = child.as_element()
+            && el.local_name() == "option" {
                 return el
                     .attr("value")
                     .map(|s| s.to_string())
                     .unwrap_or_else(|| child.text_content());
             }
-        }
     }
     String::new()
 }
@@ -361,45 +359,38 @@ fn validate_controls<'arena>(node: NodeRef<'arena>, errors: &mut Vec<ValidationE
                 }
 
                 // Check pattern
-                if let Some(pattern) = el.attr("pattern") {
-                    if !value.is_empty() {
-                        if let Ok(re) = simple_pattern_match(&pattern, &value) {
-                            if !re {
+                if let Some(pattern) = el.attr("pattern")
+                    && !value.is_empty()
+                        && let Ok(re) = simple_pattern_match(&pattern, &value)
+                            && !re {
                                 errors.push(ValidationError {
                                     field_name: name.clone(),
                                     message: format!("Value does not match pattern: {}", pattern),
                                     kind: ValidationKind::PatternMismatch,
                                 });
                             }
-                        }
-                    }
-                }
 
                 // Check minlength
-                if let Some(min) = el.attr("minlength") {
-                    if let Ok(min_len) = min.parse::<usize>() {
-                        if !value.is_empty() && value.len() < min_len {
+                if let Some(min) = el.attr("minlength")
+                    && let Ok(min_len) = min.parse::<usize>()
+                        && !value.is_empty() && value.len() < min_len {
                             errors.push(ValidationError {
                                 field_name: name.clone(),
                                 message: format!("Minimum length is {}", min_len),
                                 kind: ValidationKind::TooShort,
                             });
                         }
-                    }
-                }
 
                 // Check maxlength
-                if let Some(max) = el.attr("maxlength") {
-                    if let Ok(max_len) = max.parse::<usize>() {
-                        if value.len() > max_len {
+                if let Some(max) = el.attr("maxlength")
+                    && let Ok(max_len) = max.parse::<usize>()
+                        && value.len() > max_len {
                             errors.push(ValidationError {
                                 field_name: name.clone(),
                                 message: format!("Maximum length is {}", max_len),
                                 kind: ValidationKind::TooLong,
                             });
                         }
-                    }
-                }
 
                 // Type-specific validation for inputs
                 if tag == "input" {
@@ -426,28 +417,24 @@ fn validate_controls<'arena>(node: NodeRef<'arena>, errors: &mut Vec<ValidationE
                         "number" | "range" => {
                             if !value.is_empty() {
                                 if let Ok(num) = value.parse::<f64>() {
-                                    if let Some(min) = el.attr("min") {
-                                        if let Ok(min_val) = min.parse::<f64>() {
-                                            if num < min_val {
+                                    if let Some(min) = el.attr("min")
+                                        && let Ok(min_val) = min.parse::<f64>()
+                                            && num < min_val {
                                                 errors.push(ValidationError {
                                                     field_name: name.clone(),
                                                     message: format!("Value must be at least {}", min_val),
                                                     kind: ValidationKind::RangeUnderflow,
                                                 });
                                             }
-                                        }
-                                    }
-                                    if let Some(max) = el.attr("max") {
-                                        if let Ok(max_val) = max.parse::<f64>() {
-                                            if num > max_val {
+                                    if let Some(max) = el.attr("max")
+                                        && let Ok(max_val) = max.parse::<f64>()
+                                            && num > max_val {
                                                 errors.push(ValidationError {
                                                     field_name: name.clone(),
                                                     message: format!("Value must be at most {}", max_val),
                                                     kind: ValidationKind::RangeOverflow,
                                                 });
                                             }
-                                        }
-                                    }
                                 } else {
                                     errors.push(ValidationError {
                                         field_name: name.clone(),
@@ -475,7 +462,7 @@ fn validate_controls<'arena>(node: NodeRef<'arena>, errors: &mut Vec<ValidationE
 fn simple_pattern_match(pattern: &str, value: &str) -> Result<bool, ()> {
     // Build a simple regex from the HTML pattern
     // HTML patterns are anchored: ^pattern$
-    let regex_str = format!("^(?:{})$", pattern);
+    let _regex_str = format!("^(?:{})$", pattern);
     // Use a simple check: try to parse as regex
     // For production, we'd use the `regex` crate, but to avoid adding a dependency,
     // we do a basic comparison

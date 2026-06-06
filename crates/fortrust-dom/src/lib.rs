@@ -974,7 +974,7 @@ fn matches_simple_selector(node: NodeRef<'_>, selector: &str) -> bool {
     // Parse tag name at start
     if !remaining.starts_with('.') && !remaining.starts_with('#') {
         let end = remaining
-            .find(|c: char| c == '.' || c == '#')
+            .find(['.', '#'])
             .unwrap_or(remaining.len());
         if end > 0 {
             tag_required = Some(&remaining[..end]);
@@ -983,11 +983,10 @@ fn matches_simple_selector(node: NodeRef<'_>, selector: &str) -> bool {
     }
 
     // Check tag
-    if let Some(tag) = tag_required {
-        if !element.local_name().eq_ignore_ascii_case(tag) {
+    if let Some(tag) = tag_required
+        && !element.local_name().eq_ignore_ascii_case(tag) {
             return false;
         }
-    }
 
     // Parse remaining .class and #id parts
     let mut required_classes: Vec<&str> = Vec::new();
@@ -996,7 +995,7 @@ fn matches_simple_selector(node: NodeRef<'_>, selector: &str) -> bool {
     while !remaining.is_empty() {
         if let Some(rest) = remaining.strip_prefix('.') {
             let end = rest
-                .find(|c: char| c == '.' || c == '#')
+                .find(['.', '#'])
                 .unwrap_or(rest.len());
             if end > 0 {
                 required_classes.push(&rest[..end]);
@@ -1004,7 +1003,7 @@ fn matches_simple_selector(node: NodeRef<'_>, selector: &str) -> bool {
             remaining = &rest[end..];
         } else if let Some(rest) = remaining.strip_prefix('#') {
             let end = rest
-                .find(|c: char| c == '.' || c == '#')
+                .find(['.', '#'])
                 .unwrap_or(rest.len());
             if end > 0 {
                 required_id = Some(&rest[..end]);
@@ -1016,18 +1015,17 @@ fn matches_simple_selector(node: NodeRef<'_>, selector: &str) -> bool {
     }
 
     // Check ID
-    if let Some(id) = required_id {
-        if element.attr("id").as_deref() != Some(id) {
+    if let Some(id) = required_id
+        && element.attr("id").as_deref() != Some(id) {
             return false;
         }
-    }
 
     // Check classes
     if !required_classes.is_empty() {
         let class_attr = element.attr("class").unwrap_or_default();
         let node_classes: Vec<&str> = class_attr.split_whitespace().collect();
         for required in &required_classes {
-            if !node_classes.iter().any(|c| *c == *required) {
+            if !node_classes.contains(required) {
                 return false;
             }
         }
@@ -1058,13 +1056,13 @@ fn collect_fragment_children<'arena>(root: NodeRef<'arena>) -> Vec<NodeRef<'aren
 
     // Look for <html> element
     for child in &children {
-        if let NodeKind::Element(el) = &child.kind {
-            if el.local_name().eq_ignore_ascii_case("html") {
+        if let NodeKind::Element(el) = &child.kind
+            && el.local_name().eq_ignore_ascii_case("html") {
                 // Look for <body> inside <html>
                 let html_children = child.children.borrow().clone();
                 for html_child in &html_children {
-                    if let NodeKind::Element(body_el) = &html_child.kind {
-                        if body_el.local_name().eq_ignore_ascii_case("body") {
+                    if let NodeKind::Element(body_el) = &html_child.kind
+                        && body_el.local_name().eq_ignore_ascii_case("body") {
                             let body_children = html_child.children.borrow().clone();
                             // Detach from body parent
                             for bc in &body_children {
@@ -1072,7 +1070,6 @@ fn collect_fragment_children<'arena>(root: NodeRef<'arena>) -> Vec<NodeRef<'aren
                             }
                             return body_children.to_vec();
                         }
-                    }
                 }
                 // No body found, return html's children
                 let html_children_vec = html_children.to_vec();
@@ -1081,7 +1078,6 @@ fn collect_fragment_children<'arena>(root: NodeRef<'arena>) -> Vec<NodeRef<'aren
                 }
                 return html_children_vec;
             }
-        }
     }
 
     // No html wrapper, return direct children
