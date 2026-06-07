@@ -1222,6 +1222,18 @@ name = "fortrust"
 version = "0.0.1"
 dependencies = [
  "fortrust-chrome",
+ "fortrust-core",
+ "fortrust-layout",
+ "fortrust-paint",
+ "fortrust-renderer",
+ "fortrust-style",
+ "image 0.24.9",
+ "reqwest",
+ "tokio",
+ "tracing",
+ "tracing-subscriber",
+ "trust-engine",
+ "url",
  "wgpu",
 ]
 
@@ -1290,13 +1302,19 @@ dependencies = [
 name = "fortrust-js"
 version = "0.0.1"
 dependencies = [
+ "base64",
  "boa_engine",
  "boa_gc",
  "chrono",
  "fortrust-core",
  "fortrust-dom",
+ "fortrust-layout",
  "fortrust-net",
+ "fortrust-paint",
+ "fortrust-storage",
+ "fortrust-style",
  "futures-executor",
+ "image 0.24.9",
  "lazy_static",
  "serde",
  "serde_json",

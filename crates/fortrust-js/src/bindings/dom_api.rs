@@ -18,6 +18,7 @@ lazy_static::lazy_static! {
     static ref EVENT_CALLBACK_REGISTRY: EventCallbackRegistry = EventCallbackRegistry::new();
     /// Tracks the "dirty" flag — set to true when DOM mutations occur that require re-render.
     static ref DOM_DIRTY: Mutex<bool> = Mutex::new(false);
+    static ref CANVAS_CONTEXTS: Mutex<HashMap<usize, crate::canvas::Canvas2D>> = Mutex::new(HashMap::new());
 }
 
 // JS callbacks are stored per-thread since JsObject is !Send.
@@ -308,6 +309,8 @@ fn wrap_element(context: &mut Context, node: fortrust_dom::NodeRef<'static>) -> 
         .unwrap_or_else(|| "#text".to_owned());
     let text_str = node.text_content();
     let node_ptr_usize = node as *const fortrust_dom::Node<'static> as usize;
+
+    let is_canvas = tag_str == "CANVAS";
 
     let obj = ObjectInitializer::new(context)
         .property(js_string!("tagName"), JsString::from(tag_str.clone()), Attribute::all())
@@ -690,43 +693,542 @@ fn wrap_element(context: &mut Context, node: fortrust_dom::NodeRef<'static>) -> 
             },
             js_string!("removeClass"), 1,
         )
-        // ─── Canvas mock ───
-        .function(
-            unsafe {
-                NativeFunction::from_closure(move |_this, args, ctx| {
-                    let ctx_type = args.first()
-                        .map(|v| v.to_string(ctx).map(|s| s.to_std_string_escaped()))
-                        .unwrap_or(Ok(String::new()))?;
-                    if ctx_type == "2d" {
-                        let mock_ctx = ObjectInitializer::new(ctx)
-                            .function(NativeFunction::from_closure(move |_this, _args, ctx| {
-                                let arr = boa_engine::object::builtins::JsArray::new(ctx);
-                                let img_data = ObjectInitializer::new(ctx)
-                                    .property(js_string!("data"), JsValue::from(arr), Attribute::all())
-                                    .property(js_string!("width"), 1, Attribute::all())
-                                    .property(js_string!("height"), 1, Attribute::all())
-                                    .build();
-                                Ok(JsValue::from(img_data))
-                            }), js_string!("getImageData"), 4)
-                            .function(NativeFunction::from_closure(move |_this, _args, _ctx| Ok(JsValue::undefined())), js_string!("fillText"), 3)
-                            .build();
-                        Ok(JsValue::from(mock_ctx))
-                    } else { Ok(JsValue::null()) }
-                })
-            },
-            js_string!("getContext"), 1,
-        )
-        .function(
-            unsafe {
-                NativeFunction::from_closure(move |_this, _args, _ctx| {
-                    Ok(JsValue::from(js_string!("data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNkYAAAAAYAAjCB0C8AAAAASUVORK5CYII=")))
-                })
-            },
-            js_string!("toDataURL"), 0,
-        )
         .build();
 
+    if is_canvas {
+        let _ = obj.set(js_string!("width"), JsValue::from(300), false, context);
+        let _ = obj.set(js_string!("height"), JsValue::from(150), false, context);
+
+        let ctx_node_ptr = node_ptr_usize;
+        let get_context_fn = unsafe {
+            NativeFunction::from_closure(move |_this, args, ctx| {
+                let ctx_type = args.first()
+                    .map(|v| v.to_string(ctx).map(|s| s.to_std_string_escaped()))
+                    .unwrap_or(Ok(String::new()))?;
+                if ctx_type != "2d" { return Ok(JsValue::null()); }
+
+                let mut map = CANVAS_CONTEXTS.lock().unwrap();
+                map.entry(ctx_node_ptr).or_insert_with(|| {
+                    crate::canvas::Canvas2D::new(300, 150)
+                });
+
+                let ctx_obj = build_canvas_2d_context(ctx, ctx_node_ptr)?;
+                Ok(ctx_obj)
+            })
+        };
+        let _ = obj.set(
+            js_string!("getContext"),
+            FunctionObjectBuilder::new(context.realm(), get_context_fn).build(),
+            false, context,
+        );
+
+        let to_data_url_fn = unsafe {
+            NativeFunction::from_closure(move |_this, _args, _ctx| {
+                let map = CANVAS_CONTEXTS.lock().unwrap();
+                if let Some(canvas) = map.get(&ctx_node_ptr) {
+                    Ok(JsValue::from(js_string!(canvas.to_data_url().as_str())))
+                } else {
+                    Ok(JsValue::from(js_string!("data:,")))
+                }
+            })
+        };
+        let _ = obj.set(
+            js_string!("toDataURL"),
+            FunctionObjectBuilder::new(context.realm(), to_data_url_fn).build(),
+            false, context,
+        );
+    }
+
     Ok(JsValue::from(obj))
+}
+
+fn build_canvas_2d_context(ctx: &mut Context, canvas_ptr: usize) -> JsResult<JsValue> {
+    let fill_rect_fn = unsafe {
+        NativeFunction::from_closure(move |_this, args, _ctx| {
+            let x = args.first().and_then(|v| v.as_number()).unwrap_or(0.0) as f32;
+            let y = args.get(1).and_then(|v| v.as_number()).unwrap_or(0.0) as f32;
+            let w = args.get(2).and_then(|v| v.as_number()).unwrap_or(0.0) as f32;
+            let h = args.get(3).and_then(|v| v.as_number()).unwrap_or(0.0) as f32;
+            let mut map = CANVAS_CONTEXTS.lock().unwrap();
+            if let Some(c) = map.get_mut(&canvas_ptr) { c.fill_rect(x, y, w, h); }
+            Ok(JsValue::undefined())
+        })
+    };
+    let clear_rect_fn = unsafe {
+        NativeFunction::from_closure(move |_this, args, _ctx| {
+            let x = args.first().and_then(|v| v.as_number()).unwrap_or(0.0) as f32;
+            let y = args.get(1).and_then(|v| v.as_number()).unwrap_or(0.0) as f32;
+            let w = args.get(2).and_then(|v| v.as_number()).unwrap_or(0.0) as f32;
+            let h = args.get(3).and_then(|v| v.as_number()).unwrap_or(0.0) as f32;
+            let mut map = CANVAS_CONTEXTS.lock().unwrap();
+            if let Some(c) = map.get_mut(&canvas_ptr) { c.clear_rect(x, y, w, h); }
+            Ok(JsValue::undefined())
+        })
+    };
+    let fill_text_fn = unsafe {
+        NativeFunction::from_closure(move |_this, args, ctx| {
+            let text = args.first()
+                .map(|v| v.to_string(ctx).map(|s| s.to_std_string_escaped()))
+                .unwrap_or(Ok(String::new()))?;
+            let x = args.get(1).and_then(|v| v.as_number()).unwrap_or(0.0) as f32;
+            let y = args.get(2).and_then(|v| v.as_number()).unwrap_or(0.0) as f32;
+            let max_w = args.get(3).and_then(|v| v.as_number()).map(|n| n as f32);
+            let mut map = CANVAS_CONTEXTS.lock().unwrap();
+            if let Some(c) = map.get_mut(&canvas_ptr) { c.fill_text(&text, x, y, max_w); }
+            Ok(JsValue::undefined())
+        })
+    };
+
+    let save_fn = unsafe {
+        NativeFunction::from_closure(move |_this, _args, _ctx| {
+            let mut map = CANVAS_CONTEXTS.lock().unwrap();
+            if let Some(c) = map.get_mut(&canvas_ptr) { c.save(); }
+            Ok(JsValue::undefined())
+        })
+    };
+    let restore_fn = unsafe {
+        NativeFunction::from_closure(move |_this, _args, _ctx| {
+            let mut map = CANVAS_CONTEXTS.lock().unwrap();
+            if let Some(c) = map.get_mut(&canvas_ptr) { c.restore(); }
+            Ok(JsValue::undefined())
+        })
+    };
+
+    let translate_fn = unsafe {
+        NativeFunction::from_closure(move |_this, args, _ctx| {
+            let x = args.first().and_then(|v| v.as_number()).unwrap_or(0.0) as f32;
+            let y = args.get(1).and_then(|v| v.as_number()).unwrap_or(0.0) as f32;
+            let mut map = CANVAS_CONTEXTS.lock().unwrap();
+            if let Some(c) = map.get_mut(&canvas_ptr) { c.translate(x, y); }
+            Ok(JsValue::undefined())
+        })
+    };
+    let rotate_fn = unsafe {
+        NativeFunction::from_closure(move |_this, args, _ctx| {
+            let angle = args.first().and_then(|v| v.as_number()).unwrap_or(0.0) as f32;
+            let mut map = CANVAS_CONTEXTS.lock().unwrap();
+            if let Some(c) = map.get_mut(&canvas_ptr) { c.rotate(angle); }
+            Ok(JsValue::undefined())
+        })
+    };
+    let scale_fn = unsafe {
+        NativeFunction::from_closure(move |_this, args, _ctx| {
+            let x = args.first().and_then(|v| v.as_number()).unwrap_or(1.0) as f32;
+            let y = args.get(1).and_then(|v| v.as_number()).unwrap_or(1.0) as f32;
+            let mut map = CANVAS_CONTEXTS.lock().unwrap();
+            if let Some(c) = map.get_mut(&canvas_ptr) { c.scale(x, y); }
+            Ok(JsValue::undefined())
+        })
+    };
+    let set_transform_fn = unsafe {
+        NativeFunction::from_closure(move |_this, args, _ctx| {
+            let a = args.first().and_then(|v| v.as_number()).unwrap_or(1.0) as f32;
+            let b = args.get(1).and_then(|v| v.as_number()).unwrap_or(0.0) as f32;
+            let c = args.get(2).and_then(|v| v.as_number()).unwrap_or(0.0) as f32;
+            let d = args.get(3).and_then(|v| v.as_number()).unwrap_or(1.0) as f32;
+            let e = args.get(4).and_then(|v| v.as_number()).unwrap_or(0.0) as f32;
+            let f = args.get(5).and_then(|v| v.as_number()).unwrap_or(0.0) as f32;
+            let mut map = CANVAS_CONTEXTS.lock().unwrap();
+            if let Some(cvs) = map.get_mut(&canvas_ptr) { cvs.set_transform(a, b, c, d, e, f); }
+            Ok(JsValue::undefined())
+        })
+    };
+
+    let begin_path_fn = unsafe {
+        NativeFunction::from_closure(move |_this, _args, _ctx| {
+            let mut map = CANVAS_CONTEXTS.lock().unwrap();
+            if let Some(c) = map.get_mut(&canvas_ptr) { c.begin_path(); }
+            Ok(JsValue::undefined())
+        })
+    };
+    let close_path_fn = unsafe {
+        NativeFunction::from_closure(move |_this, _args, _ctx| {
+            let mut map = CANVAS_CONTEXTS.lock().unwrap();
+            if let Some(c) = map.get_mut(&canvas_ptr) { c.close_path(); }
+            Ok(JsValue::undefined())
+        })
+    };
+    let move_to_fn = unsafe {
+        NativeFunction::from_closure(move |_this, args, _ctx| {
+            let x = args.first().and_then(|v| v.as_number()).unwrap_or(0.0) as f32;
+            let y = args.get(1).and_then(|v| v.as_number()).unwrap_or(0.0) as f32;
+            let mut map = CANVAS_CONTEXTS.lock().unwrap();
+            if let Some(c) = map.get_mut(&canvas_ptr) { c.move_to(x, y); }
+            Ok(JsValue::undefined())
+        })
+    };
+    let line_to_fn = unsafe {
+        NativeFunction::from_closure(move |_this, args, _ctx| {
+            let x = args.first().and_then(|v| v.as_number()).unwrap_or(0.0) as f32;
+            let y = args.get(1).and_then(|v| v.as_number()).unwrap_or(0.0) as f32;
+            let mut map = CANVAS_CONTEXTS.lock().unwrap();
+            if let Some(c) = map.get_mut(&canvas_ptr) { c.line_to(x, y); }
+            Ok(JsValue::undefined())
+        })
+    };
+    let arc_fn = unsafe {
+        NativeFunction::from_closure(move |_this, args, _ctx| {
+            let cx = args.first().and_then(|v| v.as_number()).unwrap_or(0.0) as f32;
+            let cy = args.get(1).and_then(|v| v.as_number()).unwrap_or(0.0) as f32;
+            let r = args.get(2).and_then(|v| v.as_number()).unwrap_or(0.0) as f32;
+            let sa = args.get(3).and_then(|v| v.as_number()).unwrap_or(0.0) as f32;
+            let ea = args.get(4).and_then(|v| v.as_number()).unwrap_or(0.0) as f32;
+            let acw = args.get(5).and_then(|v| v.as_boolean()).unwrap_or(false);
+            let mut map = CANVAS_CONTEXTS.lock().unwrap();
+            if let Some(c) = map.get_mut(&canvas_ptr) { c.arc(cx, cy, r, sa, ea, acw); }
+            Ok(JsValue::undefined())
+        })
+    };
+    let rect_fn = unsafe {
+        NativeFunction::from_closure(move |_this, args, _ctx| {
+            let x = args.first().and_then(|v| v.as_number()).unwrap_or(0.0) as f32;
+            let y = args.get(1).and_then(|v| v.as_number()).unwrap_or(0.0) as f32;
+            let w = args.get(2).and_then(|v| v.as_number()).unwrap_or(0.0) as f32;
+            let h = args.get(3).and_then(|v| v.as_number()).unwrap_or(0.0) as f32;
+            let mut map = CANVAS_CONTEXTS.lock().unwrap();
+            if let Some(c) = map.get_mut(&canvas_ptr) { c.rect(x, y, w, h); }
+            Ok(JsValue::undefined())
+        })
+    };
+    let fill_fn = unsafe {
+        NativeFunction::from_closure(move |_this, _args, _ctx| {
+            let mut map = CANVAS_CONTEXTS.lock().unwrap();
+            if let Some(c) = map.get_mut(&canvas_ptr) { c.fill(); }
+            Ok(JsValue::undefined())
+        })
+    };
+    let stroke_fn = unsafe {
+        NativeFunction::from_closure(move |_this, _args, _ctx| {
+            let mut map = CANVAS_CONTEXTS.lock().unwrap();
+            if let Some(c) = map.get_mut(&canvas_ptr) { c.stroke(); }
+            Ok(JsValue::undefined())
+        })
+    };
+
+    let get_image_data_fn = unsafe {
+        NativeFunction::from_closure(move |_this, args, ctx| {
+            let x = args.first().and_then(|v| v.as_number()).unwrap_or(0.0) as i32;
+            let y = args.get(1).and_then(|v| v.as_number()).unwrap_or(0.0) as i32;
+            let w = args.get(2).and_then(|v| v.as_number()).unwrap_or(0.0) as u32;
+            let h = args.get(3).and_then(|v| v.as_number()).unwrap_or(0.0) as u32;
+            let map = CANVAS_CONTEXTS.lock().unwrap();
+            if let Some(c) = map.get(&canvas_ptr) {
+                let (data, iw, ih) = c.get_image_data(x, y, w, h);
+                let arr = boa_engine::object::builtins::JsArray::new(ctx);
+                for (i, &byte) in data.iter().enumerate() {
+                    let _ = arr.set(i, JsValue::from(byte as i32), false, ctx);
+                }
+                let img_data = ObjectInitializer::new(ctx)
+                    .property(js_string!("data"), JsValue::from(arr), Attribute::all())
+                    .property(js_string!("width"), JsValue::from(iw as i32), Attribute::all())
+                    .property(js_string!("height"), JsValue::from(ih as i32), Attribute::all())
+                    .build();
+                Ok(JsValue::from(img_data))
+            } else {
+                Ok(JsValue::null())
+            }
+        })
+    };
+    let put_image_data_fn = unsafe {
+        NativeFunction::from_closure(move |_this, args, ctx| {
+            let img_data = args.first();
+            let dx = args.get(1).and_then(|v| v.as_number()).unwrap_or(0.0) as i32;
+            let dy = args.get(2).and_then(|v| v.as_number()).unwrap_or(0.0) as i32;
+            if let Some(data_obj) = img_data.and_then(|v| v.as_object()) {
+                let w_val = data_obj.get(js_string!("width"), ctx).ok();
+                let h_val = data_obj.get(js_string!("height"), ctx).ok();
+                let w = w_val.and_then(|v| v.as_number()).unwrap_or(0.0) as u32;
+                let h = h_val.and_then(|v| v.as_number()).unwrap_or(0.0) as u32;
+                let data_val = data_obj.get(js_string!("data"), ctx).ok();
+                if let Some(arr) = data_val.and_then(|v| v.as_object().cloned()) {
+                    let len = arr.get(js_string!("length"), ctx).ok()
+                        .and_then(|v| v.as_number()).unwrap_or(0.0) as u32;
+                    let n = (w * h * 4).min(len);
+                    let mut pixels = Vec::with_capacity(n as usize);
+                    for i in 0..n {
+                        let val = arr.get(i, ctx).ok().and_then(|v| v.as_number()).unwrap_or(0.0) as u8;
+                        pixels.push(val);
+                    }
+                    let mut map = CANVAS_CONTEXTS.lock().unwrap();
+                    if let Some(c) = map.get_mut(&canvas_ptr) {
+                        c.put_image_data(&pixels, w, h, dx, dy);
+                    }
+                }
+            }
+            Ok(JsValue::undefined())
+        })
+    };
+    let create_image_data_fn = unsafe {
+        NativeFunction::from_closure(move |_this, args, ctx| {
+            let w = args.first().and_then(|v| v.as_number()).unwrap_or(0.0) as u32;
+            let h = args.get(1).and_then(|v| v.as_number()).unwrap_or(0.0) as u32;
+            let map = CANVAS_CONTEXTS.lock().unwrap();
+            if let Some(c) = map.get(&canvas_ptr) {
+                let (_data, iw, ih) = c.create_image_data(w, h);
+                let arr = boa_engine::object::builtins::JsArray::new(ctx);
+                let img_data = ObjectInitializer::new(ctx)
+                    .property(js_string!("data"), JsValue::from(arr), Attribute::all())
+                    .property(js_string!("width"), JsValue::from(iw as i32), Attribute::all())
+                    .property(js_string!("height"), JsValue::from(ih as i32), Attribute::all())
+                    .build();
+                Ok(JsValue::from(img_data))
+            } else {
+                Ok(JsValue::null())
+            }
+        })
+    };
+    let stroke_text_fn = unsafe {
+        NativeFunction::from_closure(move |_this, args, ctx| {
+            let text = args.first()
+                .map(|v| v.to_string(ctx).map(|s| s.to_std_string_escaped()))
+                .unwrap_or(Ok(String::new()))?;
+            let x = args.get(1).and_then(|v| v.as_number()).unwrap_or(0.0) as f32;
+            let y = args.get(2).and_then(|v| v.as_number()).unwrap_or(0.0) as f32;
+            let max_w = args.get(3).and_then(|v| v.as_number()).map(|n| n as f32);
+            let mut map = CANVAS_CONTEXTS.lock().unwrap();
+            if let Some(c) = map.get_mut(&canvas_ptr) { c.stroke_text(&text, x, y, max_w); }
+            Ok(JsValue::undefined())
+        })
+    };
+    let measure_text_fn = unsafe {
+        NativeFunction::from_closure(move |_this, args, ctx| {
+            let text = args.first()
+                .map(|v| v.to_string(ctx).map(|s| s.to_std_string_escaped()))
+                .unwrap_or(Ok(String::new()))?;
+            let map = CANVAS_CONTEXTS.lock().unwrap();
+            let width = map.get(&canvas_ptr).map(|c| c.measure_text(&text)).unwrap_or(0.0);
+            Ok(JsValue::from(ObjectInitializer::new(ctx)
+                .property(js_string!("width"), JsValue::from(width), Attribute::all())
+                .build()))
+        })
+    };
+    let bezier_curve_to_fn = unsafe {
+        NativeFunction::from_closure(move |_this, args, _ctx| {
+            let cp1x = args.first().and_then(|v| v.as_number()).unwrap_or(0.0) as f32;
+            let cp1y = args.get(1).and_then(|v| v.as_number()).unwrap_or(0.0) as f32;
+            let cp2x = args.get(2).and_then(|v| v.as_number()).unwrap_or(0.0) as f32;
+            let cp2y = args.get(3).and_then(|v| v.as_number()).unwrap_or(0.0) as f32;
+            let x = args.get(4).and_then(|v| v.as_number()).unwrap_or(0.0) as f32;
+            let y = args.get(5).and_then(|v| v.as_number()).unwrap_or(0.0) as f32;
+            let mut map = CANVAS_CONTEXTS.lock().unwrap();
+            if let Some(c) = map.get_mut(&canvas_ptr) { c.bezier_curve_to(cp1x, cp1y, cp2x, cp2y, x, y); }
+            Ok(JsValue::undefined())
+        })
+    };
+    let quadratic_curve_to_fn = unsafe {
+        NativeFunction::from_closure(move |_this, args, _ctx| {
+            let cpx = args.first().and_then(|v| v.as_number()).unwrap_or(0.0) as f32;
+            let cpy = args.get(1).and_then(|v| v.as_number()).unwrap_or(0.0) as f32;
+            let x = args.get(2).and_then(|v| v.as_number()).unwrap_or(0.0) as f32;
+            let y = args.get(3).and_then(|v| v.as_number()).unwrap_or(0.0) as f32;
+            let mut map = CANVAS_CONTEXTS.lock().unwrap();
+            if let Some(c) = map.get_mut(&canvas_ptr) { c.quadratic_curve_to(cpx, cpy, x, y); }
+            Ok(JsValue::undefined())
+        })
+    };
+    let draw_image_fn = unsafe {
+        NativeFunction::from_closure(move |_this, args, ctx| {
+            let img_obj = args.first().and_then(|v| v.as_object());
+            let dx = args.get(1).and_then(|v| v.as_number()).unwrap_or(0.0) as f32;
+            let dy = args.get(2).and_then(|v| v.as_number()).unwrap_or(0.0) as f32;
+            if let Some(img) = img_obj {
+                let w_val = img.get(js_string!("width"), ctx).ok();
+                let h_val = img.get(js_string!("height"), ctx).ok();
+                let data_val = img.get(js_string!("data"), ctx).ok();
+                let w = w_val.and_then(|v| v.as_number()).unwrap_or(0.0) as u32;
+                let h = h_val.and_then(|v| v.as_number()).unwrap_or(0.0) as u32;
+                if let Some(data_arr) = data_val.and_then(|v| v.as_object().cloned()) {
+                    let len = data_arr.get(js_string!("length"), ctx).ok()
+                        .and_then(|v| v.as_number()).unwrap_or(0.0) as u32;
+                    let n = (w * h * 4).min(len);
+                    let mut pixels = Vec::with_capacity(n as usize);
+                    for i in 0..n {
+                        let val = data_arr.get(i, ctx).ok().and_then(|v| v.as_number()).unwrap_or(0.0) as u8;
+                        pixels.push(val);
+                    }
+                    let dw = args.get(3).and_then(|v| v.as_number()).map(|n| n as f32);
+                    let dh = args.get(4).and_then(|v| v.as_number()).map(|n| n as f32);
+                    let mut map = CANVAS_CONTEXTS.lock().unwrap();
+                    if let Some(c) = map.get_mut(&canvas_ptr) {
+                        c.draw_image(&pixels, w, h, dx, dy, dw, dh);
+                    }
+                }
+            }
+            Ok(JsValue::undefined())
+        })
+    };
+    let clip_fn = unsafe {
+        NativeFunction::from_closure(move |_this, _args, _ctx| {
+            let mut map = CANVAS_CONTEXTS.lock().unwrap();
+            if let Some(c) = map.get_mut(&canvas_ptr) { c.clip(); }
+            Ok(JsValue::undefined())
+        })
+    };
+
+    // ── Accessor properties (wire JS setter to Rust state) ──
+    let cp = canvas_ptr;
+    let fill_style_getter = {
+        let f = unsafe { NativeFunction::from_closure(move |_this, _args, _ctx| {
+            let map = CANVAS_CONTEXTS.lock().unwrap();
+            Ok(map.get(&cp).map(|c| JsValue::from(js_string!(c.get_fill_style().as_str()))).unwrap_or(JsValue::undefined()))
+        })};
+        FunctionObjectBuilder::new(ctx.realm(), f).build()
+    };
+    let fill_style_setter = {
+        let f = unsafe { NativeFunction::from_closure(move |_this, args, ctx| {
+            if let Some(val) = args.first() {
+                let s = val.to_string(ctx).map(|s| s.to_std_string_escaped()).unwrap_or_default();
+                let mut map = CANVAS_CONTEXTS.lock().unwrap();
+                if let Some(c) = map.get_mut(&cp) { c.set_fill_style(&s); }
+            }
+            Ok(JsValue::undefined())
+        })};
+        FunctionObjectBuilder::new(ctx.realm(), f).build()
+    };
+    let stroke_style_getter = {
+        let f = unsafe { NativeFunction::from_closure(move |_this, _args, _ctx| {
+            let map = CANVAS_CONTEXTS.lock().unwrap();
+            Ok(map.get(&cp).map(|c| JsValue::from(js_string!(c.get_stroke_style().as_str()))).unwrap_or(JsValue::undefined()))
+        })};
+        FunctionObjectBuilder::new(ctx.realm(), f).build()
+    };
+    let stroke_style_setter = {
+        let f = unsafe { NativeFunction::from_closure(move |_this, args, ctx| {
+            if let Some(val) = args.first() {
+                let s = val.to_string(ctx).map(|s| s.to_std_string_escaped()).unwrap_or_default();
+                let mut map = CANVAS_CONTEXTS.lock().unwrap();
+                if let Some(c) = map.get_mut(&cp) { c.set_stroke_style(&s); }
+            }
+            Ok(JsValue::undefined())
+        })};
+        FunctionObjectBuilder::new(ctx.realm(), f).build()
+    };
+    let line_width_getter = {
+        let f = unsafe { NativeFunction::from_closure(move |_this, _args, _ctx| {
+            let map = CANVAS_CONTEXTS.lock().unwrap();
+            Ok(map.get(&cp).map(|c| JsValue::from(c.get_line_width() as f64)).unwrap_or(JsValue::undefined()))
+        })};
+        FunctionObjectBuilder::new(ctx.realm(), f).build()
+    };
+    let line_width_setter = {
+        let f = unsafe { NativeFunction::from_closure(move |_this, args, _ctx| {
+            if let Some(val) = args.first().and_then(|v| v.as_number()) {
+                let mut map = CANVAS_CONTEXTS.lock().unwrap();
+                if let Some(c) = map.get_mut(&cp) { c.set_line_width(val as f32); }
+            }
+            Ok(JsValue::undefined())
+        })};
+        FunctionObjectBuilder::new(ctx.realm(), f).build()
+    };
+    let global_alpha_getter = {
+        let f = unsafe { NativeFunction::from_closure(move |_this, _args, _ctx| {
+            let map = CANVAS_CONTEXTS.lock().unwrap();
+            Ok(map.get(&cp).map(|c| JsValue::from(c.get_global_alpha() as f64)).unwrap_or(JsValue::undefined()))
+        })};
+        FunctionObjectBuilder::new(ctx.realm(), f).build()
+    };
+    let global_alpha_setter = {
+        let f = unsafe { NativeFunction::from_closure(move |_this, args, _ctx| {
+            if let Some(val) = args.first().and_then(|v| v.as_number()) {
+                let mut map = CANVAS_CONTEXTS.lock().unwrap();
+                if let Some(c) = map.get_mut(&cp) { c.set_global_alpha(val as f32); }
+            }
+            Ok(JsValue::undefined())
+        })};
+        FunctionObjectBuilder::new(ctx.realm(), f).build()
+    };
+    let font_getter = {
+        let f = unsafe { NativeFunction::from_closure(move |_this, _args, _ctx| {
+            let map = CANVAS_CONTEXTS.lock().unwrap();
+            Ok(map.get(&cp).map(|c| JsValue::from(js_string!(c.get_font().as_str()))).unwrap_or(JsValue::undefined()))
+        })};
+        FunctionObjectBuilder::new(ctx.realm(), f).build()
+    };
+    let font_setter = {
+        let f = unsafe { NativeFunction::from_closure(move |_this, args, ctx| {
+            if let Some(val) = args.first() {
+                let s = val.to_string(ctx).map(|s| s.to_std_string_escaped()).unwrap_or_default();
+                let mut map = CANVAS_CONTEXTS.lock().unwrap();
+                if let Some(c) = map.get_mut(&cp) { c.set_font(&s); }
+            }
+            Ok(JsValue::undefined())
+        })};
+        FunctionObjectBuilder::new(ctx.realm(), f).build()
+    };
+    let text_align_getter = {
+        let f = unsafe { NativeFunction::from_closure(move |_this, _args, _ctx| {
+            let map = CANVAS_CONTEXTS.lock().unwrap();
+            Ok(map.get(&cp).map(|c| JsValue::from(js_string!(c.get_text_align()))).unwrap_or(JsValue::undefined()))
+        })};
+        FunctionObjectBuilder::new(ctx.realm(), f).build()
+    };
+    let text_align_setter = {
+        let f = unsafe { NativeFunction::from_closure(move |_this, args, ctx| {
+            if let Some(val) = args.first() {
+                let s = val.to_string(ctx).map(|s| s.to_std_string_escaped()).unwrap_or_default();
+                let mut map = CANVAS_CONTEXTS.lock().unwrap();
+                if let Some(c) = map.get_mut(&cp) { c.set_text_align(&s); }
+            }
+            Ok(JsValue::undefined())
+        })};
+        FunctionObjectBuilder::new(ctx.realm(), f).build()
+    };
+    let text_baseline_getter = {
+        let f = unsafe { NativeFunction::from_closure(move |_this, _args, _ctx| {
+            let map = CANVAS_CONTEXTS.lock().unwrap();
+            Ok(map.get(&cp).map(|c| JsValue::from(js_string!(c.get_text_baseline()))).unwrap_or(JsValue::undefined()))
+        })};
+        FunctionObjectBuilder::new(ctx.realm(), f).build()
+    };
+    let text_baseline_setter = {
+        let f = unsafe { NativeFunction::from_closure(move |_this, args, ctx| {
+            if let Some(val) = args.first() {
+                let s = val.to_string(ctx).map(|s| s.to_std_string_escaped()).unwrap_or_default();
+                let mut map = CANVAS_CONTEXTS.lock().unwrap();
+                if let Some(c) = map.get_mut(&cp) { c.set_text_baseline(&s); }
+            }
+            Ok(JsValue::undefined())
+        })};
+        FunctionObjectBuilder::new(ctx.realm(), f).build()
+    };
+
+    let ctx_obj = ObjectInitializer::new(ctx)
+        .accessor(js_string!("fillStyle"), Some(fill_style_getter), Some(fill_style_setter), Attribute::all())
+        .accessor(js_string!("strokeStyle"), Some(stroke_style_getter), Some(stroke_style_setter), Attribute::all())
+        .accessor(js_string!("lineWidth"), Some(line_width_getter), Some(line_width_setter), Attribute::all())
+        .accessor(js_string!("globalAlpha"), Some(global_alpha_getter), Some(global_alpha_setter), Attribute::all())
+        .accessor(js_string!("font"), Some(font_getter), Some(font_setter), Attribute::all())
+        .accessor(js_string!("textAlign"), Some(text_align_getter), Some(text_align_setter), Attribute::all())
+        .accessor(js_string!("textBaseline"), Some(text_baseline_getter), Some(text_baseline_setter), Attribute::all())
+        .function(fill_rect_fn, js_string!("fillRect"), 4)
+        .function(clear_rect_fn, js_string!("clearRect"), 4)
+        .function(fill_text_fn, js_string!("fillText"), 4)
+        .function(save_fn, js_string!("save"), 0)
+        .function(restore_fn, js_string!("restore"), 0)
+        .function(translate_fn, js_string!("translate"), 2)
+        .function(rotate_fn, js_string!("rotate"), 1)
+        .function(scale_fn, js_string!("scale"), 2)
+        .function(set_transform_fn, js_string!("setTransform"), 6)
+        .function(begin_path_fn, js_string!("beginPath"), 0)
+        .function(close_path_fn, js_string!("closePath"), 0)
+        .function(move_to_fn, js_string!("moveTo"), 2)
+        .function(line_to_fn, js_string!("lineTo"), 2)
+        .function(arc_fn, js_string!("arc"), 6)
+        .function(rect_fn, js_string!("rect"), 4)
+        .function(fill_fn, js_string!("fill"), 0)
+        .function(stroke_fn, js_string!("stroke"), 0)
+        .function(get_image_data_fn, js_string!("getImageData"), 4)
+        .function(put_image_data_fn, js_string!("putImageData"), 3)
+        .function(create_image_data_fn, js_string!("createImageData"), 2)
+        .function(stroke_text_fn, js_string!("strokeText"), 4)
+        .function(measure_text_fn, js_string!("measureText"), 1)
+        .function(bezier_curve_to_fn, js_string!("bezierCurveTo"), 6)
+        .function(quadratic_curve_to_fn, js_string!("quadraticCurveTo"), 4)
+        .function(draw_image_fn, js_string!("drawImage"), 5)
+        .function(clip_fn, js_string!("clip"), 0)
+        .build();
+
+    Ok(JsValue::from(ctx_obj))
 }
 
 fn parse_listener_options(options: Option<&JsValue>, ctx: &mut Context) -> (bool, bool) {

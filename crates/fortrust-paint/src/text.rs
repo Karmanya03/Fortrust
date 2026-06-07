@@ -135,6 +135,7 @@ impl TextRenderer {
         rect: Rect,
         text: &str,
         font_size_px: f32,
+        font_family: &str,
         font_weight: FontWeight,
         font_style: FontStyle,
         rgba: [u8; 4],
@@ -147,7 +148,7 @@ impl TextRenderer {
 
         let mut buffer = CosmicBuffer::new(&mut self.font_system, metrics);
 
-        let attrs = build_attrs("", font_weight, font_style);
+        let attrs = build_attrs(font_family, font_weight, font_style);
         buffer.set_text(&mut self.font_system, text, attrs, Shaping::Advanced);
 
         let max_w = (rect.width * 1.5).ceil().max(100.0);
@@ -180,6 +181,13 @@ impl TextRenderer {
         );
     }
 
+    /// Load raw font data (e.g. from a downloaded @font-face font file) into
+    /// the font database. The bytes should represent a valid TTF, OTF, WOFF,
+    /// or WOFF2 font file.
+    pub fn load_font_data(&mut self, data: Vec<u8>) {
+        self.font_system.db_mut().load_font_data(data);
+    }
+
     /// Simplified render-into for callers that only have color as `[u8; 4]`
     /// and no font weight/style info (uses defaults).
     #[allow(clippy::too_many_arguments)]
@@ -202,6 +210,7 @@ impl TextRenderer {
             rect,
             text,
             font_size_px,
+            "sans-serif",
             FontWeight::Normal,
             FontStyle::Normal,
             rgba,
@@ -215,16 +224,25 @@ impl Default for TextRenderer {
     }
 }
 
-/// Build cosmic-text `Attrs` from our style types.
+/// Build cosmic-text `Attrs` from our style types, mapping CSS generic family
+/// keywords to cosmic-text `Family` variants.
 fn build_attrs(font_family: &str, weight: FontWeight, style: FontStyle) -> Attrs<'_> {
     let mut attrs = Attrs::new();
 
-    // Font family: requested → sans-serif fallback
-    if !font_family.is_empty() {
-        attrs = attrs.family(Family::Name(font_family));
-    } else {
-        attrs = attrs.family(Family::SansSerif);
-    }
+    // Map CSS generic family keywords; otherwise use the raw family name.
+    let ff_trimmed = font_family.trim();
+    let ff_lower = ff_trimmed.to_ascii_lowercase();
+    let family = match ff_lower.as_str() {
+        "serif" => Family::Serif,
+        "sans-serif" | "sansserif" => Family::SansSerif,
+        "monospace" => Family::Monospace,
+        "cursive" => Family::Cursive,
+        "fantasy" => Family::Fantasy,
+        "system-ui" | "systemui" => Family::SansSerif,
+        _ if !ff_lower.is_empty() => Family::Name(ff_trimmed),
+        _ => Family::SansSerif,
+    };
+    attrs = attrs.family(family);
 
     // Font weight mapping
     attrs = attrs.weight(match weight {
@@ -358,6 +376,7 @@ mod tests {
             rect,
             "Test text",
             16.0,
+            "sans-serif",
             FontWeight::Normal,
             FontStyle::Normal,
             [255, 255, 255, 255],

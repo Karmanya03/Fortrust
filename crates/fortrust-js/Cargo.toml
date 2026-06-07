@@ -11,6 +11,10 @@ chrono.workspace = true
 fortrust-dom = { path = "../fortrust-dom" }
 fortrust-net = { path = "../fortrust-net" }
 fortrust-core = { path = "../fortrust-core" }
+fortrust-storage = { path = "../fortrust-storage" }
+fortrust-paint = { path = "../fortrust-paint" }
+fortrust-layout = { path = "../fortrust-layout" }
+fortrust-style = { path = "../fortrust-style" }
 futures-executor.workspace = true
 serde.workspace = true
 serde_json.workspace = true
@@ -20,3 +24,5 @@ tokio-tungstenite.workspace = true
 tracing.workspace = true
 url.workspace = true
 lazy_static = "1.4"
+base64 = { workspace = true }
+image = { version = "0.24", default-features = false, features = ["png"] }

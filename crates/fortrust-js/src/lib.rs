@@ -2,6 +2,7 @@ pub mod bindings;
 mod event_loop;
 mod runtime;
 mod hooks;
+pub mod canvas;
 pub mod sandbox;
 pub use hooks::{set_title_handler, set_event_handler};
 

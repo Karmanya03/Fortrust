@@ -2294,7 +2294,7 @@ impl FortrustApp {
                 DisplayCommand::FillRect { rect, color } => {
                     painter.rect_filled(to_egui_rect(content.min, *rect), 0.0, to_egui_color(*color));
                 }
-                DisplayCommand::DrawText { rect, text, color, font_size_px, .. } => {
+                DisplayCommand::DrawText { rect, text, color, font_size_px, font_family: _, .. } => {
                     painter.text(
                         Pos2::new(content.min.x + rect.x, content.min.y + rect.y),
                         egui::Align2::LEFT_TOP, text,

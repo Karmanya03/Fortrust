@@ -628,7 +628,7 @@ fn render_with_javascript(
 
     // If scripts mutated the document title via our bindings, try to read it back.
     let js_title = match js.eval("document.getTitle()") {
-        Ok(val) => val.to_string(js.context()).ok().map(|s| s.to_std_string_escaped()),
+        Ok(val) => val.as_string().map(|s| s.to_std_string_escaped()),
         Err(_) => None,
     };
 

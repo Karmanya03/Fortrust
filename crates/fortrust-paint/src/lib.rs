@@ -1,5 +1,7 @@
+pub mod font_loader;
 pub mod text;
 
+pub use font_loader::process_font_faces;
 pub use text::{TextRenderer, TextRun, RasterizedText};
 
 use fortrust_core::ImageRegistry;
@@ -19,6 +21,7 @@ pub enum DisplayCommand {
         font_size_px: f32,
         font_weight: FontWeight,
         font_style: FontStyle,
+        font_family: String,
     },
     /// Render a decoded image into the given rect, preserving aspect ratio and
     /// centered. The `image_id` indexes into the `ImageRegistry` carried on the
@@ -241,6 +244,7 @@ fn paint_box(layout_box: &LayoutBox, images: &ImageRegistry, list: &mut DisplayL
         && let Some(text) = &layout_box.text
         && !text.is_empty()
     {
+        let ff = layout_box.style.font_family.first().cloned().unwrap_or_else(|| "sans-serif".to_string());
         list.push(DisplayCommand::DrawText {
             rect: layout_box.rect,
             text: text.clone(),
@@ -248,6 +252,7 @@ fn paint_box(layout_box: &LayoutBox, images: &ImageRegistry, list: &mut DisplayL
             font_size_px: font_size_px(layout_box.style.font_size),
             font_weight: layout_box.style.font_weight,
             font_style: layout_box.style.font_style,
+            font_family: ff,
         });
     }
 
@@ -273,6 +278,7 @@ fn paint_box(layout_box: &LayoutBox, images: &ImageRegistry, list: &mut DisplayL
                 .map(|alt| format!("[image: {alt}]"))
                 .unwrap_or_else(|| "[image]".to_owned());
 
+            let ff = layout_box.style.font_family.first().cloned().unwrap_or_else(|| "sans-serif".to_string());
             list.push(DisplayCommand::DrawText {
                 rect: layout_box.rect,
                 text: placeholder,
@@ -280,6 +286,7 @@ fn paint_box(layout_box: &LayoutBox, images: &ImageRegistry, list: &mut DisplayL
                 font_size_px: font_size_px(layout_box.style.font_size).min(layout_box.rect.height),
                 font_weight: layout_box.style.font_weight,
                 font_style: layout_box.style.font_style,
+                font_family: ff,
             });
         }
     }

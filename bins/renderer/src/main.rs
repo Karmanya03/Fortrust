@@ -184,10 +184,10 @@ fn render_page_frame(page: &RenderedPage, width: u32, height: u32, title: &str) 
                 let outer = fortrust_layout::Rect { x: rect.x - *outline_width, y: rect.y - *outline_width, width: rect.width + *outline_width * 2.0, height: rect.height + *outline_width * 2.0 };
                 paint_rect(&mut pixels, width, height, clip, outer, color_to_rgba(*color));
             }
-            DisplayCommand::DrawText { rect, text, color, font_size_px, font_weight, font_style } => {
+            DisplayCommand::DrawText { rect, text, color, font_size_px, font_weight, font_style, font_family } => {
                 let clip = clip_stack.last().copied().unwrap();
                 if !text.is_empty() {
-                    render_text_cosmic(&mut pixels, width, height, clip, *rect, text, *font_size_px, *font_weight, *font_style, color_to_rgba(*color));
+                    render_text_cosmic(&mut pixels, width, height, clip, *rect, text, *font_size_px, font_family, *font_weight, *font_style, color_to_rgba(*color));
                 }
             }
             DisplayCommand::DrawImage { rect, image_id, natural_width, natural_height, alt } => {
@@ -196,7 +196,7 @@ fn render_page_frame(page: &RenderedPage, width: u32, height: u32, title: &str) 
                     paint_image(&mut pixels, width, height, clip, *rect, img, *natural_width, *natural_height);
                 } else if !alt.is_empty() {
                     let alt_text = format!("[image: {alt}]");
-                    render_text_cosmic(&mut pixels, width, height, clip, *rect, &alt_text, 12.0, FontWeight::Normal, FontStyle::Normal, [160, 160, 160, 255]);
+                    render_text_cosmic(&mut pixels, width, height, clip, *rect, &alt_text, 12.0, "sans-serif", FontWeight::Normal, FontStyle::Normal, [160, 160, 160, 255]);
                 } else {
                     paint_rect(&mut pixels, width, height, clip, *rect, [40, 44, 52, 255]);
                 }
@@ -250,7 +250,7 @@ fn paint_title_banner(pixels: &mut [u8], width: usize, height: usize, label: &st
         height: 16.0,
     };
     let clip = fortrust_layout::Rect { x: 0.0, y: 0.0, width: width as f32, height: banner_height as f32 };
-    render_text_cosmic(pixels, banner_fb_width, banner_fb_height, clip, banner_rect, label, 14.0, FontWeight::Normal, FontStyle::Normal, [77, 159, 255, 255]);
+    render_text_cosmic(pixels, banner_fb_width, banner_fb_height, clip, banner_rect, label, 14.0, "sans-serif", FontWeight::Normal, FontStyle::Normal, [77, 159, 255, 255]);
 }
 
 fn paint_rect(pixels: &mut [u8], width: usize, height: usize, clip: fortrust_layout::Rect, rect: fortrust_layout::Rect, rgba: [u8; 4]) {
@@ -276,13 +276,14 @@ fn render_text_cosmic(
     rect: fortrust_layout::Rect,
     text: &str,
     font_size: f32,
+    font_family: &str,
     font_weight: FontWeight,
     font_style: FontStyle,
     rgba: [u8; 4],
 ) {
     TEXT_RENDERER.with(|tr| {
         tr.borrow_mut().render_into(
-            pixels, fb_width, fb_height, clip, rect, text, font_size, font_weight, font_style, rgba,
+            pixels, fb_width, fb_height, clip, rect, text, font_size, font_family, font_weight, font_style, rgba,
         );
     });
 }

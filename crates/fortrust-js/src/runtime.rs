@@ -12,6 +12,7 @@ use tracing::{debug, warn};
 use crate::bindings;
 use crate::event_loop::{EventLoop, TimerHandle};
 use fortrust_dom::Document;
+use fortrust_storage::LocalStorageStore;
 
 pub type JsValue = BoaValue;
 
@@ -142,6 +143,7 @@ pub struct JsRuntime {
     origin: String,
     network: Option<fortrust_net::NetworkClient>,
     arena: Option<&'static fortrust_dom::DomArena>,
+    local_storage: Option<LocalStorageStore>,
 }
 
 impl JsRuntime {
@@ -156,6 +158,7 @@ impl JsRuntime {
             origin: String::new(),
             network: None,
             arena: None,
+            local_storage: None,
         }
     }
 
@@ -176,6 +179,11 @@ impl JsRuntime {
 
     pub fn with_arena(mut self, arena: &'static fortrust_dom::DomArena) -> Self {
         self.arena = Some(arena);
+        self
+    }
+
+    pub fn with_local_storage(mut self, store: LocalStorageStore) -> Self {
+        self.local_storage = Some(store);
         self
     }
 
@@ -235,7 +243,10 @@ impl JsRuntime {
         bindings::location::register(&mut self.context, &origin)?;
 
         if registry.storage_enabled {
-            bindings::storage::register(&mut self.context)?;
+            bindings::storage::register_with_backend(
+                &mut self.context,
+                self.local_storage.clone(),
+            )?;
         }
 
         if registry.websocket_enabled {

@@ -816,6 +816,7 @@ pub struct ComputedStyle {
     pub position: Position,
     pub color: Color,
     pub background_color: Color,
+    pub font_family: Vec<String>,
     pub font_size: Length,
     pub font_weight: FontWeight,
     pub font_style: FontStyle,
@@ -866,6 +867,7 @@ impl ComputedStyle {
             position: Position::Static,
             color: Color::BLACK,
             background_color: Color::TRANSPARENT,
+            font_family: vec!["sans-serif".to_string()],
             font_size: Length::Px(16.0),
             font_weight: FontWeight::Normal,
             font_style: FontStyle::Normal,
@@ -913,6 +915,7 @@ impl ComputedStyle {
         let mut style = Self::initial();
         if let Some(parent) = parent {
             style.color = parent.color;
+            style.font_family = parent.font_family.clone();
             style.font_size = parent.font_size;
             style.font_weight = parent.font_weight;
             style.font_style = parent.font_style;
@@ -1018,6 +1021,7 @@ enum PropertyValue {
     Edges(EdgeSizes),
     FontWeight(FontWeight),
     FontStyle(FontStyle),
+    FontFamily(Vec<String>),
     TextAlign(TextAlign),
     WhiteSpace(WhiteSpace),
     Visibility(Visibility),
@@ -1913,6 +1917,35 @@ fn parse_play_state_list(value: &str) -> Vec<AnimationPlayState> {
         .collect()
 }
 
+/// Parse a CSS font-family list (comma-separated, with quoted names).
+fn parse_font_family_list(value: &str) -> Vec<String> {
+    let mut families = Vec::new();
+    let mut remaining = value.trim();
+    while !remaining.is_empty() {
+        remaining = remaining.trim_start();
+        if remaining.is_empty() { break; }
+        // Check for quoted string
+        let (family, rest) = if remaining.starts_with('"') {
+            let end = remaining[1..].find('"').map(|i| i + 2).unwrap_or(remaining.len());
+            (remaining[1..end.saturating_sub(1)].to_owned(), &remaining[end..])
+        } else if remaining.starts_with('\'') {
+            let end = remaining[1..].find('\'').map(|i| i + 2).unwrap_or(remaining.len());
+            (remaining[1..end.saturating_sub(1)].to_owned(), &remaining[end..])
+        } else {
+            // Unquoted identifier: take until comma or end
+            let end = remaining.find(',').unwrap_or(remaining.len());
+            let name = remaining[..end].trim().to_owned();
+            (name, &remaining[end..])
+        };
+        if !family.is_empty() {
+            families.push(family);
+        }
+        // Skip past comma
+        remaining = if rest.starts_with(',') { &rest[1..] } else { rest };
+    }
+    families
+}
+
 /// Parse a single transition shorthand value.
 fn parse_single_transition(value: &str) -> Option<SingleTransition> {
     let mut trans = SingleTransition::default();
@@ -2009,6 +2042,10 @@ fn parse_property_value(property: &str, value: &str) -> Option<PropertyValue> {
             "oblique" => Some(PropertyValue::FontStyle(FontStyle::Oblique)),
             _ => None,
         },
+        "font-family" => {
+            let families: Vec<String> = parse_font_family_list(value);
+            if families.is_empty() { None } else { Some(PropertyValue::FontFamily(families)) }
+        }
         "text-align" => match lowered.as_str() {
             "left" => Some(PropertyValue::TextAlign(TextAlign::Left)),
             "right" => Some(PropertyValue::TextAlign(TextAlign::Right)),
@@ -2230,6 +2267,7 @@ fn apply_declarations(style: &mut ComputedStyle, declarations: &[Declaration]) {
             ("font-size", PropertyValue::Length(value)) => style.font_size = *value,
             ("font-weight", PropertyValue::FontWeight(value)) => style.font_weight = *value,
             ("font-style", PropertyValue::FontStyle(value)) => style.font_style = *value,
+            ("font-family", PropertyValue::FontFamily(value)) => style.font_family = value.clone(),
             ("text-align", PropertyValue::TextAlign(value)) => style.text_align = *value,
             ("white-space", PropertyValue::WhiteSpace(value)) => style.white_space = *value,
             ("visibility", PropertyValue::Visibility(value)) => style.visibility = *value,
