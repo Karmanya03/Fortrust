@@ -650,6 +650,7 @@ impl Canvas2D {
 
     // ─── Image drawing ───
 
+    #[allow(clippy::too_many_arguments)]
     pub fn draw_image(&mut self, data: &[u8], img_w: u32, img_h: u32, dx: f32, dy: f32, dw: Option<f32>, dh: Option<f32>) {
         let (tx, ty) = self.apply_transform(dx, dy);
         let draw_w = dw.unwrap_or(img_w as f32).max(1.0) as u32;

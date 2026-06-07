@@ -410,7 +410,7 @@ impl TrustEngine {
             images.insert(img);
         }
         let (rendered, js_title_opt) = if javascript_enabled {
-                render_with_javascript(html, author_css, cosmetic_css, external_scripts, viewport, &url, images)?
+                render_with_javascript(html, author_css, cosmetic_css, external_scripts, viewport, &url, images, &self.renderer)?
             } else {
                 let all_css = [author_css, cosmetic_css].concat();
                 // Use the animation-aware renderer to cache state for potential animation ticks
@@ -430,7 +430,7 @@ impl TrustEngine {
         let security = security.with_url(&url);
 
         // Cache animation state for potential future ticks
-        if !javascript_enabled && self.renderer.has_active_animations() {
+        if self.renderer.has_active_animations() {
             *self.anim_page.borrow_mut() = Some(AnimPageState {
                 html: html.to_owned(),
                 url: url.clone(),
@@ -585,6 +585,7 @@ fn compute_trust_score(report: &SecurityReport) -> u8 {
 }
 
 #[cfg(feature = "javascript")]
+#[allow(clippy::too_many_arguments)]
 fn render_with_javascript(
     html: &str,
     author_css: &[&str],
@@ -593,6 +594,7 @@ fn render_with_javascript(
     viewport: Viewport,
     url: &str,
     images: ImageRegistry,
+    renderer: &fortrust_renderer::StaticRenderer,
 ) -> Result<(fortrust_renderer::RenderedPage, Option<String>), EngineError> {
     use fortrust_dom::DomArena;
     use fortrust_js::{EventLoop, JsRuntime, WebApiRegistry};
@@ -632,12 +634,13 @@ fn render_with_javascript(
         Err(_) => None,
     };
 
-    let renderer = fortrust_renderer::StaticRenderer::new();
-    let rendered = renderer.render_document_with_images(&document, author_css, cosmetic_css, viewport, images)?;
+    let all_css = [author_css, cosmetic_css].concat();
+    let rendered = renderer.render_with_animation_cache(html, &all_css, &[], viewport, images)?;
     Ok((rendered, js_title))
 }
 
 #[cfg(not(feature = "javascript"))]
+#[allow(clippy::too_many_arguments)]
 fn render_with_javascript(
     _html: &str,
     _author_css: &[&str],
@@ -646,6 +649,7 @@ fn render_with_javascript(
     _viewport: Viewport,
     _url: &str,
     _images: ImageRegistry,
+    _renderer: &fortrust_renderer::StaticRenderer,
 ) -> Result<(fortrust_renderer::RenderedPage, Option<String>), EngineError> {
     Err(EngineError::Render(
         fortrust_renderer::RenderError::EmptyDocument,

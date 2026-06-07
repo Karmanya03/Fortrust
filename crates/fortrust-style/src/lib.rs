@@ -1925,12 +1925,12 @@ fn parse_font_family_list(value: &str) -> Vec<String> {
         remaining = remaining.trim_start();
         if remaining.is_empty() { break; }
         // Check for quoted string
-        let (family, rest) = if remaining.starts_with('"') {
-            let end = remaining[1..].find('"').map(|i| i + 2).unwrap_or(remaining.len());
-            (remaining[1..end.saturating_sub(1)].to_owned(), &remaining[end..])
-        } else if remaining.starts_with('\'') {
-            let end = remaining[1..].find('\'').map(|i| i + 2).unwrap_or(remaining.len());
-            (remaining[1..end.saturating_sub(1)].to_owned(), &remaining[end..])
+        let (family, rest) = if let Some(quoted) = remaining.strip_prefix('"') {
+            let end = quoted.find('"').map(|i| i + 2).unwrap_or(remaining.len());
+            (quoted[..end.saturating_sub(2)].to_owned(), &remaining[end..])
+        } else if let Some(quoted) = remaining.strip_prefix('\'') {
+            let end = quoted.find('\'').map(|i| i + 2).unwrap_or(remaining.len());
+            (quoted[..end.saturating_sub(2)].to_owned(), &remaining[end..])
         } else {
             // Unquoted identifier: take until comma or end
             let end = remaining.find(',').unwrap_or(remaining.len());
@@ -1941,7 +1941,7 @@ fn parse_font_family_list(value: &str) -> Vec<String> {
             families.push(family);
         }
         // Skip past comma
-        remaining = if rest.starts_with(',') { &rest[1..] } else { rest };
+        remaining = rest.strip_prefix(',').unwrap_or(rest);
     }
     families
 }
