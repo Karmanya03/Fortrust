@@ -334,6 +334,27 @@ impl JsRuntime {
         &mut self.context
     }
 
+    /// Execute all pending requestAnimationFrame callbacks from the given
+    /// event loop, passing a DOMHighResTimeStamp (the number of milliseconds
+    /// elapsed since origin) as the argument to each callback.
+    pub fn execute_pending_raf(&mut self, event_loop: &EventLoop) {
+        let callbacks = event_loop.drain_animation_frame_callbacks();
+        if callbacks.is_empty() {
+            return;
+        }
+        // Use wall-clock time from origin as timestamp (same as performance.now()).
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_millis() as f64;
+        let ts = BoaValue::from(now);
+        for (_id, handler) in callbacks {
+            if let Err(e) = self.call_function(&handler, &BoaValue::undefined(), std::slice::from_ref(&ts)) {
+                warn!(error = %e, raf_id = _id, "requestAnimationFrame callback failed");
+            }
+        }
+    }
+
     pub fn set_origin(&mut self, origin: impl Into<String>) {
         self.origin = origin.into();
     }

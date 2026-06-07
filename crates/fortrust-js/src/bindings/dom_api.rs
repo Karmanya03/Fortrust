@@ -695,6 +695,10 @@ fn wrap_element(context: &mut Context, node: fortrust_dom::NodeRef<'static>) -> 
         )
         .build();
 
+    // ─── Standard classList (DOMTokenList) ───
+    let class_list = build_class_list(context, node_ptr_usize)?;
+    let _ = obj.set(js_string!("classList"), class_list, false, context);
+
     if is_canvas {
         let _ = obj.set(js_string!("width"), JsValue::from(300), false, context);
         let _ = obj.set(js_string!("height"), JsValue::from(150), false, context);
@@ -740,6 +744,117 @@ fn wrap_element(context: &mut Context, node: fortrust_dom::NodeRef<'static>) -> 
     }
 
     Ok(JsValue::from(obj))
+}
+
+/// Build a DOMTokenList-like object with standard classList API.
+fn build_class_list(context: &mut Context, node_ptr: usize) -> JsResult<JsValue> {
+    let add_fn = unsafe {
+        NativeFunction::from_closure(move |_this, args, ctx| {
+            let node_ref: &fortrust_dom::Node<'static> = &*(node_ptr as *const _);
+            for arg in args.iter() {
+                let name = arg.to_string(ctx).map(|s| s.to_std_string_escaped()).unwrap_or_default();
+                if name.is_empty() { continue; }
+                if let Some(el) = node_ref.as_element() {
+                    let current = el.attr("class").unwrap_or_default();
+                    if !current.split_whitespace().any(|c| c == name) {
+                        let new = if current.is_empty() { name.clone() } else { format!("{} {}", current, name) };
+                        el.set_attr("class", &new);
+                    }
+                }
+            }
+            node_ref.mark_dirty();
+            mark_dom_dirty();
+            Ok(JsValue::undefined())
+        })
+    };
+    let remove_fn = unsafe {
+        NativeFunction::from_closure(move |_this, args, ctx| {
+            let node_ref: &fortrust_dom::Node<'static> = &*(node_ptr as *const _);
+            for arg in args.iter() {
+                let name = arg.to_string(ctx).map(|s| s.to_std_string_escaped()).unwrap_or_default();
+                if name.is_empty() { continue; }
+                if let Some(el) = node_ref.as_element() {
+                    let current = el.attr("class").unwrap_or_default();
+                    let new: String = current.split_whitespace()
+                        .filter(|c| *c != name.as_str())
+                        .collect::<Vec<_>>()
+                        .join(" ");
+                    el.set_attr("class", &new);
+                }
+            }
+            node_ref.mark_dirty();
+            mark_dom_dirty();
+            Ok(JsValue::undefined())
+        })
+    };
+    let toggle_fn = unsafe {
+        NativeFunction::from_closure(move |_this, args, ctx| {
+            let name = args.first().map(|v| v.to_string(ctx).map(|s| s.to_std_string_escaped())).unwrap_or(Ok(String::new()))?;
+            let force = args.get(1).and_then(|v| v.as_boolean());
+            let node_ref: &fortrust_dom::Node<'static> = &*(node_ptr as *const _);
+            if let Some(el) = node_ref.as_element() {
+                let current = el.attr("class").unwrap_or_default();
+                let classes: Vec<&str> = current.split_whitespace().collect();
+                let has = classes.contains(&name.as_str());
+                let add = force.unwrap_or(!has);
+                if add && !has {
+                    let new = if current.is_empty() { name.clone() } else { format!("{} {}", current, name) };
+                    el.set_attr("class", &new);
+                } else if !add && has {
+                    let new: String = classes.into_iter().filter(|c| *c != name.as_str()).collect::<Vec<_>>().join(" ");
+                    el.set_attr("class", &new);
+                }
+                node_ref.mark_dirty();
+                mark_dom_dirty();
+                return Ok(JsValue::from(add));
+            }
+            Ok(JsValue::from(false))
+        })
+    };
+    let contains_fn = unsafe {
+        NativeFunction::from_closure(move |_this, args, ctx| {
+            let name = args.first().map(|v| v.to_string(ctx).map(|s| s.to_std_string_escaped())).unwrap_or(Ok(String::new()))?;
+            let node_ref: &fortrust_dom::Node<'static> = &*(node_ptr as *const _);
+            if let Some(el) = node_ref.as_element() {
+                let current = el.attr("class").unwrap_or_default();
+                return Ok(JsValue::from(current.split_whitespace().any(|c| c == name)));
+            }
+            Ok(JsValue::from(false))
+        })
+    };
+    let replace_fn = unsafe {
+        NativeFunction::from_closure(move |_this, args, ctx| {
+            let old_name = args.first().map(|v| v.to_string(ctx).map(|s| s.to_std_string_escaped())).unwrap_or(Ok(String::new()))?;
+            let new_name = args.get(1).map(|v| v.to_string(ctx).map(|s| s.to_std_string_escaped())).unwrap_or(Ok(String::new()))?;
+            let node_ref: &fortrust_dom::Node<'static> = &*(node_ptr as *const _);
+            if let Some(el) = node_ref.as_element() {
+                let current = el.attr("class").unwrap_or_default();
+                let classes: Vec<&str> = current.split_whitespace().collect();
+                if classes.contains(&old_name.as_str()) {
+                    let new: String = classes.iter()
+                        .map(|c| if *c == old_name.as_str() { new_name.as_str() } else { *c })
+                        .collect::<Vec<_>>()
+                        .join(" ");
+                    el.set_attr("class", &new);
+                    node_ref.mark_dirty();
+                    mark_dom_dirty();
+                    return Ok(JsValue::from(true));
+                }
+            }
+            Ok(JsValue::from(false))
+        })
+    };
+
+    let class_list = ObjectInitializer::new(context)
+        .function(add_fn, js_string!("add"), 1)
+        .function(remove_fn, js_string!("remove"), 1)
+        .function(toggle_fn, js_string!("toggle"), 1)
+        .function(contains_fn, js_string!("contains"), 1)
+        .function(replace_fn, js_string!("replace"), 2)
+        .build();
+
+    let _ = class_list.set(js_string!("length"), JsValue::from(0), false, context);
+    Ok(JsValue::Object(class_list))
 }
 
 fn build_canvas_2d_context(ctx: &mut Context, canvas_ptr: usize) -> JsResult<JsValue> {

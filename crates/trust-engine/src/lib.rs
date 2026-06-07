@@ -634,6 +634,10 @@ fn render_with_javascript(
         Err(_) => None,
     };
 
+    // Drain and execute any requestAnimationFrame callbacks that were
+    // registered during script execution.
+    js.execute_pending_raf(&event_loop);
+
     let all_css = [author_css, cosmetic_css].concat();
     let rendered = renderer.render_with_animation_cache(html, &all_css, &[], viewport, images)?;
     Ok((rendered, js_title))
