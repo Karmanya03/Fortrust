@@ -4,6 +4,7 @@ mod runtime;
 mod hooks;
 pub mod canvas;
 pub mod sandbox;
+pub use bindings::dom_api::CANVAS_CONTEXTS;
 pub use hooks::{set_title_handler, set_event_handler};
 
 pub use event_loop::{EventLoop, TaskQueue, TimerHandle, TimerKind};

@@ -174,6 +174,11 @@ impl Canvas2D {
     pub fn width(&self) -> u32 { self.width }
     pub fn height(&self) -> u32 { self.height }
 
+    /// Returns (width, height, RGBA buffer) — a snapshot of the current canvas pixels.
+    pub fn pixel_buffer(&self) -> (u32, u32, Vec<u8>) {
+        (self.width, self.height, self.buffer.clone())
+    }
+
     fn state(&self) -> &CanvasState { self.state.last().unwrap() }
     fn state_mut(&mut self) -> &mut CanvasState { self.state.last_mut().unwrap() }
 

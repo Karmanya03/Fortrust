@@ -18,7 +18,7 @@ lazy_static::lazy_static! {
     static ref EVENT_CALLBACK_REGISTRY: EventCallbackRegistry = EventCallbackRegistry::new();
     /// Tracks the "dirty" flag — set to true when DOM mutations occur that require re-render.
     static ref DOM_DIRTY: Mutex<bool> = Mutex::new(false);
-    static ref CANVAS_CONTEXTS: Mutex<HashMap<usize, crate::canvas::Canvas2D>> = Mutex::new(HashMap::new());
+    pub static ref CANVAS_CONTEXTS: Mutex<HashMap<usize, crate::canvas::Canvas2D>> = Mutex::new(HashMap::new());
 }
 
 // JS callbacks are stored per-thread since JsObject is !Send.

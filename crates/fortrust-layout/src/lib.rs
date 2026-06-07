@@ -1,6 +1,7 @@
 use fortrust_core::ImageRegistry;
 use fortrust_dom::{NodeKind, NodeRef};
 use fortrust_style::{ComputedStyle, Display, Length, Overflow, StyleEngine};
+use std::cell::Cell;
 
 // ── Text measurement types ─────────────────────────────────────────────────────
 
@@ -185,6 +186,7 @@ pub struct LayoutTree {
 pub struct LayoutEngine {
     style: StyleEngine,
     line_height_px: f32,
+    canvas_counter: Cell<u32>,
 }
 
 impl LayoutEngine {
@@ -192,6 +194,7 @@ impl LayoutEngine {
         Self {
             style,
             line_height_px: 20.0,
+            canvas_counter: Cell::new(0),
         }
     }
 
@@ -264,8 +267,11 @@ impl LayoutEngine {
                 }
 
                 let element = node.as_element();
+                let local_name = element.map(|e| e.local_name());
+
+                let is_canvas = local_name.is_some_and(|n| n.eq_ignore_ascii_case("canvas"));
                 let is_replaced =
-                    element.is_some_and(|element| element.local_name().eq_ignore_ascii_case("img"));
+                    local_name.is_some_and(|n| n.eq_ignore_ascii_case("img")) || is_canvas;
 
                 let is_positioned = style.is_absolutely_positioned();
                 let kind = if is_positioned {
@@ -291,7 +297,13 @@ impl LayoutEngine {
                 let (replaced_size, image_ref, image_url) = if is_replaced {
                     let element = element.unwrap();
                     let src = element.attr("src").map(|s| s.trim().to_owned()).filter(|s| !s.is_empty());
-                    let id = src.as_deref().and_then(|s| images.find_by_url(s));
+                    let id = if is_canvas {
+                        let idx = self.canvas_counter.get();
+                        self.canvas_counter.set(idx + 1);
+                        images.find_by_url(&format!("canvas://{idx}"))
+                    } else {
+                        src.as_deref().and_then(|s| images.find_by_url(s))
+                    };
                     // If the element has explicit width/height attrs, use them.
                     // Otherwise, fall back to the decoded image's natural
                     // dimensions (if available), then 300x150.

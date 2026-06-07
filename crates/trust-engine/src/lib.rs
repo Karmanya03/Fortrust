@@ -519,6 +519,7 @@ impl TrustEngine {
         let page_state = page_borrow.as_ref()?;
 
         // Execute any pending requestAnimationFrame callbacks first.
+        #[cfg(feature = "javascript")]
         execute_pending_js_raf();
 
         let updated = match self.renderer.tick_animations(dt) {
@@ -661,6 +662,50 @@ fn clear_js_runtime() {
     });
 }
 
+/// Walk the JS runtime's document tree, find all `<canvas>` elements in
+/// document order, extract their pixel buffers from `CANVAS_CONTEXTS`, and
+/// inject them into the image registry under `"canvas://<index>"` URLs so
+/// the layout phase can pick them up.
+#[cfg(feature = "javascript")]
+fn inject_canvas_buffers(
+    document: &fortrust_dom::Document<'static>,
+    images: &mut ImageRegistry,
+) {
+    let mut idx = 0u32;
+    collect_canvas_buffers(document.root, &mut idx, images);
+}
+
+#[cfg(feature = "javascript")]
+fn collect_canvas_buffers(
+    node: &fortrust_dom::Node<'static>,
+    idx: &mut u32,
+    images: &mut ImageRegistry,
+) {
+    if let Some(el) = node.as_element()
+        && el.local_name().eq_ignore_ascii_case("canvas")
+    {
+        let ptr = node as *const fortrust_dom::Node<'static> as usize;
+        let map = fortrust_js::CANVAS_CONTEXTS.lock().unwrap();
+        if let Some(canvas) = map.get(&ptr) {
+            let (w, h, rgba) = canvas.pixel_buffer();
+            let url = format!("canvas://{idx}");
+            let decoded = fortrust_core::DecodedImage {
+                url: url.clone(),
+                width: w,
+                height: h,
+                rgba: rgba.clone(),
+            };
+            drop(map);
+            images.insert(decoded);
+            tracing::debug!(canvas_idx = *idx, width = w, height = h, "Injected canvas buffer");
+        }
+        *idx += 1;
+    }
+    for child in node.children() {
+        collect_canvas_buffers(child, idx, images);
+    }
+}
+
 #[cfg(feature = "javascript")]
 #[allow(clippy::too_many_arguments)]
 fn render_with_javascript(
@@ -670,7 +715,7 @@ fn render_with_javascript(
     external_scripts: &[String],
     viewport: Viewport,
     url: &str,
-    images: ImageRegistry,
+    mut images: ImageRegistry,
     renderer: &fortrust_renderer::StaticRenderer,
 ) -> Result<(fortrust_renderer::RenderedPage, Option<String>), EngineError> {
     use fortrust_dom::DomArena;
@@ -718,6 +763,10 @@ fn render_with_javascript(
     // Persist the runtime and event loop so rAF callbacks registered
     // during rendering can fire on subsequent animation ticks.
     store_js_runtime(js, event_loop);
+
+    // Inject canvas pixel buffers into the image registry so the layout/
+    // paint pipeline can render them as replaced elements.
+    inject_canvas_buffers(&document, &mut images);
 
     let all_css = [author_css, cosmetic_css].concat();
     let rendered = renderer.render_with_animation_cache(html, &all_css, &[], viewport, images)?;
