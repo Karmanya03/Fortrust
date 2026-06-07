@@ -423,6 +423,35 @@ impl StaticRenderer {
     pub fn clear_animation_cache(&self) {
         *self.anim_state.borrow_mut() = None;
     }
+
+    /// Return a snapshot of the last cached rendered page, re-painted with the
+    /// current layout. Returns `None` if no cache exists.
+    pub fn last_rendered_page(&self) -> Option<RenderedPage> {
+        let cache = self.anim_state.borrow();
+        let cache = cache.as_ref()?;
+        let display_list = self.painter.paint(
+            &cache.layout,
+            &cache.images,
+            PaintOptions {
+                viewport: Rect {
+                    x: 0.0,
+                    y: 0.0,
+                    width: cache.viewport.width,
+                    height: cache.viewport.height,
+                },
+                include_debug_borders: false,
+                viewport_fill: cache.viewport_fill,
+            },
+        );
+        Some(RenderedPage {
+            layout: cache.layout.clone(),
+            display_list,
+            text_content: String::new(),
+            parse_error_count: 0,
+            injected_css: cache.cosmetic_css.clone(),
+            images: cache.images.clone(),
+        })
+    }
 }
 
 /// Scans a layout tree for elements with CSS `animation` or `transition`

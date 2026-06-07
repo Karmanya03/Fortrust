@@ -405,6 +405,9 @@ impl TrustEngine {
         decoded_images: Vec<DecodedImage>,
     ) -> Result<EnginePage, EngineError> {
         let javascript_enabled = self.javascript_enabled && cfg!(feature = "javascript");
+        #[cfg(feature = "javascript")]
+        clear_js_runtime();
+
         let mut images = fortrust_core::ImageRegistry::new();
         for img in decoded_images {
             images.insert(img);
@@ -429,8 +432,9 @@ impl TrustEngine {
         );
         let security = security.with_url(&url);
 
-        // Cache animation state for potential future ticks
-        if self.renderer.has_active_animations() {
+        // Cache animation state for potential future ticks.
+        // Always cache when JS is enabled so rAF callbacks can be polled.
+        if self.renderer.has_active_animations() || javascript_enabled {
             *self.anim_page.borrow_mut() = Some(AnimPageState {
                 html: html.to_owned(),
                 url: url.clone(),
@@ -514,9 +518,20 @@ impl TrustEngine {
         let page_borrow = self.anim_page.borrow();
         let page_state = page_borrow.as_ref()?;
 
-        let updated = self.renderer.tick_animations(dt)?;
+        // Execute any pending requestAnimationFrame callbacks first.
+        execute_pending_js_raf();
 
-        // Temporarily get the URL while page_borrow is alive
+        let updated = match self.renderer.tick_animations(dt) {
+            Some(page) => page,
+            None => {
+                #[cfg(feature = "javascript")]
+                if has_pending_raf() {
+                    return Some(self.make_raf_page());
+                }
+                return None;
+            }
+        };
+
         let url = page_state.url.clone();
         let html_len = page_state.html.len();
         let source = page_state.source;
@@ -528,14 +543,8 @@ impl TrustEngine {
         drop(page_borrow);
 
         let security = SecurityReport::for_render(
-            source,
-            html_len,
-            &updated,
-            false,
-            ext_ss_loaded,
-            ext_ss_blocked,
-            ext_img_loaded,
-            ext_img_blocked,
+            source, html_len, &updated, false,
+            ext_ss_loaded, ext_ss_blocked, ext_img_loaded, ext_img_blocked,
         )
         .with_url(&url);
 
@@ -547,10 +556,35 @@ impl TrustEngine {
         })
     }
 
-    /// Returns true if there are active CSS animations/transitions on the
-    /// currently loaded page that need ticking.
+    #[cfg(feature = "javascript")]
+    fn make_raf_page(&self) -> EnginePage {
+        let page_borrow = self.anim_page.borrow();
+        let state = page_borrow.as_ref().expect("raf tick without page state");
+        let rendered = self.renderer.last_rendered_page()
+            .expect("raf tick without render cache");
+        let security = state.last_security.clone();
+        EnginePage {
+            title: security.trust_score.to_string(),
+            url: state.url.clone(),
+            rendered,
+            security,
+        }
+    }
+
+    /// Returns true if there are active animations/transitions or pending
+    /// requestAnimationFrame callbacks on the currently loaded page.
     pub fn has_active_animations(&self) -> bool {
-        self.anim_page.borrow().is_some() && self.renderer.has_active_animations()
+        if self.anim_page.borrow().is_none() {
+            return false;
+        }
+        if self.renderer.has_active_animations() {
+            return true;
+        }
+        #[cfg(feature = "javascript")]
+        if has_pending_raf() {
+            return true;
+        }
+        false
     }
 }
 
@@ -582,6 +616,49 @@ fn compute_trust_score(report: &SecurityReport) -> u8 {
     score -= (report.subresources_blocked.min(8) as i32) * 3;
     score -= (report.parse_error_count.min(8) as i32) * 2;
     score.clamp(0, 100) as u8
+}
+
+#[cfg(feature = "javascript")]
+thread_local! {
+    static JS_PERSISTENT: std::cell::RefCell<Option<(fortrust_js::JsRuntime, fortrust_js::EventLoop)>>
+        = const { std::cell::RefCell::new(None) };
+}
+
+#[cfg(feature = "javascript")]
+fn store_js_runtime(js: fortrust_js::JsRuntime, event_loop: fortrust_js::EventLoop) {
+    JS_PERSISTENT.with(|cell| {
+        *cell.borrow_mut() = Some((js, event_loop));
+    });
+}
+
+#[cfg(feature = "javascript")]
+fn execute_pending_js_raf() -> bool {
+    JS_PERSISTENT.with(|cell| {
+        let mut borrow = cell.borrow_mut();
+        if let Some((js, event_loop)) = borrow.as_mut() {
+            let had_pending = event_loop.has_pending_animation_frame();
+            if had_pending {
+                js.execute_pending_raf(event_loop);
+            }
+            had_pending
+        } else {
+            false
+        }
+    })
+}
+
+#[cfg(feature = "javascript")]
+fn has_pending_raf() -> bool {
+    JS_PERSISTENT.with(|cell| {
+        cell.borrow().as_ref().is_some_and(|(_, el)| el.has_pending_animation_frame())
+    })
+}
+
+#[cfg(feature = "javascript")]
+fn clear_js_runtime() {
+    JS_PERSISTENT.with(|cell| {
+        *cell.borrow_mut() = None;
+    });
 }
 
 #[cfg(feature = "javascript")]
@@ -637,6 +714,10 @@ fn render_with_javascript(
     // Drain and execute any requestAnimationFrame callbacks that were
     // registered during script execution.
     js.execute_pending_raf(&event_loop);
+
+    // Persist the runtime and event loop so rAF callbacks registered
+    // during rendering can fire on subsequent animation ticks.
+    store_js_runtime(js, event_loop);
 
     let all_css = [author_css, cosmetic_css].concat();
     let rendered = renderer.render_with_animation_cache(html, &all_css, &[], viewport, images)?;
