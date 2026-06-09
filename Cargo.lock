@@ -3523,6 +3523,7 @@ dependencies = [
  "fortrust-paint",
  "fortrust-renderer",
  "fortrust-style",
+ "reqwest",
  "tokio",
  "tracing",
  "tracing-subscriber",

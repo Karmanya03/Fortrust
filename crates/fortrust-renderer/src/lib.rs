@@ -367,24 +367,22 @@ impl StaticRenderer {
         let cache = cache_borrow.as_mut()?;
         cache.clock += dt;
 
-        let mut any_active = false;
-        for controller in cache.controllers.values_mut() {
-            controller.tick(dt);
-            if controller.is_active() {
-                any_active = true;
-            }
-        }
-        if any_active {
-            apply_controllers_to_layout(
-                &mut cache.layout,
-                &cache.controllers,
-                &cache.keyframes,
-            );
-        }
-
-        if !any_active {
+        // Check if any controllers had active animations BEFORE this tick,
+        // so we can emit one final frame when the last one finishes.
+        let had_active = cache.controllers.values().any(|c| c.is_active());
+        if !had_active {
             return None;
         }
+
+        for controller in cache.controllers.values_mut() {
+            controller.tick(dt);
+        }
+
+        apply_controllers_to_layout(
+            &mut cache.layout,
+            &cache.controllers,
+            &cache.keyframes,
+        );
 
         let display_list = self.painter.paint(
             &cache.layout,
@@ -478,19 +476,12 @@ fn scan_box(
         for anim in &box_.style.animations {
             controller.start_animation(anim.clone());
         }
-        for trans in &box_.style.transitions {
-            let property = &trans.property;
-            let val = fortrust_style::animation::AnimatableValue::from_computed_style(
-                property,
-                &box_.style,
-            );
-            controller.start_transition(
-                property.clone(),
-                val.clone(),
-                val,
-                trans.clone(),
-            );
-        }
+        // Transitions are NOT started on the initial render — they require
+        // detecting a property value change between style recalculation
+        // passes (e.g. from JS mutations or pseudo-class changes).
+        // The initial computed value = the "to" value, with no prior state
+        // to transition from. Once incremental style diffing is implemented,
+        // call controller.start_transition() when a property delta is detected.
         controllers.insert(key, controller);
     }
     for child in &box_.children {
@@ -570,6 +561,78 @@ mod tests {
     use fortrust_style::Color;
 
     use super::*;
+
+    #[test]
+    fn css_animation_ticks_through_pipeline() {
+        let html = r#"<!doctype html>
+<html><head><style>
+  @keyframes fadein {
+    from { opacity: 0; }
+    to   { opacity: 1; }
+  }
+  p { animation: fadein 1s both; }
+</style></head>
+<body><p>Hello</p></body></html>"#;
+        let renderer = StaticRenderer::new();
+        renderer
+            .render_with_animation_cache(html, &[], &[], Viewport { width: 320.0, height: 200.0 }, ImageRegistry::new())
+            .unwrap();
+
+        assert!(renderer.has_active_animations(), "animation should be active after initial render");
+
+        let midway = renderer.tick_animations(0.5);
+        assert!(midway.is_some(), "tick should produce a page while animation runs");
+        assert!(renderer.has_active_animations(), "should still be active midway");
+
+        let near_end = renderer.tick_animations(0.49);
+        assert!(near_end.is_some(), "near-end tick should produce a page");
+
+        let final_tick = renderer.tick_animations(0.02);
+        assert!(final_tick.is_some(), "final tick should produce the end state");
+
+        // No more ticks after animation completes
+        let after_done = renderer.tick_animations(0.1);
+        assert!(after_done.is_none(), "no more ticks after animation done");
+    }
+
+    #[test]
+    fn css_animation_changes_display_list_over_time() {
+        let html = r#"<!doctype html>
+<html><head><style>
+  @keyframes fadein {
+    from { opacity: 0; }
+    to   { opacity: 1; }
+  }
+  p { animation: fadein 1s; }
+</style></head>
+<body><p>AnimatedText</p></body></html>"#;
+        let renderer = StaticRenderer::new();
+        renderer
+            .render_with_animation_cache(html, &[], &[], Viewport { width: 320.0, height: 200.0 }, ImageRegistry::new())
+            .unwrap();
+
+        let frame0 = renderer.last_rendered_page().unwrap();
+        let cmd_count_0 = frame0.display_list.commands().len();
+
+        let midway = renderer.tick_animations(0.5);
+        assert!(midway.is_some(), "tick_animations(0.5) should return Some for active animation");
+        let frame1 = renderer.last_rendered_page().unwrap();
+        let cmd_count_1 = frame1.display_list.commands().len();
+
+        let final_tick = renderer.tick_animations(0.5);
+        assert!(final_tick.is_some(), "tick_animations(0.5) should emit final frame");
+        let frame2 = renderer.last_rendered_page().unwrap();
+        let cmd_count_2 = frame2.display_list.commands().len();
+
+        // After completion, no more frames
+        let after = renderer.tick_animations(0.1);
+        assert!(after.is_none(), "no more frames after animation finished");
+
+        // All three frames should have valid display lists
+        assert!(cmd_count_0 > 0, "initial frame should have display commands");
+        assert!(cmd_count_1 > 0, "midway frame should have display commands");
+        assert!(cmd_count_2 > 0, "final frame should have display commands");
+    }
 
     #[test]
     fn renders_static_html_into_display_list() {

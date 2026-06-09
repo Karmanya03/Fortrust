@@ -384,6 +384,7 @@ impl Canvas2D {
         let clip = fortrust_layout::Rect { x: 0.0, y: 0.0, width: self.width as f32, height: self.height as f32 };
         let rect = fortrust_layout::Rect { x: draw_x, y: draw_y - font_size, width: text_width * scale, height: font_size * 1.2 };
 
+        let font_family = s.font_family.clone();
         TEXT_RENDERER.with(|tr| {
             let mut tr = tr.lock().unwrap();
             tr.render_into(
@@ -394,7 +395,7 @@ impl Canvas2D {
                 rect,
                 text,
                 font_size * scale,
-                "sans-serif",
+                &font_family,
                 fortrust_style::FontWeight::Normal,
                 fortrust_style::FontStyle::Normal,
                 color,
@@ -551,6 +552,7 @@ impl Canvas2D {
         let clip = fortrust_layout::Rect { x: 0.0, y: 0.0, width: self.width as f32, height: self.height as f32 };
         let rect = fortrust_layout::Rect { x: draw_x, y: draw_y - font_size, width: text_width * scale, height: font_size * 1.2 };
 
+        let font_family = s.font_family.clone();
         TEXT_RENDERER.with(|tr| {
             let mut tr = tr.lock().unwrap();
             tr.render_into(
@@ -561,7 +563,7 @@ impl Canvas2D {
                 rect,
                 text,
                 font_size * scale,
-                "sans-serif",
+                &font_family,
                 fortrust_style::FontWeight::Normal,
                 fortrust_style::FontStyle::Normal,
                 color,

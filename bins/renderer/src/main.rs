@@ -1,13 +1,14 @@
 use std::cell::RefCell;
+use std::collections::HashMap;
 
 use fortrust_core::TabId;
 use fortrust_dom::DomArena;
 use fortrust_ipc::RendererToBrowser;
 use fortrust_js::EventLoop;
 use fortrust_net::NetworkClient;
-use fortrust_paint::{DisplayCommand, TextRenderer};
+use fortrust_paint::{process_font_faces, DisplayCommand, TextRenderer};
 use fortrust_renderer::{RenderedPage, StaticRenderer};
-use fortrust_style::{FontWeight, FontStyle};
+use fortrust_style::{FontWeight, FontStyle, Stylesheet};
 use tracing::info;
 
 thread_local! {
@@ -72,6 +73,9 @@ impl RendererInstance {
                 return events;
             }
         };
+
+        // Load @font-face fonts before rendering
+        load_font_faces_from_html(url, &html_source);
 
         events.push(RendererToBrowser::LoadProgress { percent: 0.45, state: fortrust_ipc::LoadState::Layout });
 
@@ -367,6 +371,74 @@ fn blend_rgba(dst: &mut [u8], src: [u8; 4]) {
     dst[1] = (src[1] as f32 * alpha + dst[1] as f32 * inverse) as u8;
     dst[2] = (src[2] as f32 * alpha + dst[2] as f32 * inverse) as u8;
     dst[3] = 255;
+}
+
+/// Discover @font-face rules embedded in the given HTML, download the font
+/// files, and register them with the global TEXT_RENDERER so that subsequent
+/// page rendering uses the correct custom fonts.
+fn load_font_faces_from_html(base_url: &str, html: &str) {
+    let mut font_faces = Vec::new();
+
+    let mut search_start = 0usize;
+    while let Some(start) = html[search_start..].find("<style") {
+        let tag_end = html[search_start + start..].find('>').map(|i| search_start + start + i + 1).unwrap_or(html.len());
+        let content_start = tag_end;
+        let close_tag = html[content_start..].find("</style>").map(|i| content_start + i).unwrap_or(html.len());
+        let css_text = &html[content_start..close_tag];
+        if let Ok(sheet) = Stylesheet::parse(css_text) {
+            font_faces.extend(sheet.font_face_rules);
+        }
+        search_start = close_tag + 8;
+        if search_start >= html.len() {
+            break;
+        }
+    }
+
+    if font_faces.is_empty() {
+        return;
+    }
+
+    let mut font_data: HashMap<String, Vec<u8>> = HashMap::new();
+    for rule in &font_faces {
+        for source in &rule.sources {
+            if font_data.contains_key(&source.url) {
+                continue;
+            }
+            let absolute_url = if source.url.starts_with("http://") || source.url.starts_with("https://") {
+                source.url.clone()
+            } else if source.url.starts_with('/') {
+                let origin = base_url.trim_end_matches('/');
+                format!("{}{}", origin, source.url)
+            } else if let Some(base) = base_url.strip_suffix('/') {
+                format!("{}/{}", base, source.url.trim_start_matches("./"))
+            } else {
+                format!("{}/{}", base_url, source.url.trim_start_matches("./"))
+            };
+
+            tracing::info!("Downloading font: {absolute_url}");
+            match reqwest::blocking::get(&absolute_url) {
+                Ok(resp) => {
+                    match resp.bytes() {
+                        Ok(bytes) => {
+                            let data = bytes.to_vec();
+                            tracing::info!("  -> {} bytes loaded", data.len());
+                            font_data.insert(source.url.clone(), data);
+                        }
+                        Err(e) => tracing::warn!("  -> failed to read font body: {e}"),
+                    }
+                }
+                Err(e) => tracing::warn!("  -> failed to fetch font: {e}"),
+            }
+        }
+    }
+
+    if !font_data.is_empty() {
+        TEXT_RENDERER.with(|tr| {
+            let mut renderer = tr.borrow_mut();
+            process_font_faces(&mut renderer, &font_faces, &font_data);
+            tracing::info!("Loaded {} @font-face fonts", font_data.len());
+        });
+    }
 }
 
 #[tokio::main]

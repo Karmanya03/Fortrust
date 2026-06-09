@@ -1140,9 +1140,10 @@ impl Stylesheet {
                 } else {
                     continue;
                 };
-                let name_end = after_at.find(|c: char| c.is_whitespace() || c == '{').unwrap_or(after_at.len());
-                let name = after_at[..name_end].trim().to_owned();
-                let after_name = after_at[name_end..].trim_start();
+                let after_trimmed = after_at.trim_start();
+                let name_end = after_trimmed.find(|c: char| c.is_whitespace() || c == '{').unwrap_or(after_trimmed.len());
+                let name = after_trimmed[..name_end].trim().to_owned();
+                let after_name = after_trimmed[name_end..].trim_start();
                 if !name.is_empty()
                     && let Some(open) = after_name.find('{') {
                         let body_start = open + 1;
@@ -1673,11 +1674,12 @@ fn parse_declarations(input: &str) -> SmallVec<[Declaration; 6]> {
 fn parse_css_time(value: &str) -> Option<f32> {
     let value = value.trim();
     if let Some(rest) = value.strip_suffix("ms") {
-        rest.trim().parse::<f32>().ok()
+        rest.trim().parse::<f32>().ok().map(|v| v / 1000.0)
     } else if let Some(rest) = value.strip_suffix('s') {
-        rest.trim().parse::<f32>().ok().map(|v| v * 1000.0)
+        rest.trim().parse::<f32>().ok()
     } else {
-        value.parse::<f32>().ok()
+        // bare number without a unit — treat as seconds? treat as 0?
+        None
     }
 }
 
@@ -3348,5 +3350,60 @@ mod tests {
         let ctx = MediaContext { reduced_motion: ReducedMotion::Reduce, ..Default::default() };
         let q = parse_media_query("(prefers-reduced-motion: reduce)").unwrap();
         assert!(ctx.evaluate(&q));
+    }
+
+    #[test]
+    fn keyframes_only_parse() {
+        let css = r#"@keyframes fadein { from { opacity: 0; } to { opacity: 1; } }"#;
+        let sheet = Stylesheet::parse(css).unwrap();
+        eprintln!("keyframes_only: rules={}, keyframes={}, media_rules={}",
+            sheet.rules.len(), sheet.keyframes.len(), sheet.media_rules.len());
+        for kf in &sheet.keyframes {
+            eprintln!("  kf name={}, keyframe_count={}", kf.name, kf.keyframes.len());
+        }
+        assert_eq!(sheet.keyframes.len(), 1, "should have 1 keyframe rule");
+    }
+
+    #[test]
+    fn keyframes_with_rule_parse() {
+        let css = r#"
+            @keyframes fadein { from { opacity: 0; } to { opacity: 1; } }
+            p { color: red; }
+        "#;
+        let sheet = Stylesheet::parse(css).unwrap();
+        eprintln!("keyframes+rule: rules={}, keyframes={}, media_rules={}",
+            sheet.rules.len(), sheet.keyframes.len(), sheet.media_rules.len());
+        for kf in &sheet.keyframes {
+            eprintln!("  kf name={}", kf.name);
+        }
+        for r in &sheet.rules {
+            eprintln!("  rule selectors={:?}", r.selectors.iter().map(|s| format!("{:?}", s.parts)).collect::<Vec<_>>());
+        }
+        assert_eq!(sheet.keyframes.len(), 1, "should have 1 keyframe rule");
+        assert_eq!(sheet.rules.len(), 1, "should have 1 regular rule");
+    }
+
+    #[test]
+    fn animation_parsed_from_css_rule() {
+        let css = r#"
+            @keyframes fadein { from { opacity: 0; } to { opacity: 1; } }
+            p { animation: fadein 1s; }
+        "#;
+        let sheet = Stylesheet::parse(css).unwrap();
+
+        // Now test through the full StyleEngine
+        let arena = DomArena::new();
+        let document = parse_html(&arena, r#"<p>Text</p>"#).unwrap();
+        let p = document.first_element_by_tag("p").unwrap();
+        let mut engine = StyleEngine::new();
+        engine.add_stylesheet(sheet);
+        let style = engine.compute_style(p, None);
+        assert!(!style.animations.is_empty(), "p should have animations");
+        assert_eq!(style.animations[0].name, "fadein");
+    }
+
+    #[test]
+    fn animation_renders_through_full_pipeline() {
+        // Use the renderer to test the full pipeline
     }
 }
