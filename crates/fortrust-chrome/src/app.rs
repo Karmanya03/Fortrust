@@ -9,8 +9,8 @@ use std::time::Duration;
 use chrono::Utc;
 use eframe::egui::{self, Color32, Context, CornerRadius, Frame, Margin, Pos2, Rect, Stroke, Vec2};
 use fortrust_core::{
-    BlockReason, BrowserConfig, PrivacyConfig, PrivacyEngine, RequestContext, ResourceType, TabId,
-    TabManager, WorkspaceManager,
+    BlockReason, BrowserConfig, FingerprintGuard, PrivacyConfig, PrivacyEngine, RequestContext,
+    ResourceType, TabId, TabManager, WorkspaceManager,
 };
 use fortrust_privacy::PrivacyFilter;
 use fortrust_search::{FortrustSearch, SearchConfig, SearchResult};
@@ -254,7 +254,7 @@ struct TabRendererEntry {
 }
 
 enum EngineCommand {
-    Load { request_id: u64, url: String, viewport: Viewport, cosmetic_css: Vec<String> },
+    Load { request_id: u64, url: String, viewport: Viewport, cosmetic_css: Vec<String>, fingerprint_guard: Option<FingerprintGuard> },
     Search { request_id: u64, query: String },
     Suggest { request_id: u64, query: String },
     AnimationTick { request_id: u64, dt: f32 },
@@ -314,9 +314,9 @@ impl EngineWorker {
 
             while let Ok(command) = command_receiver.recv() {
                 match command {
-                    EngineCommand::Load { request_id, url, viewport, cosmetic_css } => {
+                    EngineCommand::Load { request_id, url, viewport, cosmetic_css, fingerprint_guard } => {
                         let cosmetic_refs: Vec<&str> = cosmetic_css.iter().map(String::as_str).collect();
-                        let result = runtime.block_on(engine.load_url_with_cosmetic(url.clone(), viewport, &cosmetic_refs));
+                        let result = runtime.block_on(engine.load_url_with_cosmetic_ext(url.clone(), viewport, &cosmetic_refs, fingerprint_guard));
                         let event = match result {
                             Ok(page) => EngineEvent::Loaded { request_id, page: Box::new(page) },
                             Err(e) => EngineEvent::Failed { request_id, url, error: format!("{e:?}") },
@@ -359,11 +359,11 @@ impl EngineWorker {
         }
     }
 
-    fn load(&mut self, tab_id: TabId, url: String, viewport: Viewport, cosmetic_css: Vec<String>) -> u64 {
+    fn load(&mut self, tab_id: TabId, url: String, viewport: Viewport, cosmetic_css: Vec<String>, fingerprint_guard: Option<FingerprintGuard>) -> u64 {
         let request_id = self.next_request_id;
         self.next_request_id = self.next_request_id.saturating_add(1);
         let url_clone = url.clone();
-        let _ = self.sender.send(EngineCommand::Load { request_id, url: url.clone(), viewport, cosmetic_css });
+        let _ = self.sender.send(EngineCommand::Load { request_id, url: url.clone(), viewport, cosmetic_css, fingerprint_guard });
 
         // Send navigation to the renderer for this tab (per-tab renderer subprocess)
         let sender = self.ensure_renderer_for_tab(tab_id, viewport);
@@ -1220,9 +1220,13 @@ impl FortrustApp {
             .map(|r| r.hide_selectors)
             .unwrap_or_default();
 
+        // Extract the active workspace's fingerprint guard for container identity isolation
+        let fingerprint_guard = self.workspaces.active_workspace()
+            .map(|ws| ws.fingerprint_guard.clone());
+
         let request_id = self.engine_worker.load(tab_id, url.clone(), Viewport {
             width: 1180.0, height: 760.0,
-        }, cosmetic_css);
+        }, cosmetic_css, fingerprint_guard);
         self.request_owner.insert(request_id, tab_id);
         self.tab_state_mut(tab_id).begin_load(url, request_id);
     }

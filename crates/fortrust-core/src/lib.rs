@@ -11,6 +11,7 @@ pub use privacy::{
     RequestDecision, ResourceType, compute_referer,
 };
 pub use tabs::{MemoryReport, Tab, TabId, TabManager, TabStatus};
-pub use workspaces::{Workspace, WorkspaceId, WorkspaceManager};
+pub use fortrust_privacy::fingerprint::FingerprintGuard;
+pub use workspaces::{ContainerConfig, Workspace, WorkspaceId, WorkspaceManager};
 
 pub const BROWSER_NAME: &str = "Fortrust";

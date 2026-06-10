@@ -1,6 +1,6 @@
 //! Trust engine facade and rendering orchestration.
 
-use fortrust_core::{DecodedImage, ImageRegistry, PrivacyConfig, PrivacyEngine, RequestContext, ResourceType};
+use fortrust_core::{DecodedImage, FingerprintGuard, ImageRegistry, PrivacyConfig, PrivacyEngine, RequestContext, ResourceType};
 use fortrust_dom::{DomArena, NodeRef, parse_html};
 use fortrust_net::{FetchSource, NetprocClient, NetworkClient, NetworkError};
 use fortrust_renderer::{RenderError, RenderedPage, StaticRenderer};
@@ -257,6 +257,7 @@ impl TrustEngine {
             0,
             0,
             Vec::new(),
+            None,
         )
     }
 
@@ -282,6 +283,7 @@ impl TrustEngine {
             0,
             0,
             Vec::new(),
+            None,
         )
     }
 
@@ -292,7 +294,7 @@ impl TrustEngine {
     ) -> Result<EnginePage, EngineError> {
         let url = url.into();
         let html = internal_html(&url);
-        self.build_page(url, &html, &[], &[], &[], viewport, PageSource::Internal, 0, 0, 0, 0, Vec::new())
+        self.build_page(url, &html, &[], &[], &[], viewport, PageSource::Internal, 0, 0, 0, 0, Vec::new(), None)
     }
 
     /// Render a list of `SearchResult`s into a styled `EnginePage` using the
@@ -322,6 +324,7 @@ impl TrustEngine {
             0,
             0,
             Vec::new(),
+            None,
         )
     }
 
@@ -338,6 +341,16 @@ impl TrustEngine {
         url: impl Into<String>,
         viewport: Viewport,
         cosmetic_css: &[&str],
+    ) -> Result<EnginePage, EngineError> {
+        self.load_url_with_cosmetic_ext(url, viewport, cosmetic_css, None).await
+    }
+
+    pub async fn load_url_with_cosmetic_ext(
+        &mut self,
+        url: impl Into<String>,
+        viewport: Viewport,
+        cosmetic_css: &[&str],
+        fingerprint_guard: Option<FingerprintGuard>,
     ) -> Result<EnginePage, EngineError> {
         let url = url.into();
 
@@ -385,6 +398,7 @@ impl TrustEngine {
             external_images_loaded,
             external_images_blocked,
             decoded_images,
+            fingerprint_guard,
         )
     }
 
@@ -403,6 +417,7 @@ impl TrustEngine {
         external_images_loaded: usize,
         external_images_blocked: usize,
         decoded_images: Vec<DecodedImage>,
+        fingerprint_guard: Option<FingerprintGuard>,
     ) -> Result<EnginePage, EngineError> {
         let javascript_enabled = self.javascript_enabled && cfg!(feature = "javascript");
         #[cfg(feature = "javascript")]
@@ -413,7 +428,7 @@ impl TrustEngine {
             images.insert(img);
         }
         let (rendered, js_title_opt) = if javascript_enabled {
-                render_with_javascript(html, author_css, cosmetic_css, external_scripts, viewport, &url, images, &self.renderer)?
+                render_with_javascript(html, author_css, cosmetic_css, external_scripts, viewport, &url, images, &self.renderer, fingerprint_guard)?
             } else {
                 let all_css = [author_css, cosmetic_css].concat();
                 // Use the animation-aware renderer to cache state for potential animation ticks
@@ -518,9 +533,12 @@ impl TrustEngine {
         let page_borrow = self.anim_page.borrow();
         let page_state = page_borrow.as_ref()?;
 
-        // Execute any pending requestAnimationFrame callbacks first.
+        // Execute any pending requestAnimationFrame and WebSocket callbacks first.
         #[cfg(feature = "javascript")]
-        execute_pending_js_raf();
+        {
+            execute_pending_js_raf();
+            execute_pending_websocket();
+        }
 
         let updated = match self.renderer.tick_animations(dt) {
             Some(page) => page,
@@ -656,6 +674,16 @@ fn has_pending_raf() -> bool {
 }
 
 #[cfg(feature = "javascript")]
+fn execute_pending_websocket() {
+    JS_PERSISTENT.with(|cell| {
+        let mut borrow = cell.borrow_mut();
+        if let Some((js, _event_loop)) = borrow.as_mut() {
+            js.execute_pending_websocket();
+        }
+    })
+}
+
+#[cfg(feature = "javascript")]
 fn clear_js_runtime() {
     JS_PERSISTENT.with(|cell| {
         *cell.borrow_mut() = None;
@@ -717,6 +745,7 @@ fn render_with_javascript(
     url: &str,
     mut images: ImageRegistry,
     renderer: &fortrust_renderer::StaticRenderer,
+    fingerprint_guard: Option<FingerprintGuard>,
 ) -> Result<(fortrust_renderer::RenderedPage, Option<String>), EngineError> {
     use fortrust_dom::DomArena;
     use fortrust_js::{EventLoop, JsRuntime, WebApiRegistry};
@@ -724,10 +753,14 @@ fn render_with_javascript(
     let arena: &'static DomArena = Box::leak(Box::new(DomArena::new()));
     let document = fortrust_dom::parse_html(arena, html)?;
     let mut event_loop = EventLoop::new();
-    let mut js = JsRuntime::new()
+    let mut js_builder = JsRuntime::new()
         .with_origin(url)
         .with_registry(WebApiRegistry::new())
         .with_arena(arena);
+    if let Some(guard) = fingerprint_guard {
+        js_builder = js_builder.with_fingerprint_guard(guard);
+    }
+    let mut js = js_builder;
     js.initialize(&mut event_loop)?;
 
     // Safety: the arena is intentionally leaked so it lives forever.
@@ -784,6 +817,7 @@ fn render_with_javascript(
     _url: &str,
     _images: ImageRegistry,
     _renderer: &fortrust_renderer::StaticRenderer,
+    _fingerprint_guard: Option<FingerprintGuard>,
 ) -> Result<(fortrust_renderer::RenderedPage, Option<String>), EngineError> {
     Err(EngineError::Render(
         fortrust_renderer::RenderError::EmptyDocument,

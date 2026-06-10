@@ -9,7 +9,7 @@ pub enum NoiseStrategy {
     Rounding,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct CanvasNoise {
     pub enabled: bool,
     pub noise_level: u8,
@@ -59,7 +59,7 @@ impl CanvasNoise {
     }
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct AudioNoise {
     pub enabled: bool,
     pub seed: u64,
@@ -83,7 +83,7 @@ impl AudioNoise {
     }
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct FingerprintGuard {
     pub canvas: CanvasNoise,
     pub audio: AudioNoise,

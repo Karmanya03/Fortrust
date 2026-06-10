@@ -1270,6 +1270,7 @@ dependencies = [
  "ahash",
  "compact_str",
  "fortrust-privacy",
+ "rand 0.8.6",
  "serde",
  "smallvec",
  "url",

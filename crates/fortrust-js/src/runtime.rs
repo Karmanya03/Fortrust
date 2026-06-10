@@ -11,6 +11,7 @@ use tracing::{debug, warn};
 
 use crate::bindings;
 use crate::event_loop::{EventLoop, TimerHandle};
+use fortrust_core::FingerprintGuard;
 use fortrust_dom::Document;
 use fortrust_storage::LocalStorageStore;
 
@@ -144,6 +145,8 @@ pub struct JsRuntime {
     network: Option<fortrust_net::NetworkClient>,
     arena: Option<&'static fortrust_dom::DomArena>,
     local_storage: Option<LocalStorageStore>,
+    /// Per-workspace fingerprint guard for spoofed navigator/screen/canvas values.
+    fingerprint_guard: Option<FingerprintGuard>,
 }
 
 impl JsRuntime {
@@ -159,6 +162,7 @@ impl JsRuntime {
             network: None,
             arena: None,
             local_storage: None,
+            fingerprint_guard: None,
         }
     }
 
@@ -185,6 +189,15 @@ impl JsRuntime {
     pub fn with_local_storage(mut self, store: LocalStorageStore) -> Self {
         self.local_storage = Some(store);
         self
+    }
+
+    pub fn with_fingerprint_guard(mut self, guard: FingerprintGuard) -> Self {
+        self.fingerprint_guard = Some(guard);
+        self
+    }
+
+    pub fn fingerprint_guard(&self) -> Option<&FingerprintGuard> {
+        self.fingerprint_guard.as_ref()
     }
 
     pub fn arena(&self) -> Option<&'static fortrust_dom::DomArena> {
@@ -237,8 +250,8 @@ impl JsRuntime {
             self.network.clone(),
         )?;
 
-        bindings::navigator::register(&mut self.context)?;
-        bindings::screen::register(&mut self.context)?;
+        bindings::navigator::register(&mut self.context, self.fingerprint_guard.as_ref())?;
+        bindings::screen::register(&mut self.context, self.fingerprint_guard.as_ref())?;
 
         bindings::location::register(&mut self.context, &origin)?;
 
@@ -365,6 +378,14 @@ impl JsRuntime {
 
     pub fn registry(&self) -> &WebApiRegistry {
         &self.registry
+    }
+
+    /// Poll all WebSocket connections for pending events and dispatch
+    /// them to their JS event listeners (onopen, onmessage, onclose,
+    /// onerror, and addEventListener-registered callbacks).
+    /// Must be called once per event loop tick to ensure timely delivery.
+    pub fn execute_pending_websocket(&mut self) {
+        crate::bindings::websocket::poll_websocket_events(&mut self.context);
     }
 }
 
