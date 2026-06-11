@@ -126,6 +126,9 @@ struct TabPageState {
     renderer_frame: Option<egui::TextureHandle>,
     search_query: Option<String>,
     search_results: Option<Vec<SearchResult>>,
+    favicon_data: Option<Vec<u8>>,
+    scroll_x: f64,
+    scroll_y: f64,
 }
 
 impl TabPageState {
@@ -231,6 +234,9 @@ impl TabPageState {
         self.renderer_frame = None;
         self.search_query = None;
         self.search_results = None;
+        self.favicon_data = None;
+        self.scroll_x = 0.0;
+        self.scroll_y = 0.0;
     }
 }
 
@@ -786,6 +792,8 @@ impl FortrustApp {
             speed_dial.load_persisted_tiles(s);
         }
 
+        let sidebar_state = storage.as_ref().map(SidebarState::load_from_storage).unwrap_or_default();
+
         let privacy_filter = if config.privacy.block_ads || config.privacy.block_trackers {
             Some(PrivacyFilter::load())
         } else {
@@ -805,7 +813,7 @@ impl FortrustApp {
 
             omnibox: OmniboxState::default(),
             sidebar_anim: SidebarAnimation::new(),
-            sidebar_state: SidebarState::default(),
+            sidebar_state,
             speed_dial,
             shield: ShieldState::default(),
             theme,
@@ -1019,13 +1027,32 @@ impl FortrustApp {
             fortrust_ipc::RendererToBrowser::RendererCrashed { reason } => {
                 tracing::error!(target: "fortrust.renderer", %reason);
             }
-            fortrust_ipc::RendererToBrowser::ShutdownAck
-            | fortrust_ipc::RendererToBrowser::FaviconUpdated { .. }
-            | fortrust_ipc::RendererToBrowser::Alert { .. }
-            | fortrust_ipc::RendererToBrowser::NewTabRequested { .. }
-            | fortrust_ipc::RendererToBrowser::DownloadRequested { .. }
-            | fortrust_ipc::RendererToBrowser::ScrollPosition { .. }
-            | fortrust_ipc::RendererToBrowser::MemoryUsage { .. } => {}
+            fortrust_ipc::RendererToBrowser::ShutdownAck => {}
+            fortrust_ipc::RendererToBrowser::FaviconUpdated { data } => {
+                if let Some(tab) = self.tab_pages.get_mut(&tab_id) {
+                    tab.favicon_data = Some(data);
+                }
+            }
+            fortrust_ipc::RendererToBrowser::Alert { message } => {
+                tracing::warn!(target: "fortrust.renderer", tab_id = %tab_id.0, %message);
+            }
+            fortrust_ipc::RendererToBrowser::NewTabRequested { url } => {
+                let id = self.tabs.open_tab(&url, &url, false);
+                self.tab_pages.insert(id, TabPageState::new(url));
+                self.needs_new_tab = true;
+            }
+            fortrust_ipc::RendererToBrowser::DownloadRequested { url, filename, mime_type: _ } => {
+                self.download_manager.start_download(url, filename, &self.download_dir, None);
+            }
+            fortrust_ipc::RendererToBrowser::ScrollPosition { x, y } => {
+                if let Some(tab) = self.tab_pages.get_mut(&tab_id) {
+                    tab.scroll_x = x;
+                    tab.scroll_y = y;
+                }
+            }
+            fortrust_ipc::RendererToBrowser::MemoryUsage { used_mb, heap_mb: _ } => {
+                self.total_memory_mb = used_mb as f32;
+            }
         }
 
         ctx.request_repaint();
@@ -1059,7 +1086,6 @@ impl FortrustApp {
         0.65 + (self.config.ui.motion_strength.min(100) as f32 / 100.0) * 0.85
     }
 
-    #[allow(dead_code)]
     fn rebuild_privacy_pipeline(&mut self) {
         self.privacy = PrivacyEngine::new(self.config.privacy.clone());
         self.engine_worker = EngineWorker::spawn(self.config.privacy.clone());
@@ -1272,6 +1298,7 @@ impl FortrustApp {
 
     fn close_tab(&mut self, id: TabId) {
         self.engine_worker.close_tab_renderer(id);
+        self.workspaces.remove_tab(id);
         self.tabs.close_tab(id);
         self.tab_pages.remove(&id);
         self.request_owner.retain(|_, owner| *owner != id);
@@ -1497,6 +1524,14 @@ impl FortrustApp {
                                 ui.painter().rect_filled(Rect::from_min_size(Pos2::new(fav_rect.min.x + 7.0, fav_rect.min.y + 2.0), Vec2::new(4.0, 4.0)), 1.0, fg);
                                 ui.painter().rect_filled(Rect::from_min_size(Pos2::new(fav_rect.min.x + 2.0, fav_rect.min.y + 7.0), Vec2::new(4.0, 4.0)), 1.0, fg2);
                                 ui.painter().rect_filled(Rect::from_min_size(Pos2::new(fav_rect.min.x + 7.0, fav_rect.min.y + 7.0), Vec2::new(4.0, 4.0)), 1.0, fg2);
+                            } else if let Some(fav_data) = self.tab_pages.get(&tab.id).and_then(|s| s.favicon_data.as_ref())
+                                && fav_data.len() == 1024
+                            {
+                                let fav_rect = Rect::from_min_size(Pos2::new(tab_rect.min.x + 6.0, tab_rect.center().y - 6.5), Vec2::new(13.0, 13.0));
+                                ui.painter().rect_filled(fav_rect, 2.0, Color32::from_rgb(26, 32, 48));
+                                let img = egui::ColorImage::from_rgba_unmultiplied([16, 16], fav_data);
+                                let tex = ctx.load_texture(format!("favicon-{}", tab.id.0), img, egui::TextureOptions::LINEAR);
+                                ui.painter().image(tex.id(), fav_rect, Rect::from_min_max(Pos2::ZERO, Pos2::new(1.0, 1.0)), Color32::WHITE);
                             } else {
                                 // Globe icon for web pages
                                 let fav_rect = Rect::from_min_size(Pos2::new(tab_rect.min.x + 6.0, tab_rect.center().y - 6.5), Vec2::new(13.0, 13.0));
@@ -1888,6 +1923,7 @@ impl FortrustApp {
 
                 // Render sidebar overlay ON TOP of central panel content
                 let old_theme = self.config.ui.theme.clone();
+                let old_privacy = self.config.privacy.clone();
                 let downloads_entries = self.download_manager.all_downloads();
                 if let Some(url) = self.sidebar_state.render_overlay(ui, &self.theme, &mut self.sidebar_anim, &mut self.config, self.storage.as_ref(), &downloads_entries, &mut self.workspaces) {
                     navigate = Some(url);
@@ -1901,6 +1937,7 @@ impl FortrustApp {
                     }
                 }
                 if self.config.ui.theme != old_theme { self.refresh_theme(ctx); }
+                if self.config.privacy != old_privacy { self.rebuild_privacy_pipeline(); }
             });
         });
 
@@ -2475,6 +2512,7 @@ impl eframe::App for FortrustApp {
             let shift = i.modifiers.shift;
             if ctrl && i.key_pressed(egui::Key::T) {
                 self.open_new_tab();
+                ctx.memory_mut(|mem| mem.request_focus(egui::Id::new(crate::omnibox::OMNIBOX_INPUT_ID)));
             } else if ctrl && i.key_pressed(egui::Key::W) {
                 if let Some(id) = self.active_tab_id() {
                     self.close_tab(id);
@@ -2486,6 +2524,7 @@ impl eframe::App for FortrustApp {
             } else if ctrl && i.key_pressed(egui::Key::L) {
                 self.omnibox.focused = true;
                 self.omnibox.text.clear();
+                ctx.memory_mut(|mem| mem.request_focus(egui::Id::new(crate::omnibox::OMNIBOX_INPUT_ID)));
             } else if ctrl && i.key_pressed(egui::Key::R) {
                 self.reload();
             } else if i.key_pressed(egui::Key::I) && ctrl {

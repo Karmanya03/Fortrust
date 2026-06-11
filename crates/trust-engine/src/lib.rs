@@ -177,6 +177,13 @@ struct AnimPageState {
     last_security: SecurityReport,
 }
 
+#[cfg(feature = "javascript")]
+impl Drop for TrustEngine {
+    fn drop(&mut self) {
+        clear_js_runtime();
+    }
+}
+
 impl TrustEngine {
     pub fn offline() -> Self {
         Self {

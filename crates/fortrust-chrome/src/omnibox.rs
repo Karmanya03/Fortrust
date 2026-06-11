@@ -1,5 +1,7 @@
 use crate::{icons, theme::FortrustTheme};
-use egui::{self, Color32, CornerRadius, Pos2, Rect, Ui, Vec2};
+use egui::{self, Color32, CornerRadius, Id, Pos2, Rect, Ui, Vec2};
+
+pub const OMNIBOX_INPUT_ID: &str = "fortrust_omnibox_input";
 
 #[derive(Default)]
 pub struct OmniboxState {
@@ -154,6 +156,7 @@ impl OmniboxState {
                     };
 
                     let text_edit = egui::TextEdit::singleline(&mut self.text)
+                        .id(Id::new(OMNIBOX_INPUT_ID))
                         .hint_text("Enter search or web address")
                         .frame(false)
                         .desired_width((ui.available_width() - 40.0).max(50.0))

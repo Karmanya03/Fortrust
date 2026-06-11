@@ -1,17 +1,19 @@
 use crate::{animation::SidebarAnimation, icons, theme::FortrustTheme};
 use egui::{self, Color32, CornerRadius, Pos2, Rect, Stroke, Vec2};
 use fortrust_core::{BrowserConfig, WorkspaceId, WorkspaceManager};
-use fortrust_storage::StorageDatabase;
+use fortrust_storage::{SettingValue, StorageDatabase};
+use serde::{Deserialize, Serialize};
 
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub enum DownloadAction {
     Pause,
     Resume,
     Remove,
 }
 
-#[derive(PartialEq, Clone, Copy)]
+#[derive(Default, PartialEq, Clone, Copy, Serialize, Deserialize)]
 pub enum SidebarSection {
+    #[default]
     Setup,
     Feeds,
     AI,
@@ -33,10 +35,13 @@ impl SidebarSection {
     }
 }
 
-#[derive(Clone)]
+#[derive(Clone, Serialize, Deserialize)]
 pub struct SidebarState {
+    #[serde(skip)]
     pub visible: bool,
+    #[serde(skip)]
     pub section: SidebarSection,
+    #[serde(skip)]
     pub pending_download_cmd: Option<(u64, DownloadAction)>,
     pub workspaces_enabled: bool,
     pub boosts_enabled: bool,
@@ -60,8 +65,11 @@ pub struct SidebarState {
     pub show_sidebar: bool,
     pub auto_hide: bool,
     pub notifications_enabled: bool,
+    #[serde(skip)]
     pub messengers_expanded: bool,
+    #[serde(skip)]
     pub add_ext_hover: bool,
+    #[serde(skip)]
     pub trackers_blocked: u32,
 }
 
@@ -101,6 +109,25 @@ impl Default for SidebarState {
 }
 
 impl SidebarState {
+    const SETTINGS_KEY: &str = "chrome.sidebar.state";
+
+    pub fn load_from_storage(storage: &StorageDatabase) -> Self {
+        if let Some(val) = storage.settings.load(Self::SETTINGS_KEY) {
+            if let SettingValue::Json(json) = val {
+                if let Ok(state) = serde_json::from_value(json) {
+                    return state;
+                }
+            }
+        }
+        Self::default()
+    }
+
+    pub fn save_to_storage(&self, storage: &StorageDatabase) {
+        if let Ok(json) = serde_json::to_value(self) {
+            let _ = storage.settings.store(Self::SETTINGS_KEY, &SettingValue::Json(json));
+        }
+    }
+
     pub fn render_icon_rail(&mut self, ui: &mut egui::Ui, theme: &FortrustTheme, anim: &mut SidebarAnimation) {
         let rect = ui.available_rect_before_wrap();
         ui.painter().rect_filled(rect, CornerRadius::ZERO, theme.surface_rail);
@@ -329,16 +356,71 @@ impl SidebarState {
                     SidebarSection::AI => {
                         section_label_ui(ui, theme, "AI Providers", sx, sw);
                         self.chatgpt_enabled = icon_check_row_ui(ui, theme, "ChatGPT", self.chatgpt_enabled, sx, sw, icons::paint_face_icon);
+                        {
+                            use egui::Align2;
+                            let y = ui.cursor().min.y;
+                            let rect = Rect::from_min_size(Pos2::new(sx, y), Vec2::new(sw, 28.0));
+                            let hovered = ui.rect_contains_pointer(rect);
+                            if hovered { ui.painter().rect_filled(rect.shrink2(Vec2::new(0.0, 4.0)), CornerRadius::ZERO, Color32::from_white_alpha(4)); }
+                            ui.painter().text(Pos2::new(sx + 26.0, rect.center().y), Align2::LEFT_CENTER, "Claude", egui::FontId::proportional(12.5), if hovered { theme.text_primary } else { theme.text_secondary });
+                            let tr = Rect::from_min_size(Pos2::new(rect.max.x - 48.0, rect.center().y - 11.0), Vec2::new(38.0, 22.0));
+                            let bg = theme.border_strong;
+                            ui.painter().rect_filled(tr, CornerRadius::same(11), bg);
+                            ui.painter().circle_filled(Pos2::new(tr.min.x + 11.0, tr.center().y), 8.0, Color32::WHITE);
+                            ui.painter().text(Pos2::new(sx + 2.0, rect.center().y), Align2::LEFT_CENTER, "C", egui::FontId::monospace(10.0), theme.text_muted);
+                            if ui.allocate_rect(rect, egui::Sense::click()).clicked() { tracing::info!("Claude toggled"); }
+                            ui.allocate_space(Vec2::new(sw, 32.0));
+                        }
+                        {
+                            use egui::Align2;
+                            let y = ui.cursor().min.y;
+                            let rect = Rect::from_min_size(Pos2::new(sx, y), Vec2::new(sw, 28.0));
+                            let hovered = ui.rect_contains_pointer(rect);
+                            if hovered { ui.painter().rect_filled(rect.shrink2(Vec2::new(0.0, 4.0)), CornerRadius::ZERO, Color32::from_white_alpha(4)); }
+                            ui.painter().text(Pos2::new(sx + 26.0, rect.center().y), Align2::LEFT_CENTER, "Gemini", egui::FontId::proportional(12.5), if hovered { theme.text_primary } else { theme.text_secondary });
+                            let tr = Rect::from_min_size(Pos2::new(rect.max.x - 48.0, rect.center().y - 11.0), Vec2::new(38.0, 22.0));
+                            let bg = theme.border_strong;
+                            ui.painter().rect_filled(tr, CornerRadius::same(11), bg);
+                            ui.painter().circle_filled(Pos2::new(tr.min.x + 11.0, tr.center().y), 8.0, Color32::WHITE);
+                            ui.painter().text(Pos2::new(sx + 2.0, rect.center().y), Align2::LEFT_CENTER, "G", egui::FontId::monospace(10.0), theme.text_muted);
+                            if ui.allocate_rect(rect, egui::Sense::click()).clicked() { tracing::info!("Gemini toggled"); }
+                            ui.allocate_space(Vec2::new(sw, 32.0));
+                        }
+                        {
+                            use egui::Align2;
+                            let y = ui.cursor().min.y;
+                            let rect = Rect::from_min_size(Pos2::new(sx, y), Vec2::new(sw, 28.0));
+                            let hovered = ui.rect_contains_pointer(rect);
+                            if hovered { ui.painter().rect_filled(rect.shrink2(Vec2::new(0.0, 4.0)), CornerRadius::ZERO, Color32::from_white_alpha(4)); }
+                            ui.painter().text(Pos2::new(sx + 26.0, rect.center().y), Align2::LEFT_CENTER, "Local LLM", egui::FontId::proportional(12.5), if hovered { theme.text_primary } else { theme.text_secondary });
+                            let tr = Rect::from_min_size(Pos2::new(rect.max.x - 48.0, rect.center().y - 11.0), Vec2::new(38.0, 22.0));
+                            let bg = theme.border_strong;
+                            ui.painter().rect_filled(tr, CornerRadius::same(11), bg);
+                            ui.painter().circle_filled(Pos2::new(tr.min.x + 11.0, tr.center().y), 8.0, Color32::WHITE);
+                            ui.painter().text(Pos2::new(sx + 2.0, rect.center().y), Align2::LEFT_CENTER, "L", egui::FontId::monospace(10.0), theme.text_muted);
+                            if ui.allocate_rect(rect, egui::Sense::click()).clicked() { tracing::info!("Local LLM toggled"); }
+                            ui.allocate_space(Vec2::new(sw, 32.0));
+                        }
                         section_label_ui(ui, theme, "Quick Actions", sx, sw);
-                        let cy = ui.cursor().min.y;
-                        ui.painter().text(Pos2::new(sx, cy + 4.0), egui::Align2::LEFT_TOP, "Summarize page", egui::FontId::proportional(12.0), theme.text_secondary);
-                        ui.allocate_space(Vec2::new(sw, 24.0));
-                        let cy = ui.cursor().min.y;
-                        ui.painter().text(Pos2::new(sx, cy + 4.0), egui::Align2::LEFT_TOP, "Explain selection", egui::FontId::proportional(12.0), theme.text_secondary);
-                        ui.allocate_space(Vec2::new(sw, 24.0));
-                        let cy = ui.cursor().min.y;
-                        ui.painter().text(Pos2::new(sx, cy + 4.0), egui::Align2::LEFT_TOP, "Translate", egui::FontId::proportional(12.0), theme.text_secondary);
-                        ui.allocate_space(Vec2::new(sw, 24.0));
+                        for (label, icon_fn) in &[
+                            ("Summarize page", icons::paint_feeds_icon as fn(&egui::Painter, Rect, Color32)),
+                            ("Explain selection", icons::paint_bookmark_icon),
+                            ("Translate page", icons::paint_globe_icon),
+                            ("Rephrase selection", icons::paint_gear_icon),
+                            ("Extract action items", icons::paint_grid_icon),
+                        ] {
+                            let cy = ui.cursor().min.y;
+                            let rect = Rect::from_min_size(Pos2::new(sx, cy), Vec2::new(sw, 28.0));
+                            let hovered = ui.rect_contains_pointer(rect);
+                            if hovered { ui.painter().rect_filled(rect.shrink2(Vec2::new(0.0, 4.0)), CornerRadius::ZERO, Color32::from_white_alpha(4)); }
+                            let icon_rect = Rect::from_min_size(Pos2::new(sx + 2.0, rect.center().y - 7.0), Vec2::new(14.0, 14.0));
+                            icon_fn(ui.painter(), icon_rect, if hovered { theme.text_primary } else { theme.text_secondary });
+                            ui.painter().text(Pos2::new(sx + 22.0, rect.center().y), egui::Align2::LEFT_CENTER, *label, egui::FontId::proportional(12.0), if hovered { theme.text_primary } else { theme.text_secondary });
+                            if ui.allocate_rect(rect, egui::Sense::click()).clicked() {
+                                tracing::info!(target: "fortrust.ai", "AI quick action triggered: {}", label);
+                            }
+                            ui.allocate_space(Vec2::new(sw, 32.0));
+                        }
                         None
                     }
                     SidebarSection::Downloads => {
@@ -508,7 +590,12 @@ impl SidebarState {
                     }
                 }
             });
-        scroll_result.inner
+        let result = scroll_result.inner;
+        // Persist sidebar state after any toggle changes
+        if let Some(s) = storage {
+            self.save_to_storage(s);
+        }
+        result
     }
 }
 
