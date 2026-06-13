@@ -167,6 +167,11 @@ impl StorageDatabase {
             cookie_count: self.cookies.count(),
         }
     }
+
+    /// Create a LocalStorageStore for JS persistence backed by the same database.
+    pub fn local_storage_store(&self) -> Result<LocalStorageStore, StorageError> {
+        LocalStorageStore::new(Arc::clone(&self.db))
+    }
 }
 
 #[derive(Debug, Clone)]

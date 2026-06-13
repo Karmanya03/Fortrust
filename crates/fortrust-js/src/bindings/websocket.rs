@@ -85,21 +85,20 @@ pub fn poll_websocket_events(ctx: &mut Context) {
                 }
 
                 // 2. Call on* handler
-                if let Ok(handler) = obj.get(handler_name, ctx) {
-                    if !handler.is_undefined() {
-                        if let Some(h) = handler.as_object() {
-                            let _ = h.call(&JsValue::undefined(), &event_arg, ctx);
-                        }
-                    }
+                if let Ok(handler) = obj.get(handler_name, ctx)
+                    && !handler.is_undefined()
+                    && let Some(h) = handler.as_object()
+                {
+                    let _ = h.call(&JsValue::undefined(), &event_arg, ctx);
                 }
 
                 // 3. Call addEventListener listeners
-                if let Some(event_map) = listeners.get(id) {
-                    if let Some(callbacks) = event_map.get(event_type) {
-                        for cb in callbacks {
-                            if let Some(h) = cb.as_object() {
-                                let _ = h.call(&JsValue::undefined(), &event_arg, ctx);
-                            }
+                if let Some(event_map) = listeners.get(id)
+                    && let Some(callbacks) = event_map.get(event_type)
+                {
+                    for cb in callbacks {
+                        if let Some(h) = cb.as_object() {
+                            let _ = h.call(&JsValue::undefined(), &event_arg, ctx);
                         }
                     }
                 }
@@ -211,10 +210,10 @@ pub fn register(context: &mut Context) -> JsResult<()> {
                 let reason = a.get(1).and_then(|v| v.as_string()).map(|s| s.to_std_string_escaped());
                 // Update readyState to CLOSING on the JS object
                 WS_OBJECTS.with(|o| {
-                    if let Some(obj_val) = o.borrow().get(&id_close) {
-                        if let Some(obj) = obj_val.as_object() {
-                            let _ = obj.set(js_string!("readyState"), JsValue::from(f64::from(CLOSING)), false, ctx);
-                        }
+                    if let Some(obj_val) = o.borrow().get(&id_close)
+                        && let Some(obj) = obj_val.as_object()
+                    {
+                        let _ = obj.set(js_string!("readyState"), JsValue::from(f64::from(CLOSING)), false, ctx);
                     }
                 });
                 let clients = WS_CLIENTS.lock().unwrap();
@@ -254,10 +253,10 @@ pub fn register(context: &mut Context) -> JsResult<()> {
                 if !event_type.is_empty() {
                     WS_EVENT_LISTENERS.with(|l| {
                         let mut l = l.borrow_mut();
-                        if let Some(event_map) = l.get_mut(&id_rel) {
-                            if let Some(callbacks) = event_map.get_mut(&event_type) {
-                                callbacks.retain(|cb| !JsValue::strict_equals(cb, &callback));
-                            }
+                        if let Some(event_map) = l.get_mut(&id_rel)
+                            && let Some(callbacks) = event_map.get_mut(&event_type)
+                        {
+                            callbacks.retain(|cb| !JsValue::strict_equals(cb, &callback));
                         }
                     });
                 }

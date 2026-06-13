@@ -114,6 +114,8 @@ pub struct EnginePage {
     pub title: String,
     pub rendered: RenderedPage,
     pub security: SecurityReport,
+    /// Decoded 16x16 RGBA favicon bytes (1024 bytes) if a favicon was found and decoded.
+    pub favicon: Option<Vec<u8>>,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -161,6 +163,8 @@ pub struct TrustEngine {
     pub allow_external_subresources: bool,
     /// Cached page info for animation-driven re-rendering
     anim_page: RefCell<Option<AnimPageState>>,
+    /// Durable localStorage backing (redb). Passed to JsRuntime when JS executes.
+    local_storage: Option<fortrust_storage::LocalStorageStore>,
 }
 
 /// State kept between animation ticks so we can re-render without re-fetching.
@@ -194,6 +198,7 @@ impl TrustEngine {
             javascript_enabled: cfg!(feature = "javascript"),
             allow_external_subresources: true,
             anim_page: RefCell::new(None),
+            local_storage: None,
         }
     }
 
@@ -207,6 +212,7 @@ impl TrustEngine {
             javascript_enabled: cfg!(feature = "javascript"),
             allow_external_subresources: true,
             anim_page: RefCell::new(None),
+            local_storage: None,
         })
     }
 
@@ -225,7 +231,14 @@ impl TrustEngine {
             javascript_enabled: cfg!(feature = "javascript"),
             allow_external_subresources: true,
             anim_page: RefCell::new(None),
+            local_storage: None,
         })
+    }
+
+    /// Attach a durable localStorage store so JS can persist data across sessions.
+    pub fn with_local_storage(mut self, store: fortrust_storage::LocalStorageStore) -> Self {
+        self.local_storage = Some(store);
+        self
     }
 
     /// Async constructor: connects to netproc at the given address, then creates the engine.
@@ -435,7 +448,7 @@ impl TrustEngine {
             images.insert(img);
         }
         let (rendered, js_title_opt) = if javascript_enabled {
-                render_with_javascript(html, author_css, cosmetic_css, external_scripts, viewport, &url, images, &self.renderer, fingerprint_guard)?
+                render_with_javascript(html, author_css, cosmetic_css, external_scripts, viewport, &url, images, &self.renderer, fingerprint_guard, self.local_storage.clone())?
             } else {
                 let all_css = [author_css, cosmetic_css].concat();
                 // Use the animation-aware renderer to cache state for potential animation ticks
@@ -473,11 +486,15 @@ impl TrustEngine {
         let title = js_title_opt
             .unwrap_or_else(|| title_from_html_or_url(html, &url));
 
+        // Try to extract and decode a favicon from the HTML
+        let favicon = self.extract_favicon(html, &url);
+
         Ok(EnginePage {
             title,
             url,
             rendered,
             security,
+            favicon,
         })
     }
 
@@ -504,7 +521,7 @@ impl TrustEngine {
             PageSource::Cache, 0, &rendered, false, 0, 0, 0, 0,
         );
         let title = title_from_html_or_url("", url);
-        Ok(Some(EnginePage { title, url: url.to_owned(), rendered, security }))
+        Ok(Some(EnginePage { title, url: url.to_owned(), rendered, security, favicon: None }))
     }
 
     /// Re-render with damage tracking. Returns the updated page and the
@@ -526,7 +543,7 @@ impl TrustEngine {
         );
         let title = title_from_html_or_url("", url);
         Ok((
-            EnginePage { title, url: url.to_owned(), rendered, security },
+            EnginePage { title, url: url.to_owned(), rendered, security, favicon: None },
             damage_rects,
         ))
     }
@@ -579,6 +596,7 @@ impl TrustEngine {
             url,
             rendered: updated,
             security,
+            favicon: None,
         })
     }
 
@@ -594,6 +612,7 @@ impl TrustEngine {
             url: state.url.clone(),
             rendered,
             security,
+            favicon: None,
         }
     }
 
@@ -611,6 +630,62 @@ impl TrustEngine {
             return true;
         }
         false
+    }
+
+    /// Extract and decode the page favicon from `<link rel="icon">` tags in the HTML.
+    /// Returns 1024 bytes of 16x16 RGBA if a favicon was found and decoded.
+    fn extract_favicon(&self, html: &str, page_url: &str) -> Option<Vec<u8>> {
+        let base_url = Url::parse(page_url).ok()?;
+        let html_lower = html.to_ascii_lowercase();
+
+        // Find <link rel="icon" href="..."> or <link rel="shortcut icon" href="...">
+        let mut pos = 0;
+        let mut icon_url = None;
+        while let Some(start) = html_lower[pos..].find("<link") {
+            let start_abs = pos + start;
+            let Some(tag_end_rel) = html_lower[start_abs..].find('>') else { break };
+            let tag_end_abs = start_abs + tag_end_rel + 1;
+            let tag_content = &html[start_abs..tag_end_abs];
+            let tag_lower = &html_lower[start_abs..tag_end_abs];
+
+            // Check for rel="icon" or rel="shortcut icon"
+            let has_icon_rel = tag_lower.contains("rel=\"icon\"")
+                || tag_lower.contains("rel='icon'")
+                || tag_lower.contains("rel=\"shortcut icon\"")
+                || tag_lower.contains("rel='shortcut icon'");
+
+            if has_icon_rel
+                && let Some(href) = extract_attr_value(tag_content, "href")
+                && let Ok(resolved) = base_url.join(href.trim())
+            {
+                icon_url = Some(resolved.to_string());
+                break;
+            }
+            pos = tag_end_abs;
+        }
+
+        let icon_url = icon_url?;
+
+        // Fetch the favicon image using the in-process network client
+        if let Some(ref mut network) = self.network.as_ref().cloned() {
+            let request = RequestContext {
+                url: icon_url,
+                top_level_url: Some(page_url.to_owned()),
+                resource_type: ResourceType::Image,
+                referrer_policy: None,
+            };
+
+            // Use tokio runtime to perform async fetch synchronously
+            let handle = tokio::runtime::Handle::try_current().ok()?;
+            let response = handle.block_on(async { network.fetch(request).await }).ok()?;
+
+            // Decode the image to 16x16 RGBA
+            let img = image::load_from_memory(&response.body).ok()?;
+            let rgba = img.resize_exact(16, 16, image::imageops::FilterType::Lanczos3).to_rgba8();
+            Some(rgba.into_raw())
+        } else {
+            None
+        }
     }
 }
 
@@ -753,6 +828,7 @@ fn render_with_javascript(
     mut images: ImageRegistry,
     renderer: &fortrust_renderer::StaticRenderer,
     fingerprint_guard: Option<FingerprintGuard>,
+    local_storage: Option<fortrust_storage::LocalStorageStore>,
 ) -> Result<(fortrust_renderer::RenderedPage, Option<String>), EngineError> {
     use fortrust_dom::DomArena;
     use fortrust_js::{EventLoop, JsRuntime, WebApiRegistry};
@@ -766,6 +842,9 @@ fn render_with_javascript(
         .with_arena(arena);
     if let Some(guard) = fingerprint_guard {
         js_builder = js_builder.with_fingerprint_guard(guard);
+    }
+    if let Some(store) = local_storage {
+        js_builder = js_builder.with_local_storage(store);
     }
     let mut js = js_builder;
     js.initialize(&mut event_loop)?;
@@ -825,6 +904,7 @@ fn render_with_javascript(
     _images: ImageRegistry,
     _renderer: &fortrust_renderer::StaticRenderer,
     _fingerprint_guard: Option<FingerprintGuard>,
+    _local_storage: Option<fortrust_storage::LocalStorageStore>,
 ) -> Result<(fortrust_renderer::RenderedPage, Option<String>), EngineError> {
     Err(EngineError::Render(
         fortrust_renderer::RenderError::EmptyDocument,

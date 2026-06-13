@@ -188,6 +188,29 @@ impl TextRenderer {
         self.font_system.db_mut().load_font_data(data);
     }
 
+    /// Measure the width of a text string in pixels.
+    /// Uses a temporary font system to avoid needing &mut self.
+    pub fn measure_text(text: &str, font_size_px: f32, font_family: &str) -> f32 {
+        if text.is_empty() {
+            return 0.0;
+        }
+        let font_size = font_size_px.clamp(6.0, 200.0);
+        let metrics = Metrics::new(font_size, font_size * 1.2);
+
+        let mut temp_font_system = FontSystem::new();
+        let mut buffer = CosmicBuffer::new(&mut temp_font_system, metrics);
+        let attrs = build_attrs(font_family, FontWeight::Normal, FontStyle::Normal);
+        buffer.set_text(&mut temp_font_system, text, attrs, Shaping::Advanced);
+
+        let total_width: f32 = buffer.lines.iter()
+            .filter_map(|line| line.layout_opt().as_ref())
+            .flat_map(|layouts| layouts.iter())
+            .flat_map(|layout| layout.glyphs.iter())
+            .map(|glyph| glyph.w)
+            .sum();
+        total_width
+    }
+
     /// Simplified render-into for callers that only have color as `[u8; 4]`
     /// and no font weight/style info (uses defaults).
     #[allow(clippy::too_many_arguments)]

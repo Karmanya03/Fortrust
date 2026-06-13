@@ -4460,6 +4460,7 @@ dependencies = [
  "fortrust-paint",
  "fortrust-renderer",
  "fortrust-search",
+ "fortrust-storage",
  "fortrust-style",
  "futures-executor",
  "futures-util",

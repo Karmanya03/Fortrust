@@ -14,7 +14,7 @@ use fortrust_core::{
 };
 use fortrust_privacy::PrivacyFilter;
 use fortrust_search::{FortrustSearch, SearchConfig, SearchResult};
-use fortrust_storage::{HistoryEntry, StorageDatabase, SettingValue};
+use fortrust_storage::{HistoryEntry, LocalStorageStore, StorageDatabase, SettingValue};
 use trust_engine::{Color, DisplayCommand, EnginePage, EngineRect, TrustEngine, Viewport};
 
 use crate::{
@@ -23,7 +23,7 @@ use crate::{
     icons,
     omnibox::{OmniboxState, SuggestionItem, SuggestionKind},
     shield::ShieldState,
-    sidebar::{DownloadAction, SidebarState},
+    sidebar::{AIAction, DownloadAction, SidebarState},
     speed_dial::SpeedDialState,
     backgrounds,
     theme::FortrustTheme,
@@ -276,7 +276,7 @@ enum EngineEvent {
 }
 
 impl EngineWorker {
-    fn spawn(privacy: PrivacyConfig) -> Self {
+    fn spawn(privacy: PrivacyConfig, local_storage: Option<fortrust_storage::LocalStorageStore>) -> Self {
         let (command_sender, command_receiver) = mpsc::channel();
         let (event_sender, event_receiver) = mpsc::channel();
         let event_sender_for_worker = event_sender.clone();
@@ -300,7 +300,7 @@ impl EngineWorker {
             };
 
             // Build the engine with netproc if available
-            let mut engine = if let Some(ref addr) = netproc_addr {
+            let engine_builder = if let Some(ref addr) = netproc_addr {
                 match runtime.block_on(trust_engine::TrustEngine::with_netproc_async(privacy.clone(), addr)) {
                     Ok(engine) => engine,
                     Err(_) => {
@@ -315,6 +315,11 @@ impl EngineWorker {
                     Ok(e) => e,
                     Err(e) => { drain_failed_worker(command_receiver, event_sender, format!("{e:?}")); return; }
                 }
+            };
+            let mut engine = if let Some(store) = local_storage {
+                engine_builder.with_local_storage(store)
+            } else {
+                engine_builder
             };
             let search = runtime.block_on(FortrustSearch::new(SearchConfig::default()));
 
@@ -800,11 +805,14 @@ impl FortrustApp {
             None
         };
 
+        // Extract a LocalStorageStore from the durable database for JS persistence.
+        let ls_store = storage.as_ref().and_then(|s| s.local_storage_store().ok());
+
         let mut app = Self {
             privacy: PrivacyEngine::new(config.privacy.clone()),
             privacy_filter,
             internal_engine: TrustEngine::offline(),
-            engine_worker: EngineWorker::spawn(config.privacy.clone()),
+            engine_worker: EngineWorker::spawn(config.privacy.clone(), ls_store),
             storage,
             config: config.clone(),
             tabs,
@@ -1086,9 +1094,54 @@ impl FortrustApp {
         0.65 + (self.config.ui.motion_strength.min(100) as f32 / 100.0) * 0.85
     }
 
+    fn local_storage_store(&self) -> Option<LocalStorageStore> {
+        self.storage.as_ref().and_then(|s| s.local_storage_store().ok())
+    }
+
     fn rebuild_privacy_pipeline(&mut self) {
         self.privacy = PrivacyEngine::new(self.config.privacy.clone());
-        self.engine_worker = EngineWorker::spawn(self.config.privacy.clone());
+        let ls = self.local_storage_store();
+        self.engine_worker = EngineWorker::spawn(self.config.privacy.clone(), ls);
+    }
+
+    /// Handle an AI quick action triggered from the sidebar.
+    fn handle_ai_action(&mut self, action: AIAction) {
+        let page_text = self.active_state()
+            .and_then(|s| s.page.as_ref())
+            .map(|p| {
+                let title = &p.title;
+                let body = extract_page_text(&p.rendered.text_content);
+                let url = &p.url;
+                format!("URL: {url}\nTitle: {title}\n\nContent:\n{body}")
+            })
+            .unwrap_or_else(|| "No page loaded.".to_owned());
+
+        match action {
+            AIAction::Summarize => {
+                tracing::info!(target: "fortrust.ai", "Summarizing page...");
+                let summary = if page_text == "No page loaded." {
+                    page_text
+                } else {
+                    let preview: String = page_text.chars().take(500).collect();
+                    format!("📋 Page Summary\n\n{preview}\n\n[...] (first 500 chars shown)")
+                };
+                tracing::info!(target: "fortrust.ai", "Summary: {summary}");
+            }
+            AIAction::ExplainSelection => {
+                tracing::info!(target: "fortrust.ai", "Explain selection requested — selection support not yet wired");
+            }
+            AIAction::Translate => {
+                tracing::info!(target: "fortrust.ai", "Translate requested — requires external translation API integration");
+            }
+            AIAction::RephraseSelection => {
+                tracing::info!(target: "fortrust.ai", "Rephrase requested — requires LLM API integration");
+            }
+            AIAction::ExtractActionItems => {
+                tracing::info!(target: "fortrust.ai", "Extracting action items...");
+                let items = extract_action_items(&page_text);
+                tracing::info!(target: "fortrust.ai", "Action items found: {items}");
+            }
+        }
     }
 
     fn sync_shield_stats(&mut self) {
@@ -1326,6 +1379,12 @@ impl FortrustApp {
                 EngineEvent::Loaded { request_id, page } => {
                     let Some(tab_id) = self.request_owner.remove(&request_id) else { continue; };
                     let page = *page;
+                    // Store favicon if present
+                    if let Some(fav) = page.favicon.clone()
+                        && let Some(tab) = self.tab_pages.get_mut(&tab_id)
+                    {
+                        tab.favicon_data = Some(fav);
+                    }
                     let memory_estimate = (page.security.body_bytes as f32 / 1024.0 / 1024.0).max(0.25)
                         + (page.security.display_commands as f32 * 0.01);
                     let title = page.title.clone();
@@ -1380,7 +1439,10 @@ impl FortrustApp {
                             if let Some(tab_id) = self.active_tab_id()
                                 && let Some(state) = self.tab_pages.get_mut(&tab_id)
                             {
+                                // Preserve favicon from animation frames (they don't carry favicons)
+                                let fav = state.favicon_data.take();
                                 state.page = Some(*page);
+                                state.favicon_data = fav;
                                 state.renderer_frame = None;
                             }
                             ctx.request_repaint();
@@ -1935,6 +1997,10 @@ impl FortrustApp {
                         DownloadAction::Resume => self.download_manager.resume_download(dl_id, &self.download_dir),
                         DownloadAction::Remove => self.download_manager.remove_download(dl_id),
                     }
+                }
+                // Process pending AI quick actions from sidebar
+                if let Some(action) = self.sidebar_state.pending_ai_action.take() {
+                    self.handle_ai_action(action);
                 }
                 if self.config.ui.theme != old_theme { self.refresh_theme(ctx); }
                 if self.config.privacy != old_privacy { self.rebuild_privacy_pipeline(); }
@@ -2807,4 +2873,41 @@ fn elide_text(input: &str, max_chars: usize) -> String {
         out.push_str("...");
     }
     out
+}
+
+/// Extract readable text from a rendered page for AI processing.
+fn extract_page_text(text: &str) -> String {
+    let cleaned: String = text
+        .chars()
+        .filter(|&c| c.is_alphabetic() || c.is_ascii_digit() || c.is_ascii_whitespace() || c == '.' || c == ',' || c == '!' || c == '?' || c == '-' || c == '\'' || c == '"')
+        .collect();
+    let collapsed: Vec<&str> = cleaned.split_whitespace().collect();
+    let max_words = 200;
+    if collapsed.len() > max_words {
+        collapsed[..max_words].join(" ") + "..."
+    } else {
+        collapsed.join(" ")
+    }
+}
+
+/// Extract potential action items (list-like patterns) from page text.
+fn extract_action_items(page_text: &str) -> String {
+    let mut items: Vec<&str> = Vec::new();
+    for line in page_text.lines() {
+        let trimmed = line.trim();
+        if trimmed.starts_with('-') || trimmed.starts_with('*') || trimmed.starts_with("•")
+            || trimmed.starts_with(|c: char| c.is_ascii_digit() && trimmed.len() > 2 && trimmed.as_bytes()[1] == b'.')
+            || trimmed.to_ascii_lowercase().starts_with("todo:")
+            || trimmed.to_ascii_lowercase().starts_with("- [ ]")
+        {
+            items.push(trimmed);
+        }
+    }
+    if items.is_empty() {
+        "No action items found on this page.".to_owned()
+    } else {
+        let max_items = 10;
+        let shown: Vec<&str> = items.into_iter().take(max_items).collect();
+        format!("Found {} potential action items:\n- {}", shown.len(), shown.join("\n- "))
+    }
 }

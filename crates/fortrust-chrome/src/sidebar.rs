@@ -4,6 +4,16 @@ use fortrust_core::{BrowserConfig, WorkspaceId, WorkspaceManager};
 use fortrust_storage::{SettingValue, StorageDatabase};
 use serde::{Deserialize, Serialize};
 
+/// AI quick actions that can be triggered from the sidebar.
+#[derive(Debug, Clone, PartialEq)]
+pub enum AIAction {
+    Summarize,
+    ExplainSelection,
+    Translate,
+    RephraseSelection,
+    ExtractActionItems,
+}
+
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub enum DownloadAction {
     Pause,
@@ -19,6 +29,7 @@ pub enum SidebarSection {
     AI,
     Downloads,
     Bookmarks,
+    History,
     More,
 }
 
@@ -30,6 +41,7 @@ impl SidebarSection {
             Self::AI => "AI Assistant",
             Self::Downloads => "Downloads",
             Self::Bookmarks => "Bookmarks",
+            Self::History => "History",
             Self::More => "More",
         }
     }
@@ -43,6 +55,8 @@ pub struct SidebarState {
     pub section: SidebarSection,
     #[serde(skip)]
     pub pending_download_cmd: Option<(u64, DownloadAction)>,
+    #[serde(skip)]
+    pub pending_ai_action: Option<AIAction>,
     pub workspaces_enabled: bool,
     pub boosts_enabled: bool,
     pub break_reminder_enabled: bool,
@@ -79,6 +93,7 @@ impl Default for SidebarState {
             visible: true,
             section: SidebarSection::Setup,
             pending_download_cmd: None,
+            pending_ai_action: None,
             workspaces_enabled: false,
             boosts_enabled: true,
             break_reminder_enabled: true,
@@ -112,12 +127,10 @@ impl SidebarState {
     const SETTINGS_KEY: &str = "chrome.sidebar.state";
 
     pub fn load_from_storage(storage: &StorageDatabase) -> Self {
-        if let Some(val) = storage.settings.load(Self::SETTINGS_KEY) {
-            if let SettingValue::Json(json) = val {
-                if let Ok(state) = serde_json::from_value(json) {
-                    return state;
-                }
-            }
+        if let Some(SettingValue::Json(json)) = storage.settings.load(Self::SETTINGS_KEY)
+            && let Ok(state) = serde_json::from_value(json)
+        {
+            return state;
         }
         Self::default()
     }
@@ -180,6 +193,13 @@ impl SidebarState {
         }
         let icon_rect = Rect::from_min_size(Pos2::new(rail_left + 3.0, y - 24.0), Vec2::new(24.0, 24.0));
         icons::paint_bookmark_icon(ui.painter(), icon_rect, if is_open && self.section == SidebarSection::Bookmarks { active_color } else { icon_color });
+
+        y += 2.0;
+        if Self::rail_btn(ui, theme, rail_left, &mut y, is_open && self.section == SidebarSection::History) {
+            self.handle_click(SidebarSection::History, anim);
+        }
+        let icon_rect = Rect::from_min_size(Pos2::new(rail_left + 3.0, y - 24.0), Vec2::new(24.0, 24.0));
+        icons::paint_history_icon(ui.painter(), icon_rect, if is_open && self.section == SidebarSection::History { active_color } else { icon_color });
 
         y += 80.0;
         ui.painter().line_segment(
@@ -402,13 +422,15 @@ impl SidebarState {
                             ui.allocate_space(Vec2::new(sw, 32.0));
                         }
                         section_label_ui(ui, theme, "Quick Actions", sx, sw);
-                        for (label, icon_fn) in &[
-                            ("Summarize page", icons::paint_feeds_icon as fn(&egui::Painter, Rect, Color32)),
-                            ("Explain selection", icons::paint_bookmark_icon),
-                            ("Translate page", icons::paint_globe_icon),
-                            ("Rephrase selection", icons::paint_gear_icon),
-                            ("Extract action items", icons::paint_grid_icon),
-                        ] {
+                        type ActionEntry = (&'static str, AIAction, fn(&egui::Painter, Rect, Color32));
+                        let actions: &[ActionEntry] = &[
+                            ("Summarize page", AIAction::Summarize, icons::paint_feeds_icon as fn(&egui::Painter, Rect, Color32)),
+                            ("Explain selection", AIAction::ExplainSelection, icons::paint_bookmark_icon),
+                            ("Translate page", AIAction::Translate, icons::paint_globe_icon),
+                            ("Rephrase selection", AIAction::RephraseSelection, icons::paint_gear_icon),
+                            ("Extract action items", AIAction::ExtractActionItems, icons::paint_grid_icon),
+                        ];
+                        for (label, action, icon_fn) in actions {
                             let cy = ui.cursor().min.y;
                             let rect = Rect::from_min_size(Pos2::new(sx, cy), Vec2::new(sw, 28.0));
                             let hovered = ui.rect_contains_pointer(rect);
@@ -417,6 +439,7 @@ impl SidebarState {
                             icon_fn(ui.painter(), icon_rect, if hovered { theme.text_primary } else { theme.text_secondary });
                             ui.painter().text(Pos2::new(sx + 22.0, rect.center().y), egui::Align2::LEFT_CENTER, *label, egui::FontId::proportional(12.0), if hovered { theme.text_primary } else { theme.text_secondary });
                             if ui.allocate_rect(rect, egui::Sense::click()).clicked() {
+                                self.pending_ai_action = Some(action.clone());
                                 tracing::info!(target: "fortrust.ai", "AI quick action triggered: {}", label);
                             }
                             ui.allocate_space(Vec2::new(sw, 32.0));
@@ -540,6 +563,38 @@ impl SidebarState {
                             let _ = s.bookmarks.delete(&id);
                         }
                         None
+                    }
+                    SidebarSection::History => {
+                        let history: Vec<fortrust_storage::HistoryEntry> = storage.and_then(|s| s.history.recently_visited(100).ok()).unwrap_or_default();
+                        let mut clicked_url: Option<String> = None;
+                        for entry in &history {
+                            let y = ui.cursor().min.y;
+                            let rect = Rect::from_min_size(Pos2::new(sx, y), Vec2::new(sw, 32.0));
+                            let hovered = ui.rect_contains_pointer(rect);
+                            if hovered {
+                                ui.painter().rect_filled(rect, CornerRadius::same(4), Color32::from_white_alpha(6));
+                            }
+                            // History icon
+                            let icon_rect = Rect::from_min_size(Pos2::new(sx + 2.0, y + 9.0), Vec2::new(14.0, 14.0));
+                            icons::paint_history_icon(ui.painter(), icon_rect, if hovered { theme.text_primary } else { theme.text_secondary });
+                            // Title
+                            let display = if entry.title.len() > 28 { format!("{}...", &entry.title[..25]) } else { entry.title.clone() };
+                            ui.painter().text(Pos2::new(sx + 22.0, y + 4.0), egui::Align2::LEFT_TOP, &display, egui::FontId::proportional(12.0), theme.text_secondary);
+                            // URL
+                            let url_display = if entry.url.len() > 34 { format!("{}...", &entry.url[..31]) } else { entry.url.clone() };
+                            ui.painter().text(Pos2::new(sx + 22.0, y + 18.0), egui::Align2::LEFT_TOP, &url_display, egui::FontId::proportional(9.5), theme.text_muted);
+                            // Click to navigate
+                            if ui.allocate_rect(rect, egui::Sense::click()).clicked() {
+                                clicked_url = Some(entry.url.clone());
+                            }
+                            ui.allocate_space(Vec2::new(sw, 36.0));
+                        }
+                        if history.is_empty() {
+                            let cy = ui.cursor().min.y;
+                            ui.painter().text(Pos2::new(sx, cy + 4.0), egui::Align2::LEFT_TOP, "No history yet. Browsing the web will record pages here.", egui::FontId::proportional(12.0), theme.text_muted);
+                            ui.allocate_space(Vec2::new(sw, 30.0));
+                        }
+                        clicked_url
                     }
                     SidebarSection::More => {
                         section_label_ui(ui, theme, "Appearance", sx, sw);

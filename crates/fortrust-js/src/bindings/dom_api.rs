@@ -1180,6 +1180,19 @@ fn build_canvas_2d_context(ctx: &mut Context, canvas_ptr: usize) -> JsResult<JsV
         })
     };
 
+    let arc_to_fn = unsafe {
+        NativeFunction::from_closure(move |_this, args, _ctx| {
+            let x1 = args.first().and_then(|v| v.as_number()).unwrap_or(0.0) as f32;
+            let y1 = args.get(1).and_then(|v| v.as_number()).unwrap_or(0.0) as f32;
+            let x2 = args.get(2).and_then(|v| v.as_number()).unwrap_or(0.0) as f32;
+            let y2 = args.get(3).and_then(|v| v.as_number()).unwrap_or(0.0) as f32;
+            let r = args.get(4).and_then(|v| v.as_number()).unwrap_or(0.0) as f32;
+            let mut map = CANVAS_CONTEXTS.lock().unwrap();
+            if let Some(c) = map.get_mut(&canvas_ptr) { c.arc_to(x1, y1, x2, y2, r); }
+            Ok(JsValue::undefined())
+        })
+    };
+
     // ── Accessor properties (wire JS setter to Rust state) ──
     let cp = canvas_ptr;
     let fill_style_getter = {
@@ -1307,14 +1320,260 @@ fn build_canvas_2d_context(ctx: &mut Context, canvas_ptr: usize) -> JsResult<JsV
         FunctionObjectBuilder::new(ctx.realm(), f).build()
     };
 
+    // ── New accessors for lineCap, lineJoin, miterLimit ──
+    let cp_lc = canvas_ptr;
+    let line_cap_getter = {
+        let f = unsafe { NativeFunction::from_closure(move |_this, _args, _ctx| {
+            let map = CANVAS_CONTEXTS.lock().unwrap();
+            Ok(map.get(&cp_lc).map(|c| JsValue::from(js_string!(c.get_line_cap()))).unwrap_or(JsValue::undefined()))
+        })};
+        FunctionObjectBuilder::new(ctx.realm(), f).build()
+    };
+    let line_cap_setter = {
+        let f = unsafe { NativeFunction::from_closure(move |_this, args, ctx| {
+            if let Some(val) = args.first() {
+                let s = val.to_string(ctx).map(|s| s.to_std_string_escaped()).unwrap_or_default();
+                let mut map = CANVAS_CONTEXTS.lock().unwrap();
+                if let Some(c) = map.get_mut(&cp_lc) { c.set_line_cap(&s); }
+            }
+            Ok(JsValue::undefined())
+        })};
+        FunctionObjectBuilder::new(ctx.realm(), f).build()
+    };
+    let cp_lj = canvas_ptr;
+    let line_join_getter = {
+        let f = unsafe { NativeFunction::from_closure(move |_this, _args, _ctx| {
+            let map = CANVAS_CONTEXTS.lock().unwrap();
+            Ok(map.get(&cp_lj).map(|c| JsValue::from(js_string!(c.get_line_join()))).unwrap_or(JsValue::undefined()))
+        })};
+        FunctionObjectBuilder::new(ctx.realm(), f).build()
+    };
+    let line_join_setter = {
+        let f = unsafe { NativeFunction::from_closure(move |_this, args, ctx| {
+            if let Some(val) = args.first() {
+                let s = val.to_string(ctx).map(|s| s.to_std_string_escaped()).unwrap_or_default();
+                let mut map = CANVAS_CONTEXTS.lock().unwrap();
+                if let Some(c) = map.get_mut(&cp_lj) { c.set_line_join(&s); }
+            }
+            Ok(JsValue::undefined())
+        })};
+        FunctionObjectBuilder::new(ctx.realm(), f).build()
+    };
+    let cp_ml = canvas_ptr;
+    let miter_limit_getter = {
+        let f = unsafe { NativeFunction::from_closure(move |_this, _args, _ctx| {
+            let map = CANVAS_CONTEXTS.lock().unwrap();
+            Ok(map.get(&cp_ml).map(|c| JsValue::from(c.get_miter_limit() as f64)).unwrap_or(JsValue::undefined()))
+        })};
+        FunctionObjectBuilder::new(ctx.realm(), f).build()
+    };
+    let miter_limit_setter = {
+        let f = unsafe { NativeFunction::from_closure(move |_this, args, _ctx| {
+            if let Some(val) = args.first().and_then(|v| v.as_number()) {
+                let mut map = CANVAS_CONTEXTS.lock().unwrap();
+                if let Some(c) = map.get_mut(&cp_ml) { c.set_miter_limit(val as f32); }
+            }
+            Ok(JsValue::undefined())
+        })};
+        FunctionObjectBuilder::new(ctx.realm(), f).build()
+    };
+
+    // ── Shadow accessors ──
+    let cp_sc = canvas_ptr;
+    let shadow_color_getter = {
+        let f = unsafe { NativeFunction::from_closure(move |_this, _args, _ctx| {
+            let map = CANVAS_CONTEXTS.lock().unwrap();
+            Ok(map.get(&cp_sc).map(|c| JsValue::from(js_string!(c.get_shadow_color().as_str()))).unwrap_or(JsValue::undefined()))
+        })};
+        FunctionObjectBuilder::new(ctx.realm(), f).build()
+    };
+    let shadow_color_setter = {
+        let f = unsafe { NativeFunction::from_closure(move |_this, args, ctx| {
+            if let Some(val) = args.first() {
+                let s = val.to_string(ctx).map(|s| s.to_std_string_escaped()).unwrap_or_default();
+                let mut map = CANVAS_CONTEXTS.lock().unwrap();
+                if let Some(c) = map.get_mut(&cp_sc) { c.set_shadow_color(&s); }
+            }
+            Ok(JsValue::undefined())
+        })};
+        FunctionObjectBuilder::new(ctx.realm(), f).build()
+    };
+    let cp_sb = canvas_ptr;
+    let shadow_blur_getter = {
+        let f = unsafe { NativeFunction::from_closure(move |_this, _args, _ctx| {
+            let map = CANVAS_CONTEXTS.lock().unwrap();
+            Ok(map.get(&cp_sb).map(|c| JsValue::from(c.get_shadow_blur() as f64)).unwrap_or(JsValue::undefined()))
+        })};
+        FunctionObjectBuilder::new(ctx.realm(), f).build()
+    };
+    let shadow_blur_setter = {
+        let f = unsafe { NativeFunction::from_closure(move |_this, args, _ctx| {
+            if let Some(val) = args.first().and_then(|v| v.as_number()) {
+                let mut map = CANVAS_CONTEXTS.lock().unwrap();
+                if let Some(c) = map.get_mut(&cp_sb) { c.set_shadow_blur(val as f32); }
+            }
+            Ok(JsValue::undefined())
+        })};
+        FunctionObjectBuilder::new(ctx.realm(), f).build()
+    };
+    let cp_sox = canvas_ptr;
+    let shadow_offset_x_getter = {
+        let f = unsafe { NativeFunction::from_closure(move |_this, _args, _ctx| {
+            let map = CANVAS_CONTEXTS.lock().unwrap();
+            Ok(map.get(&cp_sox).map(|c| JsValue::from(c.get_shadow_offset_x() as f64)).unwrap_or(JsValue::undefined()))
+        })};
+        FunctionObjectBuilder::new(ctx.realm(), f).build()
+    };
+    let shadow_offset_x_setter = {
+        let f = unsafe { NativeFunction::from_closure(move |_this, args, _ctx| {
+            if let Some(val) = args.first().and_then(|v| v.as_number()) {
+                let mut map = CANVAS_CONTEXTS.lock().unwrap();
+                if let Some(c) = map.get_mut(&cp_sox) { c.set_shadow_offset_x(val as f32); }
+            }
+            Ok(JsValue::undefined())
+        })};
+        FunctionObjectBuilder::new(ctx.realm(), f).build()
+    };
+    let cp_soy = canvas_ptr;
+    let shadow_offset_y_getter = {
+        let f = unsafe { NativeFunction::from_closure(move |_this, _args, _ctx| {
+            let map = CANVAS_CONTEXTS.lock().unwrap();
+            Ok(map.get(&cp_soy).map(|c| JsValue::from(c.get_shadow_offset_y() as f64)).unwrap_or(JsValue::undefined()))
+        })};
+        FunctionObjectBuilder::new(ctx.realm(), f).build()
+    };
+    let shadow_offset_y_setter = {
+        let f = unsafe { NativeFunction::from_closure(move |_this, args, _ctx| {
+            if let Some(val) = args.first().and_then(|v| v.as_number()) {
+                let mut map = CANVAS_CONTEXTS.lock().unwrap();
+                if let Some(c) = map.get_mut(&cp_soy) { c.set_shadow_offset_y(val as f32); }
+            }
+            Ok(JsValue::undefined())
+        })};
+        FunctionObjectBuilder::new(ctx.realm(), f).build()
+    };
+
+    // ── globalCompositeOperation ──
+    let cp_gco = canvas_ptr;
+    let gco_getter = {
+        let f = unsafe { NativeFunction::from_closure(move |_this, _args, _ctx| {
+            let map = CANVAS_CONTEXTS.lock().unwrap();
+            Ok(map.get(&cp_gco).map(|c| JsValue::from(js_string!(c.get_global_composite_operation()))).unwrap_or(JsValue::undefined()))
+        })};
+        FunctionObjectBuilder::new(ctx.realm(), f).build()
+    };
+    let gco_setter = {
+        let f = unsafe { NativeFunction::from_closure(move |_this, args, ctx| {
+            if let Some(val) = args.first() {
+                let s = val.to_string(ctx).map(|s| s.to_std_string_escaped()).unwrap_or_default();
+                let mut map = CANVAS_CONTEXTS.lock().unwrap();
+                if let Some(c) = map.get_mut(&cp_gco) { c.set_global_composite_operation(&s); }
+            }
+            Ok(JsValue::undefined())
+        })};
+        FunctionObjectBuilder::new(ctx.realm(), f).build()
+    };
+
+    // ── imageSmoothingEnabled ──
+    let cp_ise = canvas_ptr;
+    let ise_getter = {
+        let f = unsafe { NativeFunction::from_closure(move |_this, _args, _ctx| {
+            let map = CANVAS_CONTEXTS.lock().unwrap();
+            Ok(map.get(&cp_ise).map(|c| JsValue::from(c.get_image_smoothing_enabled())).unwrap_or(JsValue::undefined()))
+        })};
+        FunctionObjectBuilder::new(ctx.realm(), f).build()
+    };
+    let ise_setter = {
+        let f = unsafe { NativeFunction::from_closure(move |_this, args, _ctx| {
+            if let Some(val) = args.first().and_then(|v| v.as_boolean()) {
+                let mut map = CANVAS_CONTEXTS.lock().unwrap();
+                if let Some(c) = map.get_mut(&cp_ise) { c.set_image_smoothing_enabled(val); }
+            }
+            Ok(JsValue::undefined())
+        })};
+        FunctionObjectBuilder::new(ctx.realm(), f).build()
+    };
+
+    // ── lineDashOffset ──
+    let cp_ldo = canvas_ptr;
+    let line_dash_offset_getter = {
+        let f = unsafe { NativeFunction::from_closure(move |_this, _args, _ctx| {
+            let map = CANVAS_CONTEXTS.lock().unwrap();
+            Ok(map.get(&cp_ldo).map(|c| JsValue::from(c.get_line_dash_offset() as f64)).unwrap_or(JsValue::undefined()))
+        })};
+        FunctionObjectBuilder::new(ctx.realm(), f).build()
+    };
+    let line_dash_offset_setter = {
+        let f = unsafe { NativeFunction::from_closure(move |_this, args, _ctx| {
+            if let Some(val) = args.first().and_then(|v| v.as_number()) {
+                let mut map = CANVAS_CONTEXTS.lock().unwrap();
+                if let Some(c) = map.get_mut(&cp_ldo) { c.set_line_dash_offset(val as f32); }
+            }
+            Ok(JsValue::undefined())
+        })};
+        FunctionObjectBuilder::new(ctx.realm(), f).build()
+    };
+
+    // ── setLineDash / getLineDash ──
+    let cp_sld = canvas_ptr;
+    let set_line_dash_fn = unsafe {
+        NativeFunction::from_closure(move |_this, args, ctx| {
+            if let Some(arr_val) = args.first().and_then(|v| v.as_object()) {
+                let len_val = arr_val.get(js_string!("length"), ctx).ok()
+                    .and_then(|v| v.as_number()).unwrap_or(0.0) as usize;
+                let mut dash = Vec::with_capacity(len_val);
+                for i in 0..len_val {
+                    if let Ok(v) = arr_val.get(i, ctx) {
+                        if let Some(n) = v.as_number() {
+                            dash.push(n as f32);
+                        }
+                    }
+                }
+                let mut map = CANVAS_CONTEXTS.lock().unwrap();
+                if let Some(c) = map.get_mut(&cp_sld) { c.set_line_dash(dash); }
+            } else {
+                let mut map = CANVAS_CONTEXTS.lock().unwrap();
+                if let Some(c) = map.get_mut(&cp_sld) { c.set_line_dash(Vec::new()); }
+            }
+            Ok(JsValue::undefined())
+        })
+    };
+    let cp_gld = canvas_ptr;
+    let get_line_dash_fn = unsafe {
+        NativeFunction::from_closure(move |_this, _args, ctx| {
+            let map = CANVAS_CONTEXTS.lock().unwrap();
+            if let Some(c) = map.get(&cp_gld) {
+                let dash = c.get_line_dash();
+                let arr = boa_engine::object::builtins::JsArray::new(ctx);
+                for (i, v) in dash.iter().enumerate() {
+                    let _ = arr.set(i, JsValue::from(*v as f64), false, ctx);
+                }
+                Ok(JsValue::from(arr))
+            } else {
+                let arr = boa_engine::object::builtins::JsArray::new(ctx);
+                Ok(JsValue::from(arr))
+            }
+        })
+    };
+
     let ctx_obj = ObjectInitializer::new(ctx)
         .accessor(js_string!("fillStyle"), Some(fill_style_getter), Some(fill_style_setter), Attribute::all())
         .accessor(js_string!("strokeStyle"), Some(stroke_style_getter), Some(stroke_style_setter), Attribute::all())
         .accessor(js_string!("lineWidth"), Some(line_width_getter), Some(line_width_setter), Attribute::all())
+        .accessor(js_string!("lineCap"), Some(line_cap_getter), Some(line_cap_setter), Attribute::all())
+        .accessor(js_string!("lineJoin"), Some(line_join_getter), Some(line_join_setter), Attribute::all())
+        .accessor(js_string!("miterLimit"), Some(miter_limit_getter), Some(miter_limit_setter), Attribute::all())
         .accessor(js_string!("globalAlpha"), Some(global_alpha_getter), Some(global_alpha_setter), Attribute::all())
+        .accessor(js_string!("globalCompositeOperation"), Some(gco_getter), Some(gco_setter), Attribute::all())
         .accessor(js_string!("font"), Some(font_getter), Some(font_setter), Attribute::all())
         .accessor(js_string!("textAlign"), Some(text_align_getter), Some(text_align_setter), Attribute::all())
         .accessor(js_string!("textBaseline"), Some(text_baseline_getter), Some(text_baseline_setter), Attribute::all())
+        .accessor(js_string!("shadowColor"), Some(shadow_color_getter), Some(shadow_color_setter), Attribute::all())
+        .accessor(js_string!("shadowBlur"), Some(shadow_blur_getter), Some(shadow_blur_setter), Attribute::all())
+        .accessor(js_string!("shadowOffsetX"), Some(shadow_offset_x_getter), Some(shadow_offset_x_setter), Attribute::all())
+        .accessor(js_string!("shadowOffsetY"), Some(shadow_offset_y_getter), Some(shadow_offset_y_setter), Attribute::all())
+        .accessor(js_string!("lineDashOffset"), Some(line_dash_offset_getter), Some(line_dash_offset_setter), Attribute::all())
+        .accessor(js_string!("imageSmoothingEnabled"), Some(ise_getter), Some(ise_setter), Attribute::all())
         .function(fill_rect_fn, js_string!("fillRect"), 4)
         .function(clear_rect_fn, js_string!("clearRect"), 4)
         .function(fill_text_fn, js_string!("fillText"), 4)
@@ -1341,6 +1600,9 @@ fn build_canvas_2d_context(ctx: &mut Context, canvas_ptr: usize) -> JsResult<JsV
         .function(quadratic_curve_to_fn, js_string!("quadraticCurveTo"), 4)
         .function(draw_image_fn, js_string!("drawImage"), 5)
         .function(clip_fn, js_string!("clip"), 0)
+        .function(arc_to_fn, js_string!("arcTo"), 5)
+        .function(set_line_dash_fn, js_string!("setLineDash"), 1)
+        .function(get_line_dash_fn, js_string!("getLineDash"), 0)
         .build();
 
     Ok(JsValue::from(ctx_obj))
