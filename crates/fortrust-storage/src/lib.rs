@@ -29,6 +29,8 @@ pub enum StorageError {
     Io(String),
     #[error("Invalid data: {0}")]
     InvalidData(String),
+    #[error("Quota exceeded: {0}")]
+    QuotaExceeded(String),
 }
 
 impl From<redb::Error> for StorageError {

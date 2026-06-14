@@ -1,4 +1,6 @@
+use std::collections::HashMap;
 use std::sync::Mutex;
+use std::sync::atomic::{AtomicU64, Ordering};
 
 use fortrust_paint::TextRenderer;
 
@@ -6,11 +8,124 @@ thread_local! {
     static TEXT_RENDERER: Mutex<TextRenderer> = Mutex::new(TextRenderer::new());
 }
 
+static NEXT_GRADIENT_ID: AtomicU64 = AtomicU64::new(1);
+static NEXT_PATTERN_ID: AtomicU64 = AtomicU64::new(1);
+
+lazy_static::lazy_static! {
+    static ref GRADIENT_REGISTRY: Mutex<HashMap<u64, CanvasGradientInner>> = Mutex::new(HashMap::new());
+    static ref PATTERN_REGISTRY: Mutex<HashMap<u64, CanvasPatternInner>> = Mutex::new(HashMap::new());
+}
+
 #[derive(Clone, Copy, PartialEq)]
 enum LineCap { Butt, Round, Square }
 
 #[derive(Clone, Copy, PartialEq)]
 enum LineJoin { Miter, Round, Bevel }
+
+#[derive(Clone)]
+enum PaintStyle {
+    Solid([u8; 4]),
+    Gradient(u64),
+    Pattern(u64),
+}
+
+impl PaintStyle {
+    fn as_hex_string(&self) -> String {
+        match self {
+            PaintStyle::Solid(c) => format!("#{:02x}{:02x}{:02x}{:02x}", c[0], c[1], c[2], c[3]),
+            PaintStyle::Gradient(_) => "[object CanvasGradient]".to_owned(),
+            PaintStyle::Pattern(_) => "[object CanvasPattern]".to_owned(),
+        }
+    }
+}
+
+#[derive(Clone)]
+enum GradientType {
+    Linear { x0: f32, y0: f32, x1: f32, y1: f32 },
+    Radial { x0: f32, y0: f32, r0: f32, x1: f32, y1: f32, r1: f32 },
+}
+
+#[derive(Clone)]
+struct GradientStop {
+    offset: f32,
+    color: [u8; 4],
+}
+
+#[derive(Clone)]
+struct CanvasGradientInner {
+    gradient_type: GradientType,
+    stops: Vec<GradientStop>,
+}
+
+fn eval_linear_gradient(grad: &CanvasGradientInner, x: f32, y: f32) -> [u8; 4] {
+    let (x0, y0, x1, y1) = match grad.gradient_type {
+        GradientType::Linear { x0, y0, x1, y1 } => (x0, y0, x1, y1),
+        _ => return [0, 0, 0, 255],
+    };
+    let dx = x1 - x0;
+    let dy = y1 - y0;
+    let len_sq = dx * dx + dy * dy;
+    if len_sq < 0.0001 { return eval_stops(&grad.stops, 0.0); }
+    let t = ((x - x0) * dx + (y - y0) * dy) / len_sq;
+    eval_stops(&grad.stops, t.clamp(0.0, 1.0))
+}
+
+fn eval_radial_gradient(grad: &CanvasGradientInner, x: f32, y: f32) -> [u8; 4] {
+    let (cx0, cy0, r0, _cx1, _cy1, r1) = match grad.gradient_type {
+        GradientType::Radial { x0, y0, r0, x1, y1, r1 } => (x0, y0, r0, x1, y1, r1),
+        _ => return [0, 0, 0, 255],
+    };
+    let dx = x - cx0;
+    let dy = y - cy0;
+    let dist = (dx * dx + dy * dy).sqrt().max(0.0);
+    let range = (r1 - r0).max(0.001);
+    let t = ((dist - r0) / range).clamp(0.0, 1.0);
+    eval_stops(&grad.stops, t)
+}
+
+fn eval_stops(stops: &[GradientStop], t: f32) -> [u8; 4] {
+    if stops.is_empty() { return [0, 0, 0, 255]; }
+    if stops.len() == 1 { return stops[0].color; }
+    if t <= stops[0].offset { return stops[0].color; }
+    if t >= stops.last().unwrap().offset { return stops.last().unwrap().color; }
+    for i in 0..stops.len() - 1 {
+        let a = &stops[i];
+        let b = &stops[i + 1];
+        if t >= a.offset && t <= b.offset {
+            let range = b.offset - a.offset;
+            if range < 0.0001 { return b.color; }
+            let local_t = (t - a.offset) / range;
+            return lerp_color(a.color, b.color, local_t);
+        }
+    }
+    stops.last().unwrap().color
+}
+
+fn lerp_color(a: [u8; 4], b: [u8; 4], t: f32) -> [u8; 4] {
+    let t = t.clamp(0.0, 1.0);
+    [
+        (a[0] as f32 + (b[0] as f32 - a[0] as f32) * t).round() as u8,
+        (a[1] as f32 + (b[1] as f32 - a[1] as f32) * t).round() as u8,
+        (a[2] as f32 + (b[2] as f32 - a[2] as f32) * t).round() as u8,
+        (a[3] as f32 + (b[3] as f32 - a[3] as f32) * t).round() as u8,
+    ]
+}
+
+#[derive(Clone)]
+struct CanvasPatternInner {
+    image_data: Vec<u8>,
+    width: u32,
+    height: u32,
+    repetition: PatternRepetition,
+}
+
+#[derive(Clone, Copy, PartialEq)]
+enum PatternRepetition {
+    Repeat,
+    RepeatX,
+    RepeatY,
+    NoRepeat,
+}
 
 #[derive(Clone, Copy, PartialEq)]
 enum CompositeOp {
@@ -187,6 +302,37 @@ fn named_color(name: &str) -> Option<[u8; 4]> {
     })
 }
 
+fn eval_pattern(p: &CanvasPatternInner, x: f32, y: f32) -> [u8; 4] {
+    let (px, py) = match p.repetition {
+        PatternRepetition::Repeat => {
+            let px = ((x as i32).rem_euclid(p.width as i32)) as u32;
+            let py = ((y as i32).rem_euclid(p.height as i32)) as u32;
+            (px, py)
+        }
+        PatternRepetition::RepeatX => {
+            let px = ((x as i32).rem_euclid(p.width as i32)) as u32;
+            let py = (y as i32).clamp(0, p.height as i32 - 1) as u32;
+            (px, py)
+        }
+        PatternRepetition::RepeatY => {
+            let px = (x as i32).clamp(0, p.width as i32 - 1) as u32;
+            let py = ((y as i32).rem_euclid(p.height as i32)) as u32;
+            (px, py)
+        }
+        PatternRepetition::NoRepeat => {
+            let px = (x as i32).clamp(0, p.width as i32 - 1) as u32;
+            let py = (y as i32).clamp(0, p.height as i32 - 1) as u32;
+            (px, py)
+        }
+    };
+    let idx = (py * p.width + px) as usize * 4;
+    if (idx + 4) <= p.image_data.len() {
+        [p.image_data[idx], p.image_data[idx + 1], p.image_data[idx + 2], p.image_data[idx + 3]]
+    } else {
+        [0, 0, 0, 0]
+    }
+}
+
 fn blend_rgba(dst: &mut [u8], src: [u8; 4]) {
     // Default source-over blend (used by most internal operations)
     let alpha = src[3] as f32 / 255.0;
@@ -200,8 +346,8 @@ fn blend_rgba(dst: &mut [u8], src: [u8; 4]) {
 
 #[derive(Clone)]
 struct CanvasState {
-    fill_style: [u8; 4],
-    stroke_style: [u8; 4],
+    fill_style: PaintStyle,
+    stroke_style: PaintStyle,
     line_width: f32,
     line_cap: LineCap,
     line_join: LineJoin,
@@ -225,8 +371,8 @@ struct CanvasState {
 impl Default for CanvasState {
     fn default() -> Self {
         Self {
-            fill_style: [0, 0, 0, 255],
-            stroke_style: [0, 0, 0, 255],
+            fill_style: PaintStyle::Solid([0, 0, 0, 255]),
+            stroke_style: PaintStyle::Solid([0, 0, 0, 255]),
             line_width: 1.0,
             line_cap: LineCap::Butt,
             line_join: LineJoin::Miter,
@@ -261,6 +407,7 @@ enum PathOp {
     LineTo(f32, f32),
     ClosePath,
     Arc(f32, f32, f32, f32, f32, bool),
+    Ellipse(f32, f32, f32, f32, f32, f32, f32, bool), // cx, cy, rx, ry, rot, start, end, anticlockwise
     BezierCurve(f32, f32, f32, f32, f32, f32), // cp1x, cp1y, cp2x, cp2y, x, y
     QuadraticCurve(f32, f32, f32, f32), // cpx, cpy, x, y
     Rect(f32, f32, f32, f32),
@@ -323,11 +470,27 @@ impl Canvas2D {
     }
 
     pub fn set_fill_style(&mut self, color: &str) {
-        self.state_mut().fill_style = parse_css_color(color);
+        self.state_mut().fill_style = PaintStyle::Solid(parse_css_color(color));
+    }
+
+    pub fn set_fill_style_gradient(&mut self, id: u64) {
+        self.state_mut().fill_style = PaintStyle::Gradient(id);
+    }
+
+    pub fn set_fill_style_pattern(&mut self, id: u64) {
+        self.state_mut().fill_style = PaintStyle::Pattern(id);
     }
 
     pub fn set_stroke_style(&mut self, color: &str) {
-        self.state_mut().stroke_style = parse_css_color(color);
+        self.state_mut().stroke_style = PaintStyle::Solid(parse_css_color(color));
+    }
+
+    pub fn set_stroke_style_gradient(&mut self, id: u64) {
+        self.state_mut().stroke_style = PaintStyle::Gradient(id);
+    }
+
+    pub fn set_stroke_style_pattern(&mut self, id: u64) {
+        self.state_mut().stroke_style = PaintStyle::Pattern(id);
     }
 
     pub fn set_line_width(&mut self, w: f32) {
@@ -359,13 +522,11 @@ impl Canvas2D {
     }
 
     pub fn get_fill_style(&self) -> String {
-        let c = self.state().fill_style;
-        format!("#{:02x}{:02x}{:02x}{:02x}", c[0], c[1], c[2], c[3])
+        self.state().fill_style.as_hex_string()
     }
 
     pub fn get_stroke_style(&self) -> String {
-        let c = self.state().stroke_style;
-        format!("#{:02x}{:02x}{:02x}{:02x}", c[0], c[1], c[2], c[3])
+        self.state().stroke_style.as_hex_string()
     }
 
     pub fn get_line_width(&self) -> f32 {
@@ -550,6 +711,98 @@ impl Canvas2D {
         self.state().image_smoothing_enabled
     }
 
+    // ─── Paint style evaluation ───
+
+    fn eval_fill_style_at(&self, x: f32, y: f32) -> [u8; 4] {
+        match &self.state().fill_style {
+            PaintStyle::Solid(c) => *c,
+            PaintStyle::Gradient(id) => {
+                let reg = GRADIENT_REGISTRY.lock().unwrap();
+                reg.get(id).map(|g| match &g.gradient_type {
+                    GradientType::Linear { .. } => eval_linear_gradient(g, x, y),
+                    GradientType::Radial { .. } => eval_radial_gradient(g, x, y),
+                }).unwrap_or([0, 0, 0, 255])
+            }
+            PaintStyle::Pattern(id) => {
+                let reg = PATTERN_REGISTRY.lock().unwrap();
+                reg.get(id).map(|p| eval_pattern(p, x, y)).unwrap_or([0, 0, 0, 255])
+            }
+        }
+    }
+
+    fn eval_stroke_style_at(&self, x: f32, y: f32) -> [u8; 4] {
+        match &self.state().stroke_style {
+            PaintStyle::Solid(c) => *c,
+            PaintStyle::Gradient(id) => {
+                let reg = GRADIENT_REGISTRY.lock().unwrap();
+                reg.get(id).map(|g| match &g.gradient_type {
+                    GradientType::Linear { .. } => eval_linear_gradient(g, x, y),
+                    GradientType::Radial { .. } => eval_radial_gradient(g, x, y),
+                }).unwrap_or([0, 0, 0, 255])
+            }
+            PaintStyle::Pattern(id) => {
+                let reg = PATTERN_REGISTRY.lock().unwrap();
+                reg.get(id).map(|p| eval_pattern(p, x, y)).unwrap_or([0, 0, 0, 255])
+            }
+        }
+    }
+
+    fn fill_color_at(&self, x: f32, y: f32) -> [u8; 4] {
+        let mut c = self.eval_fill_style_at(x, y);
+        c[3] = (c[3] as f32 * self.state().global_alpha) as u8;
+        c
+    }
+
+    fn stroke_color_at(&self, x: f32, y: f32) -> [u8; 4] {
+        let mut c = self.eval_stroke_style_at(x, y);
+        c[3] = (c[3] as f32 * self.state().global_alpha) as u8;
+        c
+    }
+
+    // ─── Gradient / Pattern creation ───
+
+    pub fn create_linear_gradient(&self, x0: f32, y0: f32, x1: f32, y1: f32) -> u64 {
+        let id = NEXT_GRADIENT_ID.fetch_add(1, Ordering::Relaxed);
+        let grad = CanvasGradientInner {
+            gradient_type: GradientType::Linear { x0, y0, x1, y1 },
+            stops: Vec::new(),
+        };
+        GRADIENT_REGISTRY.lock().unwrap().insert(id, grad);
+        id
+    }
+
+    pub fn create_radial_gradient(&self, x0: f32, y0: f32, r0: f32, x1: f32, y1: f32, r1: f32) -> u64 {
+        let id = NEXT_GRADIENT_ID.fetch_add(1, Ordering::Relaxed);
+        let grad = CanvasGradientInner {
+            gradient_type: GradientType::Radial { x0, y0, r0, x1, y1, r1 },
+            stops: Vec::new(),
+        };
+        GRADIENT_REGISTRY.lock().unwrap().insert(id, grad);
+        id
+    }
+
+    pub fn add_gradient_color_stop(&self, gradient_id: u64, offset: f32, color: &str) {
+        if let Some(grad) = GRADIENT_REGISTRY.lock().unwrap().get_mut(&gradient_id) {
+            let offset = offset.clamp(0.0, 1.0);
+            let parsed = parse_css_color(color);
+            grad.stops.push(GradientStop { offset, color: parsed });
+            grad.stops.sort_by(|a, b| a.offset.partial_cmp(&b.offset).unwrap());
+        }
+    }
+
+    pub fn create_pattern(&self, image_data: Vec<u8>, width: u32, height: u32, repetition: &str) -> u64 {
+        let id = NEXT_PATTERN_ID.fetch_add(1, Ordering::Relaxed);
+        let rep = match repetition {
+            "repeat-x" => PatternRepetition::RepeatX,
+            "repeat-y" => PatternRepetition::RepeatY,
+            "no-repeat" => PatternRepetition::NoRepeat,
+            _ => PatternRepetition::Repeat,
+        };
+        let pattern = CanvasPatternInner { image_data, width, height, repetition: rep };
+        PATTERN_REGISTRY.lock().unwrap().insert(id, pattern);
+        id
+    }
+
     // ─── Transforms ───
 
     pub fn translate(&mut self, x: f32, y: f32) {
@@ -579,6 +832,14 @@ impl Canvas2D {
 
     pub fn set_transform(&mut self, a: f32, b: f32, c: f32, d: f32, e: f32, f: f32) {
         self.state_mut().transform = [a, b, c, d, e, f];
+    }
+
+    pub fn reset_transform(&mut self) {
+        self.state_mut().transform = [1.0, 0.0, 0.0, 1.0, 0.0, 0.0];
+    }
+
+    pub fn get_transform(&self) -> [f32; 6] {
+        self.state().transform
     }
 
     // ─── Immediate drawing ───
@@ -611,11 +872,9 @@ impl Canvas2D {
         let y0 = y1.min(y2).floor().max(0.0) as usize;
         let x1u = x1.max(x2).ceil().min(self.width as f32) as usize;
         let y1u = y1.max(y2).ceil().min(self.height as f32) as usize;
-        let (color, op, sx, sy, blur, shad, ga) = {
+        let (op, sx, sy, blur, shad, ga) = {
             let s = self.state();
-            let mut c = s.fill_style;
-            c[3] = (c[3] as f32 * s.global_alpha) as u8;
-            (c, s.global_composite_op, s.shadow_offset_x, s.shadow_offset_y, s.shadow_blur, s.shadow_color, s.global_alpha)
+            (s.global_composite_op, s.shadow_offset_x, s.shadow_offset_y, s.shadow_blur, s.shadow_color, s.global_alpha)
         };
 
         if blur > 0.0 && shad[3] > 0 {
@@ -646,6 +905,7 @@ impl Canvas2D {
             for px in x0..x1u {
                 if !self.is_in_clip(px, py) { continue; }
                 let idx = (py * self.width as usize + px) * 4;
+                let color = self.fill_color_at(px as f32 + 0.5, py as f32 + 0.5);
                 composite_blend(&mut self.buffer[idx..idx + 4], color, op);
             }
         }
@@ -711,8 +971,7 @@ impl Canvas2D {
         let (tx, ty) = self.apply_transform(x, y);
         if text.is_empty() { return; }
 
-        let mut color = s.fill_style;
-        color[3] = (color[3] as f32 * s.global_alpha) as u8;
+        let color = self.fill_color_at(tx, ty);
         let font_size = s.font_size;
 
         let text_width = text.len() as f32 * font_size * 0.6;
@@ -858,6 +1117,16 @@ impl Canvas2D {
         self.path.push(PathOp::Arc(cx, cy, r, start_angle, end_angle, anticlockwise));
     }
 
+    pub fn ellipse(&mut self, cx: f32, cy: f32, rx: f32, ry: f32, rotation: f32, start_angle: f32, end_angle: f32, anticlockwise: bool) {
+        if rx <= 0.0 || ry <= 0.0 { return; }
+        if self.subpath_empty {
+            let (sx, sy) = angle_to_point_ellipse(cx, cy, rx, ry, rotation, start_angle);
+            self.path.push(PathOp::MoveTo(sx, sy));
+            self.subpath_empty = false;
+        }
+        self.path.push(PathOp::Ellipse(cx, cy, rx, ry, rotation, start_angle, end_angle, anticlockwise));
+    }
+
     pub fn arc_to(&mut self, x1: f32, y1: f32, x2: f32, y2: f32, radius: f32) {
         if radius <= 0.0 { return; }
         // Get current point (last path point or 0,0)
@@ -919,6 +1188,10 @@ impl Canvas2D {
                 PathOp::MoveTo(x, y) | PathOp::LineTo(x, y) => return (*x, *y),
                 PathOp::BezierCurve(_, _, _, _, x, y) => return (*x, *y),
                 PathOp::QuadraticCurve(_, _, x, y) => return (*x, *y),
+                PathOp::Ellipse(cx, cy, rx, ry, rot, _, ea, _) => {
+                    let (ex, ey) = angle_to_point_ellipse(*cx, *cy, *rx, *ry, *rot, *ea);
+                    return (ex, ey);
+                }
                 _ => {}
             }
         }
@@ -950,8 +1223,7 @@ impl Canvas2D {
         let (tx, ty) = self.apply_transform(x, y);
         if text.is_empty() { return; }
 
-        let mut color = s.stroke_style;
-        color[3] = (color[3] as f32 * s.global_alpha) as u8;
+        let color = self.stroke_color_at(tx, ty);
         let font_size = s.font_size;
 
         let text_width = text.len() as f32 * font_size * 0.6;
@@ -1085,19 +1357,28 @@ impl Canvas2D {
         let (tx, ty) = self.apply_transform(dx, dy);
         let draw_w = dw.unwrap_or(img_w as f32).max(1.0) as u32;
         let draw_h = dh.unwrap_or(img_h as f32).max(1.0) as u32;
+        let smoothing = self.state().image_smoothing_enabled;
 
-        for sy in 0..img_h.min(draw_h) {
-            for sx in 0..img_w.min(draw_w) {
-                let src_idx = (sy * img_w + sx) as usize * 4;
-                if src_idx + 4 > data.len() { continue; }
-                let px = (tx + sx as f32) as i32;
-                let py = (ty + sy as f32) as i32;
-                if px < 0 || py < 0 || px >= self.width as i32 || py >= self.height as i32 { continue; }
-                let dst_idx = (py as u32 * self.width + px as u32) as usize * 4;
-                let src = [data[src_idx], data[src_idx + 1], data[src_idx + 2], data[src_idx + 3]];
-                let pxn = px as usize;
-                let pyn = py as usize;
-                if !self.is_in_clip(pxn, pyn) { continue; }
+        let scale_x = img_w as f32 / draw_w as f32;
+        let scale_y = img_h as f32 / draw_h as f32;
+
+        for py in 0..draw_h {
+            for px in 0..draw_w {
+                let dst_px = (tx + px as f32) as i32;
+                let dst_py = (ty + py as f32) as i32;
+                if dst_px < 0 || dst_py < 0 || dst_px >= self.width as i32 || dst_py >= self.height as i32 { continue; }
+                if !self.is_in_clip(dst_px as usize, dst_py as usize) { continue; }
+
+                let src_x = px as f32 * scale_x;
+                let src_y = py as f32 * scale_y;
+
+                let src = if smoothing && (scale_x != 1.0 || scale_y != 1.0) {
+                    sample_bilinear(data, img_w, img_h, src_x, src_y)
+                } else {
+                    sample_nearest(data, img_w, img_h, src_x, src_y)
+                };
+
+                let dst_idx = (dst_py as u32 * self.width + dst_px as u32) as usize * 4;
                 blend_rgba(&mut self.buffer[dst_idx..dst_idx + 4], src);
             }
         }
@@ -1126,6 +1407,35 @@ impl Canvas2D {
                     if current != subpath_start {
                         segments.push([current, subpath_start]);
                         current = subpath_start;
+                    }
+                }
+                PathOp::Ellipse(cx, cy, rx, ry, rot, sa, ea, acw) => {
+                    let (tcx, tcy) = self.apply_transform(*cx, *cy);
+                    let (rdx, rdy) = self.apply_transform(*cx + *rx, *cy);
+                    let trx = ((rdx - tcx).powi(2) + (rdy - tcy).powi(2)).sqrt().max(0.001);
+                    let (rudx, rudy) = self.apply_transform(*cx, *cy + *ry);
+                    let try_ = ((rudx - tcx).powi(2) + (rudy - tcy).powi(2)).sqrt().max(0.001);
+                    let cos_r = rot.cos();
+                    let sin_r = rot.sin();
+                    let start = *sa;
+                    let mut end = *ea;
+                    if *acw {
+                        while end < start { end += std::f32::consts::TAU; }
+                    } else {
+                        while end > start { end -= std::f32::consts::TAU; }
+                    }
+                    let steps = ((end - start).abs() / (std::f32::consts::PI / 18.0)).ceil() as u32;
+                    let steps = steps.max(4);
+                    for s in 0..steps {
+                        let t = s as f32 / steps as f32;
+                        let angle = start + (end - start) * t;
+                        let px = tcx + cos_r * trx * angle.cos() - sin_r * try_ * angle.sin();
+                        let py = tcy + sin_r * trx * angle.cos() + cos_r * try_ * angle.sin();
+                        if s > 0 {
+                            segments.push([current, (px, py)]);
+                        }
+                        current = (px, py);
+                        if s == 0 { subpath_start = (px, py); }
                     }
                 }
                 PathOp::Arc(cx, cy, r, sa, ea, acw) => {
@@ -1271,9 +1581,6 @@ impl Canvas2D {
     }
 
     fn rasterize_fill(&mut self, segments: &[[(f32, f32); 2]]) {
-        let color = self.state().fill_style;
-        let alpha = (color[3] as f32 * self.state().global_alpha) as u8;
-        let rgba = [color[0], color[1], color[2], alpha];
         let op = self.state().global_composite_op;
 
         let w = self.width as usize;
@@ -1312,7 +1619,8 @@ impl Canvas2D {
                 for px in x_start..x_end.min(w) {
                     if !self.is_in_clip(px, py) { continue; }
                     let idx = (py * w + px) * 4;
-                    composite_blend(&mut self.buffer[idx..idx + 4], rgba, op);
+                    let color = self.fill_color_at(px as f32 + 0.5, py as f32 + 0.5);
+                    composite_blend(&mut self.buffer[idx..idx + 4], color, op);
                 }
             }
         }
@@ -1355,12 +1663,9 @@ impl Canvas2D {
     }
 
     fn rasterize_stroke(&mut self, segments: &[[(f32, f32); 2]]) {
-        let (rgba, lw, half, cap, join, op, dash, dash_offset, has_dash) = {
+        let (lw, half, cap, join, op, dash, dash_offset, has_dash) = {
             let s = self.state();
-            let c = s.stroke_style;
-            let a = (c[3] as f32 * s.global_alpha) as u8;
             (
-                [c[0], c[1], c[2], a],
                 s.line_width.max(0.5),
                 s.line_width.max(0.5) / 2.0,
                 s.line_cap,
@@ -1385,16 +1690,21 @@ impl Canvas2D {
         } else {
             1.0
         };
-
         for seg_idx in 0..segments.len() {
-            let (x1, y1) = segments[seg_idx][0];
-            let (x2, y2) = segments[seg_idx][1];
+            let seg = &segments[seg_idx];
+            let (x1, y1) = seg[0];
+            let (x2, y2) = seg[1];
             let dx = x2 - x1;
             let dy = y2 - y1;
             let len = (dx * dx + dy * dy).sqrt();
             if len < 0.001 { continue; }
             let ux = dx / len;
             let uy = dy / len;
+
+            // Evaluate stroke color at midpoint of segment for gradient/pattern support
+            let mx = (x1 + x2) * 0.5;
+            let my = (y1 + y2) * 0.5;
+            let rgba = self.stroke_color_at(mx, my);
 
             if has_dash {
                 let mut dist = 0.0;
@@ -1634,4 +1944,51 @@ impl Canvas2D {
 
 fn angle_to_point(cx: f32, cy: f32, r: f32, angle: f32) -> (f32, f32) {
     (cx + r * angle.cos(), cy + r * angle.sin())
+}
+
+fn sample_nearest(data: &[u8], w: u32, h: u32, sx: f32, sy: f32) -> [u8; 4] {
+    let ix = (sx.floor() as i32).clamp(0, w as i32 - 1) as u32;
+    let iy = (sy.floor() as i32).clamp(0, h as i32 - 1) as u32;
+    let idx = (iy * w + ix) as usize * 4;
+    if idx + 4 <= data.len() {
+        [data[idx], data[idx + 1], data[idx + 2], data[idx + 3]]
+    } else {
+        [0, 0, 0, 0]
+    }
+}
+
+fn sample_bilinear(data: &[u8], w: u32, h: u32, sx: f32, sy: f32) -> [u8; 4] {
+    let ix = sx.floor();
+    let iy = sy.floor();
+    let fx = sx - ix;
+    let fy = sy - iy;
+    let x0 = (ix as i32).clamp(0, w as i32 - 1) as u32;
+    let y0 = (iy as i32).clamp(0, h as i32 - 1) as u32;
+    let x1 = (x0 + 1).min(w - 1);
+    let y1 = (y0 + 1).min(h - 1);
+    let p00 = (y0 * w + x0) as usize * 4;
+    let p01 = (y0 * w + x1) as usize * 4;
+    let p10 = (y1 * w + x0) as usize * 4;
+    let p11 = (y1 * w + x1) as usize * 4;
+    let mut out = [0u8; 4];
+    for c in 0..4 {
+        if p00 + c < data.len() && p01 + c < data.len() && p10 + c < data.len() && p11 + c < data.len() {
+            let v00 = data[p00 + c] as f32;
+            let v01 = data[p01 + c] as f32;
+            let v10 = data[p10 + c] as f32;
+            let v11 = data[p11 + c] as f32;
+            let top = v00 + (v01 - v00) * fx;
+            let bot = v10 + (v11 - v10) * fx;
+            out[c] = (top + (bot - top) * fy).round().clamp(0.0, 255.0) as u8;
+        }
+    }
+    out
+}
+
+fn angle_to_point_ellipse(cx: f32, cy: f32, rx: f32, ry: f32, rotation: f32, angle: f32) -> (f32, f32) {
+    let cos_r = rotation.cos();
+    let sin_r = rotation.sin();
+    let x = cx + cos_r * rx * angle.cos() - sin_r * ry * angle.sin();
+    let y = cy + sin_r * rx * angle.cos() + cos_r * ry * angle.sin();
+    (x, y)
 }

@@ -409,6 +409,23 @@ impl StaticRenderer {
         })
     }
 
+    /// Drain pending animation events for all controllers.
+    /// Returns a map of (element_key, event) pairs.
+    pub fn take_animation_events(&self) -> Vec<(String, fortrust_style::animation::AnimationEvent)> {
+        let mut cache = self.anim_state.borrow_mut();
+        let Some(cache) = cache.as_mut() else { return Vec::new(); };
+        let mut events = Vec::new();
+        let keys: Vec<String> = cache.controllers.keys().cloned().collect();
+        for key in keys {
+            if let Some(controller) = cache.controllers.get_mut(&key) {
+                for evt in controller.take_events() {
+                    events.push((key.clone(), evt));
+                }
+            }
+        }
+        events
+    }
+
     /// Returns true if there are active animations that need ticking.
     pub fn has_active_animations(&self) -> bool {
         self.anim_state

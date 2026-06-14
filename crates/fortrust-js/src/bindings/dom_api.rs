@@ -1205,9 +1205,26 @@ fn build_canvas_2d_context(ctx: &mut Context, canvas_ptr: usize) -> JsResult<JsV
     let fill_style_setter = {
         let f = unsafe { NativeFunction::from_closure(move |_this, args, ctx| {
             if let Some(val) = args.first() {
-                let s = val.to_string(ctx).map(|s| s.to_std_string_escaped()).unwrap_or_default();
-                let mut map = CANVAS_CONTEXTS.lock().unwrap();
-                if let Some(c) = map.get_mut(&cp) { c.set_fill_style(&s); }
+                if let Some(obj) = val.as_object() {
+                    // Check for gradient id
+                    if let Ok(id_val) = obj.get(js_string!("__gradient_id"), ctx) {
+                        if let Some(id) = id_val.as_number() {
+                            let mut map = CANVAS_CONTEXTS.lock().unwrap();
+                            if let Some(c) = map.get_mut(&cp) { c.set_fill_style_gradient(id as u64); }
+                        }
+                    }
+                    // Check for pattern id
+                    if let Ok(id_val) = obj.get(js_string!("__pattern_id"), ctx) {
+                        if let Some(id) = id_val.as_number() {
+                            let mut map = CANVAS_CONTEXTS.lock().unwrap();
+                            if let Some(c) = map.get_mut(&cp) { c.set_fill_style_pattern(id as u64); }
+                        }
+                    }
+                } else {
+                    let s = val.to_string(ctx).map(|s| s.to_std_string_escaped()).unwrap_or_default();
+                    let mut map = CANVAS_CONTEXTS.lock().unwrap();
+                    if let Some(c) = map.get_mut(&cp) { c.set_fill_style(&s); }
+                }
             }
             Ok(JsValue::undefined())
         })};
@@ -1223,9 +1240,24 @@ fn build_canvas_2d_context(ctx: &mut Context, canvas_ptr: usize) -> JsResult<JsV
     let stroke_style_setter = {
         let f = unsafe { NativeFunction::from_closure(move |_this, args, ctx| {
             if let Some(val) = args.first() {
-                let s = val.to_string(ctx).map(|s| s.to_std_string_escaped()).unwrap_or_default();
-                let mut map = CANVAS_CONTEXTS.lock().unwrap();
-                if let Some(c) = map.get_mut(&cp) { c.set_stroke_style(&s); }
+                if let Some(obj) = val.as_object() {
+                    if let Ok(id_val) = obj.get(js_string!("__gradient_id"), ctx) {
+                        if let Some(id) = id_val.as_number() {
+                            let mut map = CANVAS_CONTEXTS.lock().unwrap();
+                            if let Some(c) = map.get_mut(&cp) { c.set_stroke_style_gradient(id as u64); }
+                        }
+                    }
+                    if let Ok(id_val) = obj.get(js_string!("__pattern_id"), ctx) {
+                        if let Some(id) = id_val.as_number() {
+                            let mut map = CANVAS_CONTEXTS.lock().unwrap();
+                            if let Some(c) = map.get_mut(&cp) { c.set_stroke_style_pattern(id as u64); }
+                        }
+                    }
+                } else {
+                    let s = val.to_string(ctx).map(|s| s.to_std_string_escaped()).unwrap_or_default();
+                    let mut map = CANVAS_CONTEXTS.lock().unwrap();
+                    if let Some(c) = map.get_mut(&cp) { c.set_stroke_style(&s); }
+                }
             }
             Ok(JsValue::undefined())
         })};
@@ -1495,6 +1527,153 @@ fn build_canvas_2d_context(ctx: &mut Context, canvas_ptr: usize) -> JsResult<JsV
     };
 
     // ── lineDashOffset ──
+    // ── resetTransform ──
+    let cp_rt = canvas_ptr;
+    let reset_transform_fn = unsafe {
+        NativeFunction::from_closure(move |_this, _args, _ctx| {
+            let mut map = CANVAS_CONTEXTS.lock().unwrap();
+            if let Some(c) = map.get_mut(&cp_rt) { c.reset_transform(); }
+            Ok(JsValue::undefined())
+        })
+    };
+
+    // ── getTransform ──
+    let cp_gt = canvas_ptr;
+    let get_transform_fn = unsafe {
+        NativeFunction::from_closure(move |_this, _args, ctx| {
+            let map = CANVAS_CONTEXTS.lock().unwrap();
+            if let Some(c) = map.get(&cp_gt) {
+                let t = c.get_transform();
+                let arr = boa_engine::object::builtins::JsArray::new(ctx);
+                let _ = arr.set(0, JsValue::from(t[0] as f64), false, ctx);
+                let _ = arr.set(1, JsValue::from(t[1] as f64), false, ctx);
+                let _ = arr.set(2, JsValue::from(t[2] as f64), false, ctx);
+                let _ = arr.set(3, JsValue::from(t[3] as f64), false, ctx);
+                let _ = arr.set(4, JsValue::from(t[4] as f64), false, ctx);
+                let _ = arr.set(5, JsValue::from(t[5] as f64), false, ctx);
+                Ok(JsValue::from(arr))
+            } else {
+                let arr = boa_engine::object::builtins::JsArray::new(ctx);
+                Ok(JsValue::from(arr))
+            }
+        })
+    };
+
+    // ── ellipse ──
+    let cp_el = canvas_ptr;
+    let ellipse_fn = unsafe {
+        NativeFunction::from_closure(move |_this, args, _ctx| {
+            let cx = args.first().and_then(|v| v.as_number()).unwrap_or(0.0) as f32;
+            let cy = args.get(1).and_then(|v| v.as_number()).unwrap_or(0.0) as f32;
+            let rx = args.get(2).and_then(|v| v.as_number()).unwrap_or(0.0) as f32;
+            let ry = args.get(3).and_then(|v| v.as_number()).unwrap_or(0.0) as f32;
+            let rot = args.get(4).and_then(|v| v.as_number()).unwrap_or(0.0) as f32;
+            let sa = args.get(5).and_then(|v| v.as_number()).unwrap_or(0.0) as f32;
+            let ea = args.get(6).and_then(|v| v.as_number()).unwrap_or(0.0) as f32;
+            let acw = args.get(7).and_then(|v| v.as_boolean()).unwrap_or(false);
+            let mut map = CANVAS_CONTEXTS.lock().unwrap();
+            if let Some(c) = map.get_mut(&cp_el) { c.ellipse(cx, cy, rx, ry, rot, sa, ea, acw); }
+            Ok(JsValue::undefined())
+        })
+    };
+
+    // ── createLinearGradient ──
+    let cp_clg = canvas_ptr;
+    let create_linear_gradient_fn = unsafe {
+        NativeFunction::from_closure(move |_this, args, ctx| {
+            let x0 = args.first().and_then(|v| v.as_number()).unwrap_or(0.0) as f32;
+            let y0 = args.get(1).and_then(|v| v.as_number()).unwrap_or(0.0) as f32;
+            let x1 = args.get(2).and_then(|v| v.as_number()).unwrap_or(0.0) as f32;
+            let y1 = args.get(3).and_then(|v| v.as_number()).unwrap_or(0.0) as f32;
+            let id = {
+                let map = CANVAS_CONTEXTS.lock().unwrap();
+                map.get(&cp_clg).map(|c| c.create_linear_gradient(x0, y0, x1, y1)).unwrap_or(0)
+            };
+            let grad_id = id;
+            let add_color_stop_fn = {
+                NativeFunction::from_closure(move |_this, args, ctx| {
+                    let offset = args.first().and_then(|v| v.as_number()).unwrap_or(0.0) as f32;
+                    let color = args.get(1).map(|v| v.to_string(ctx).map(|s| s.to_std_string_escaped())).unwrap_or(Ok(String::new()))?;
+                    let map = CANVAS_CONTEXTS.lock().unwrap();
+                    if let Some(c) = map.get(&cp_clg) { c.add_gradient_color_stop(grad_id, offset, &color); }
+                    Ok(JsValue::undefined())
+                })
+            };
+            let obj = ObjectInitializer::new(ctx)
+                .property(js_string!("__gradient_id"), JsValue::from(grad_id as f64), Attribute::all())
+                .function(add_color_stop_fn, js_string!("addColorStop"), 2)
+                .build();
+            Ok(JsValue::from(obj))
+        })
+    };
+
+    // ── createRadialGradient ──
+    let cp_crg = canvas_ptr;
+    let create_radial_gradient_fn = unsafe {
+        NativeFunction::from_closure(move |_this, args, ctx| {
+            let x0 = args.first().and_then(|v| v.as_number()).unwrap_or(0.0) as f32;
+            let y0 = args.get(1).and_then(|v| v.as_number()).unwrap_or(0.0) as f32;
+            let r0 = args.get(2).and_then(|v| v.as_number()).unwrap_or(0.0) as f32;
+            let x1 = args.get(3).and_then(|v| v.as_number()).unwrap_or(0.0) as f32;
+            let y1 = args.get(4).and_then(|v| v.as_number()).unwrap_or(0.0) as f32;
+            let r1 = args.get(5).and_then(|v| v.as_number()).unwrap_or(0.0) as f32;
+            let id = {
+                let map = CANVAS_CONTEXTS.lock().unwrap();
+                map.get(&cp_crg).map(|c| c.create_radial_gradient(x0, y0, r0, x1, y1, r1)).unwrap_or(0)
+            };
+            let grad_id = id;
+            let add_color_stop_fn = {
+                NativeFunction::from_closure(move |_this, args, ctx| {
+                    let offset = args.first().and_then(|v| v.as_number()).unwrap_or(0.0) as f32;
+                    let color = args.get(1).map(|v| v.to_string(ctx).map(|s| s.to_std_string_escaped())).unwrap_or(Ok(String::new()))?;
+                    let map = CANVAS_CONTEXTS.lock().unwrap();
+                    if let Some(c) = map.get(&cp_crg) { c.add_gradient_color_stop(grad_id, offset, &color); }
+                    Ok(JsValue::undefined())
+                })
+            };
+            let obj = ObjectInitializer::new(ctx)
+                .property(js_string!("__gradient_id"), JsValue::from(grad_id as f64), Attribute::all())
+                .function(add_color_stop_fn, js_string!("addColorStop"), 2)
+                .build();
+            Ok(JsValue::from(obj))
+        })
+    };
+
+    // ── createPattern ──
+    let cp_cp = canvas_ptr;
+    let create_pattern_fn = unsafe {
+        NativeFunction::from_closure(move |_this, args, ctx| {
+            let img_obj = args.first().and_then(|v| v.as_object());
+            let repetition = args.get(1).map(|v| v.to_string(ctx).map(|s| s.to_std_string_escaped())).unwrap_or(Ok("repeat".to_owned()))?;
+            if let Some(img) = img_obj {
+                let w_val = img.get(js_string!("width"), ctx).ok();
+                let h_val = img.get(js_string!("height"), ctx).ok();
+                let data_val = img.get(js_string!("data"), ctx).ok();
+                let w = w_val.and_then(|v| v.as_number()).unwrap_or(0.0) as u32;
+                let h = h_val.and_then(|v| v.as_number()).unwrap_or(0.0) as u32;
+                if let Some(data_arr) = data_val.and_then(|v| v.as_object().cloned()) {
+                    let len = data_arr.get(js_string!("length"), ctx).ok()
+                        .and_then(|v| v.as_number()).unwrap_or(0.0) as u32;
+                    let n = (w * h * 4).min(len);
+                    let mut pixels = Vec::with_capacity(n as usize);
+                    for i in 0..n {
+                        let val = data_arr.get(i, ctx).ok().and_then(|v| v.as_number()).unwrap_or(0.0) as u8;
+                        pixels.push(val);
+                    }
+                    let id = {
+                        let map = CANVAS_CONTEXTS.lock().unwrap();
+                        map.get(&cp_cp).map(|c| c.create_pattern(pixels, w, h, &repetition)).unwrap_or(0)
+                    };
+                    let obj = ObjectInitializer::new(ctx)
+                        .property(js_string!("__pattern_id"), JsValue::from(id as f64), Attribute::all())
+                        .build();
+                    return Ok(JsValue::from(obj));
+                }
+            }
+            Ok(JsValue::null())
+        })
+    };
+
     let cp_ldo = canvas_ptr;
     let line_dash_offset_getter = {
         let f = unsafe { NativeFunction::from_closure(move |_this, _args, _ctx| {
@@ -1583,11 +1762,14 @@ fn build_canvas_2d_context(ctx: &mut Context, canvas_ptr: usize) -> JsResult<JsV
         .function(rotate_fn, js_string!("rotate"), 1)
         .function(scale_fn, js_string!("scale"), 2)
         .function(set_transform_fn, js_string!("setTransform"), 6)
+        .function(reset_transform_fn, js_string!("resetTransform"), 0)
+        .function(get_transform_fn, js_string!("getTransform"), 0)
         .function(begin_path_fn, js_string!("beginPath"), 0)
         .function(close_path_fn, js_string!("closePath"), 0)
         .function(move_to_fn, js_string!("moveTo"), 2)
         .function(line_to_fn, js_string!("lineTo"), 2)
         .function(arc_fn, js_string!("arc"), 6)
+        .function(ellipse_fn, js_string!("ellipse"), 7)
         .function(rect_fn, js_string!("rect"), 4)
         .function(fill_fn, js_string!("fill"), 0)
         .function(stroke_fn, js_string!("stroke"), 0)
@@ -1603,6 +1785,9 @@ fn build_canvas_2d_context(ctx: &mut Context, canvas_ptr: usize) -> JsResult<JsV
         .function(arc_to_fn, js_string!("arcTo"), 5)
         .function(set_line_dash_fn, js_string!("setLineDash"), 1)
         .function(get_line_dash_fn, js_string!("getLineDash"), 0)
+        .function(create_linear_gradient_fn, js_string!("createLinearGradient"), 4)
+        .function(create_radial_gradient_fn, js_string!("createRadialGradient"), 6)
+        .function(create_pattern_fn, js_string!("createPattern"), 2)
         .build();
 
     Ok(JsValue::from(ctx_obj))

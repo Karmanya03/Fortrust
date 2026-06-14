@@ -298,6 +298,18 @@ fn parse_deg_or_zero(s: &str) -> f32 {
 
 // ── Active Animation State ──────────────────────────────────────────────────
 
+/// Events that can fire during animation/transition lifecycle.
+#[derive(Debug, Clone, PartialEq)]
+pub enum AnimationEvent {
+    AnimationStart,
+    AnimationEnd,
+    AnimationIteration,
+    TransitionStart,
+    TransitionEnd,
+    TransitionCancel,
+    AnimationCancel,
+}
+
 /// State of a single running CSS animation on an element.
 #[derive(Debug, Clone)]
 pub struct ActiveAnimation {
@@ -305,6 +317,12 @@ pub struct ActiveAnimation {
     pub elapsed: f32,
     pub iteration: f32,
     pub finished: bool,
+    /// Tracks whether start event has been dispatched
+    pub start_dispatched: bool,
+    /// Tracks the previous whole-iteration count for detecting iteration events
+    pub prev_iteration_int: i32,
+    /// Pending events to be consumed by the caller
+    pub pending_events: Vec<AnimationEvent>,
 }
 
 impl ActiveAnimation {
@@ -314,6 +332,9 @@ impl ActiveAnimation {
             elapsed: 0.0,
             iteration: 0.0,
             finished: false,
+            start_dispatched: false,
+            prev_iteration_int: 0,
+            pending_events: Vec::new(),
         }
     }
 
@@ -331,12 +352,28 @@ impl ActiveAnimation {
             return true; // Still in delay period
         }
 
+        // Fire animationstart when we first enter active time
+        if !self.start_dispatched {
+            self.start_dispatched = true;
+            self.pending_events.push(AnimationEvent::AnimationStart);
+        }
+
         let active_time = self.elapsed - delay;
         self.iteration = active_time / total_duration;
 
+        // Check for iteration events (when iteration count crosses an integer boundary)
+        let current_iter_int = self.iteration.floor() as i32;
+        if current_iter_int > self.prev_iteration_int && self.prev_iteration_int >= 0 {
+            self.pending_events.push(AnimationEvent::AnimationIteration);
+        }
+        self.prev_iteration_int = current_iter_int;
+
         if self.animation.iteration_count >= 0.0 && self.iteration >= self.animation.iteration_count {
             self.iteration = self.animation.iteration_count;
-            self.finished = true;
+            if !self.finished {
+                self.finished = true;
+                self.pending_events.push(AnimationEvent::AnimationEnd);
+            }
             return false;
         }
         true
@@ -389,6 +426,8 @@ pub struct ActiveTransition {
     pub transition: SingleTransition,
     pub elapsed: f32,
     pub finished: bool,
+    pub start_dispatched: bool,
+    pub pending_events: Vec<AnimationEvent>,
 }
 
 impl ActiveTransition {
@@ -400,6 +439,8 @@ impl ActiveTransition {
             transition,
             elapsed: 0.0,
             finished: false,
+            start_dispatched: false,
+            pending_events: Vec::new(),
         }
     }
 
@@ -416,10 +457,19 @@ impl ActiveTransition {
             return true;
         }
 
+        // Fire transitionstart when we first enter active time
+        if !self.start_dispatched {
+            self.start_dispatched = true;
+            self.pending_events.push(AnimationEvent::TransitionStart);
+        }
+
         let active_time = self.elapsed - delay;
         if active_time >= total_duration {
             self.elapsed = delay + total_duration;
-            self.finished = true;
+            if !self.finished {
+                self.finished = true;
+                self.pending_events.push(AnimationEvent::TransitionEnd);
+            }
             return false;
         }
         true
@@ -499,6 +549,36 @@ impl AnimationController {
         // Clean up finished items (keep for fill-mode evaluation)
         self.animations.retain(|a| !a.finished || a.animation.fill_mode != AnimationFillMode::None);
         self.transitions.retain(|t| !t.finished);
+    }
+
+    /// Drain all pending animation/transition events.
+    pub fn take_events(&mut self) -> Vec<AnimationEvent> {
+        let mut events = Vec::new();
+        for anim in &mut self.animations {
+            events.append(&mut anim.pending_events);
+        }
+        for trans in &mut self.transitions {
+            events.append(&mut trans.pending_events);
+        }
+        events
+    }
+
+    /// Cancel all running animations and transitions, firing cancel events.
+    pub fn cancel_all(&mut self) {
+        for anim in &mut self.animations {
+            if !anim.finished {
+                anim.finished = true;
+                anim.pending_events.push(AnimationEvent::AnimationCancel);
+            }
+        }
+        for trans in &mut self.transitions {
+            if !trans.finished {
+                trans.finished = true;
+                trans.pending_events.push(AnimationEvent::TransitionCancel);
+            }
+        }
+        self.animations.clear();
+        self.transitions.clear();
     }
 
     /// Apply all active animation/transition values to a `ComputedStyle`.
