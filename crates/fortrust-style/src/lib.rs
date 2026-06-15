@@ -31,6 +31,12 @@ pub enum Display {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum FlexDirection {
+    Row,
+    Column,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum FontWeight {
     Normal,
     Bold,
@@ -847,6 +853,7 @@ pub struct ComputedStyle {
     pub flex_grow: f32,
     pub flex_shrink: f32,
     pub flex_basis: Length,
+    pub flex_direction: FlexDirection,
     pub order: i32,
     pub gap: Length,
     pub row_gap: Length,
@@ -898,6 +905,7 @@ impl ComputedStyle {
             flex_grow: 0.0,
             flex_shrink: 1.0,
             flex_basis: Length::Auto,
+            flex_direction: FlexDirection::Row,
             order: 0,
             gap: Length::Px(0.0),
             row_gap: Length::Px(0.0),
@@ -1032,6 +1040,7 @@ enum PropertyValue {
     Opacity(f32),
     FlexGrow(f32),
     FlexShrink(f32),
+    FlexDirection(FlexDirection),
     Order(i32),
     String(String),
     BoxShadow(BoxShadow),
@@ -1055,9 +1064,15 @@ enum PropertyValue {
     TransitionDelays(Vec<f32>),
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Combinator {
+    Descendant,
+    Child,
+}
+
+#[derive(Debug, Clone, PartialEq)]
 pub struct Selector {
-    parts: SmallVec<[SimpleSelector; 3]>,
+    parts: SmallVec<[(SimpleSelector, Combinator); 3]>,
     specificity: u32,
 }
 
@@ -1067,6 +1082,21 @@ struct SimpleSelector {
     id: Option<CompactString>,
     classes: SmallVec<[CompactString; 3]>,
     pseudo_class: Option<CompactString>,
+    attributes: SmallVec<[AttrSelector; 2]>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct AttrSelector {
+    name: CompactString,
+    operator: AttrOp,
+    value: Option<CompactString>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum AttrOp {
+    Exists,
+    Equals,
+    Contains,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -1410,21 +1440,42 @@ impl Default for StyleEngine {
 
 impl Selector {
     fn parse(input: &str) -> Option<Self> {
-        let parts = input
-            .split_whitespace()
-            .filter_map(SimpleSelector::parse)
-            .collect::<SmallVec<_>>();
+        let mut parts: SmallVec<[(SimpleSelector, Combinator); 3]> = SmallVec::new();
+
+        // Split on whitespace, but handle `>` combinator properly
+        let mut remaining = input.trim();
+        let mut combinator = Combinator::Descendant;
+        while !remaining.is_empty() {
+            // Skip leading combinators
+            if remaining.starts_with('>') {
+                combinator = Combinator::Child;
+                remaining = remaining[1..].trim_start();
+                continue;
+            }
+            // Extract the next simple selector (up to whitespace, >, or end)
+            let end = remaining
+                .find(|c: char| c.is_whitespace() || c == '>')
+                .unwrap_or(remaining.len());
+            let raw = &remaining[..end];
+            remaining = remaining[end..].trim_start();
+            if raw.is_empty() {
+                continue;
+            }
+            let sel = SimpleSelector::parse(raw)?;
+            parts.push((sel, combinator));
+            combinator = Combinator::Descendant;
+        }
+
         if parts.is_empty() {
             return None;
         }
-
-        let specificity = parts.iter().map(SimpleSelector::specificity).sum();
+        let specificity = parts.iter().map(|(s, _)| s.specificity()).sum();
         Some(Self { parts, specificity })
     }
 
     fn matches<'arena>(&self, node: NodeRef<'arena>) -> bool {
-        let mut parts = self.parts.iter().rev();
-        let Some(rightmost) = parts.next() else {
+        let mut parts_iter = self.parts.iter().rev();
+        let Some((rightmost, _)) = parts_iter.next() else {
             return false;
         };
         if !rightmost.matches(node) {
@@ -1432,11 +1483,17 @@ impl Selector {
         }
 
         let mut current = node.parent();
-        for selector in parts {
-            let Some(found) = find_matching_ancestor(current, selector) else {
-                return false;
+        for (selector, combinator) in parts_iter {
+            let found = if *combinator == Combinator::Child {
+                // Direct parent only
+                current.and_then(|n| if selector.matches(n) { Some(n) } else { None })
+            } else {
+                find_matching_ancestor(current, selector)
             };
-            current = found.parent();
+            match found {
+                Some(f) => current = f.parent(),
+                None => return false,
+            }
         }
         true
     }
@@ -1451,9 +1508,51 @@ impl SimpleSelector {
                 id: None,
                 classes: SmallVec::new(),
                 pseudo_class: None,
+                attributes: SmallVec::new(),
             });
         }
 
+        // Handle attribute selectors [attr], [attr=value], [attr~=value]
+        let mut attributes: SmallVec<[AttrSelector; 2]> = SmallVec::new();
+        let mut base = raw;
+        while let Some(bracket_start) = base.find('[') {
+            let _tag_part = &base[..bracket_start];
+            let rest = &base[bracket_start..];
+            if let Some(bracket_end) = rest.find(']') {
+                let attr_raw = &rest[1..bracket_end];
+                base = &rest[bracket_end + 1..];
+                let attr = if let Some(eq_pos) = attr_raw.find('=') {
+                    let name = attr_raw[..eq_pos].trim();
+                    if name.ends_with('~') {
+                        let actual_name = name[..name.len() - 1].trim();
+                        let val = attr_raw[eq_pos + 1..].trim().trim_matches('"').trim_matches('\'');
+                        AttrSelector {
+                            name: CompactString::from(actual_name),
+                            operator: AttrOp::Contains,
+                            value: Some(CompactString::from(val)),
+                        }
+                    } else {
+                        let val = attr_raw[eq_pos + 1..].trim().trim_matches('"').trim_matches('\'');
+                        AttrSelector {
+                            name: CompactString::from(name),
+                            operator: AttrOp::Equals,
+                            value: Some(CompactString::from(val)),
+                        }
+                    }
+                } else {
+                    AttrSelector {
+                        name: CompactString::from(attr_raw.trim()),
+                        operator: AttrOp::Exists,
+                        value: None,
+                    }
+                };
+                attributes.push(attr);
+            } else {
+                break;
+            }
+        }
+
+        let raw = base;
         let mut tag = None;
         let mut id = None;
         let mut classes = SmallVec::new();
@@ -1495,12 +1594,15 @@ impl SimpleSelector {
             id,
             classes,
             pseudo_class,
+            attributes,
         })
     }
 
     fn specificity(&self) -> u32 {
         let id = u32::from(self.id.is_some());
-        let class = self.classes.len() as u32 + u32::from(self.pseudo_class.is_some());
+        let class = self.classes.len() as u32
+            + self.attributes.len() as u32
+            + u32::from(self.pseudo_class.is_some());
         let tag = u32::from(self.tag.is_some());
         (id << 16) | (class << 8) | tag
     }
@@ -1532,6 +1634,27 @@ impl SimpleSelector {
             .all(|class| classes.iter().any(|candidate| candidate == class))
         {
             return false;
+        }
+
+        // Attribute selectors: [attr], [attr=value], [attr~=value]
+        for attr_sel in &self.attributes {
+            let actual = element.attr(&attr_sel.name);
+            match attr_sel.operator {
+                AttrOp::Exists => {
+                    if actual.is_none() { return false; }
+                }
+                AttrOp::Equals => {
+                    if actual.as_deref() != attr_sel.value.as_deref() { return false; }
+                }
+                AttrOp::Contains => {
+                    if let Some(ref val) = attr_sel.value {
+                        let has = actual
+                            .map(|a| a.split_whitespace().any(|part| part == val.as_str()))
+                            .unwrap_or(false);
+                        if !has { return false; }
+                    }
+                }
+            }
         }
 
         if let Some(pseudo) = &self.pseudo_class {
@@ -2098,6 +2221,11 @@ fn parse_property_value(property: &str, value: &str) -> Option<PropertyValue> {
             .map(|v| PropertyValue::Opacity(v.clamp(0.0, 1.0))),
         "flex-grow" => value.parse::<f32>().ok().map(PropertyValue::FlexGrow),
         "flex-shrink" => value.parse::<f32>().ok().map(PropertyValue::FlexShrink),
+        "flex-direction" => match value.trim() {
+            "row" => Some(PropertyValue::FlexDirection(FlexDirection::Row)),
+            "column" => Some(PropertyValue::FlexDirection(FlexDirection::Column)),
+            _ => None,
+        },
         "order" => value.parse::<i32>().ok().map(PropertyValue::Order),
         "border" | "border-top" | "border-right" | "border-bottom" | "border-left" => {
             parse_border_shorthand(value)
@@ -2309,6 +2437,7 @@ fn apply_declarations(style: &mut ComputedStyle, declarations: &[Declaration]) {
             ("text-indent", PropertyValue::Length(value)) => style.text_indent = *value,
             ("flex-grow", PropertyValue::FlexGrow(value)) => style.flex_grow = *value,
             ("flex-shrink", PropertyValue::FlexShrink(value)) => style.flex_shrink = *value,
+            ("flex-direction", PropertyValue::FlexDirection(value)) => style.flex_direction = *value,
             ("order", PropertyValue::Order(value)) => style.order = *value,
             ("border", PropertyValue::Border(value)) => {
                 style.border.top = Border { width: value.top.width, style: value.top.style, color: value.top.color };

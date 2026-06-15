@@ -638,7 +638,6 @@ impl TrustEngine {
         let base_url = Url::parse(page_url).ok()?;
         let html_lower = html.to_ascii_lowercase();
 
-        // Find <link rel="icon" href="..."> or <link rel="shortcut icon" href="...">
         let mut pos = 0;
         let mut icon_url = None;
         while let Some(start) = html_lower[pos..].find("<link") {
@@ -648,7 +647,6 @@ impl TrustEngine {
             let tag_content = &html[start_abs..tag_end_abs];
             let tag_lower = &html_lower[start_abs..tag_end_abs];
 
-            // Check for rel="icon" or rel="shortcut icon"
             let has_icon_rel = tag_lower.contains("rel=\"icon\"")
                 || tag_lower.contains("rel='icon'")
                 || tag_lower.contains("rel=\"shortcut icon\"")
@@ -666,26 +664,28 @@ impl TrustEngine {
 
         let icon_url = icon_url?;
 
-        // Fetch the favicon image using the in-process network client
-        if let Some(ref mut network) = self.network.as_ref().cloned() {
-            let request = RequestContext {
-                url: icon_url,
-                top_level_url: Some(page_url.to_owned()),
-                resource_type: ResourceType::Image,
-                referrer_policy: None,
-            };
+        let mut network = self.network.as_ref()?.clone();
+        let request = RequestContext {
+            url: icon_url,
+            top_level_url: Some(page_url.to_owned()),
+            resource_type: ResourceType::Image,
+            referrer_policy: None,
+        };
 
-            // Use tokio runtime to perform async fetch synchronously
-            let handle = tokio::runtime::Handle::try_current().ok()?;
-            let response = handle.block_on(async { network.fetch(request).await }).ok()?;
+        // Spawn a dedicated thread with its own Tokio runtime to avoid nested runtime panics
+        let result = std::thread::spawn(move || {
+            let rt = tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+                .ok()?;
+            Some(rt.block_on(async { network.fetch(request).await }).ok()?)
+        })
+        .join()
+        .ok()??;
 
-            // Decode the image to 16x16 RGBA
-            let img = image::load_from_memory(&response.body).ok()?;
-            let rgba = img.resize_exact(16, 16, image::imageops::FilterType::Lanczos3).to_rgba8();
-            Some(rgba.into_raw())
-        } else {
-            None
-        }
+        let img = image::load_from_memory(&result.body).ok()?;
+        let rgba = img.resize_exact(16, 16, image::imageops::FilterType::Lanczos3).to_rgba8();
+        Some(rgba.into_raw())
     }
 }
 

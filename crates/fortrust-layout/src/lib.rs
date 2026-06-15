@@ -1,6 +1,6 @@
 use fortrust_core::ImageRegistry;
 use fortrust_dom::{NodeKind, NodeRef};
-use fortrust_style::{ComputedStyle, Display, Length, Overflow, StyleEngine};
+use fortrust_style::{ComputedStyle, Display, FlexDirection, Length, Overflow, StyleEngine};
 use std::cell::Cell;
 
 // ── Text measurement types ─────────────────────────────────────────────────────
@@ -652,6 +652,21 @@ fn layout_flex_children(
     containing_block: Option<&Rect>,
     line_height_px: f32,
 ) -> f32 {
+    match layout_box.style.flex_direction {
+        FlexDirection::Column => layout_flex_column(layout_box, positioned, content_x, content_y, content_width, containing_block, line_height_px),
+        FlexDirection::Row => layout_flex_row(layout_box, positioned, content_x, content_y, content_width, containing_block, line_height_px),
+    }
+}
+
+fn layout_flex_row(
+    layout_box: &mut LayoutBox,
+    positioned: &mut Vec<LayoutBox>,
+    content_x: f32,
+    content_y: f32,
+    content_width: f32,
+    containing_block: Option<&Rect>,
+    line_height_px: f32,
+) -> f32 {
     let mut cursor_x = content_x;
     let mut cursor_y = content_y;
     let mut row_height = 0.0f32;
@@ -684,6 +699,39 @@ fn layout_flex_children(
     }
 
     (max_y - content_y).max(row_height)
+}
+
+fn layout_flex_column(
+    layout_box: &mut LayoutBox,
+    positioned: &mut Vec<LayoutBox>,
+    content_x: f32,
+    content_y: f32,
+    content_width: f32,
+    containing_block: Option<&Rect>,
+    line_height_px: f32,
+) -> f32 {
+    let mut cursor_y = content_y;
+    let mut max_y = content_y;
+
+    for child in &mut layout_box.children {
+        let child_width = flex_item_width(child, content_width, line_height_px);
+        let final_width = child_width.max(0.0);
+
+        let _ = layout_block_box(
+            child,
+            positioned,
+            content_x,
+            cursor_y,
+            final_width,
+            containing_block,
+            line_height_px,
+        );
+
+        cursor_y += child.rect.height + child.margin.vertical();
+        max_y = max_y.max(cursor_y);
+    }
+
+    max_y - content_y
 }
 
 fn flex_item_width(layout_box: &LayoutBox, parent_width: f32, line_height_px: f32) -> f32 {

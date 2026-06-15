@@ -1334,6 +1334,18 @@ impl FortrustApp {
         self.navigate_input(url, HistoryMode::Replace);
     }
 
+    fn stop_loading(&mut self) {
+        if let Some(tab_id) = self.active_tab_id() {
+            if let Some(state) = self.tab_pages.get_mut(&tab_id) {
+                if let Some(req_id) = state.request_id.take() {
+                    self.request_owner.remove(&req_id);
+                }
+                state.loading_url = None;
+                state.request_id = None;
+            }
+        }
+    }
+
     fn can_go_back(&self) -> bool { self.active_state().is_some_and(TabPageState::can_go_back) }
     fn can_go_forward(&self) -> bool { self.active_state().is_some_and(TabPageState::can_go_forward) }
 
@@ -1786,6 +1798,10 @@ impl FortrustApp {
     // ── ADDRESS BAR ─────────────────────────────────────────
 
     fn render_address_bar(&mut self, ctx: &Context) {
+        let is_loading = self.active_tab_id().is_some_and(|id|
+            self.tab_pages.get(&id).and_then(|s| s.loading_url.as_deref()).is_some()
+        );
+
         egui::TopBottomPanel::top("fortrust_address_bar")
             .exact_height(37.0)
             .frame(Frame {
@@ -1822,20 +1838,32 @@ impl FortrustApp {
                     icons::paint_forward_icon(ui.painter(), fwd_resp.rect, fwd_color);
                     if fwd_resp.clicked() && fwd_enabled { self.go_forward(); }
 
-                    // Reload button with SVG
-                    let reload_resp = ui.add(
-                        egui::Button::new("")
-                            .fill(Color32::TRANSPARENT)
-                            .stroke(Stroke::NONE)
-                            .corner_radius(5)
-                            .min_size(Vec2::new(28.0, 28.0)),
-                    );
-                    icons::paint_reload_icon(ui.painter(), reload_resp.rect, self.theme.text_secondary);
-                    if reload_resp.clicked() { self.reload(); }
+                    // Reload/Stop button — toggles based on loading state (Chrome-like)
+                    if is_loading {
+                        let stop_resp = ui.add(
+                            egui::Button::new("")
+                                .fill(Color32::TRANSPARENT)
+                                .stroke(Stroke::NONE)
+                                .corner_radius(5)
+                                .min_size(Vec2::new(28.0, 28.0)),
+                        );
+                        icons::paint_close_icon(ui.painter(), stop_resp.rect, self.theme.text_secondary);
+                        if stop_resp.clicked() { self.stop_loading(); }
+                    } else {
+                        let reload_resp = ui.add(
+                            egui::Button::new("")
+                                .fill(Color32::TRANSPARENT)
+                                .stroke(Stroke::NONE)
+                                .corner_radius(5)
+                                .min_size(Vec2::new(28.0, 28.0)),
+                        );
+                        icons::paint_reload_icon(ui.painter(), reload_resp.rect, self.theme.text_secondary);
+                        if reload_resp.clicked() { self.reload(); }
+                    }
 
                     ui.add_space(4.0);
 
-                    // Address pill
+                    // Address pill — pass page title for display when not focused
                     let history_suggestions = self.history_suggestions();
                     if let Some(url) = self.omnibox.render(ui, &self.theme, &history_suggestions) {
                         self.navigate_input(url, HistoryMode::Push);

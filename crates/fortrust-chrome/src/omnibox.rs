@@ -107,7 +107,6 @@ impl OmniboxState {
             theme.border_strong
         };
 
-        // Determine suggestion dropdown position based on address bar rect
         let pill_frame = egui::Frame {
             fill: theme.surface_deepest,
             corner_radius: CornerRadius::same(25),
@@ -169,7 +168,6 @@ impl OmniboxState {
                     let arrow_up = ui.input(|i| i.key_pressed(egui::Key::ArrowUp));
                     let esc = ui.input(|i| i.key_pressed(egui::Key::Escape));
 
-                    // Handle keyboard navigation
                     if arrow_down && self.show_suggestions {
                         self.selected_suggestion = (self.selected_suggestion + 1).min(self.suggestions.len() as i32 - 1);
                         ui.ctx().request_repaint();
@@ -183,7 +181,6 @@ impl OmniboxState {
                         self.focused = false;
                     }
 
-                    // Enter selects suggestion or navigates
                     if enter_pressed {
                         if self.show_suggestions && self.selected_suggestion >= 0 && (self.selected_suggestion as usize) < self.suggestions.len() {
                             let s = &self.suggestions[self.selected_suggestion as usize];
@@ -200,7 +197,6 @@ impl OmniboxState {
 
                     self.focused = resp.has_focus();
 
-                    // Update suggestions when text changes
                     if resp.changed() {
                         self.update_suggestions(history_entries);
                     }
