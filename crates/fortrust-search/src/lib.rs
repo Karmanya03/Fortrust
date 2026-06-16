@@ -1,3 +1,5 @@
+pub mod local_index;
+
 use std::collections::{HashMap, VecDeque};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
@@ -10,6 +12,7 @@ pub struct FortrustSearch {
     client: reqwest::Client,
     pub config: SearchConfig,
     cache: Option<Arc<SearchCache>>,
+    pub local_index: Option<local_index::LocalSearchIndex>,
 }
 
 pub struct SearchConfig {
@@ -178,6 +181,10 @@ impl SearchCache {
 
 impl FortrustSearch {
     pub async fn new(config: SearchConfig) -> Self {
+        Self::with_local_index(config, None).await
+    }
+
+    pub async fn with_local_index(config: SearchConfig, local_index: Option<local_index::LocalSearchIndex>) -> Self {
         let client = reqwest::Client::builder()
             .user_agent("FortrustSearch/1.0")
             .timeout(std::time::Duration::from_secs(5))
@@ -193,7 +200,7 @@ impl FortrustSearch {
         } else {
             None
         };
-        Self { client, config, cache }
+        Self { client, config, cache, local_index }
     }
 
     /// Fetch autocomplete suggestions for a partial query using DuckDuckGo's
@@ -315,6 +322,24 @@ impl FortrustSearch {
 }
 
 impl FortrustSearch {
+    pub fn search_local(&self, query: &str, limit: usize) -> Vec<local_index::IndexedDocument> {
+        self.local_index.as_ref()
+            .map(|idx| idx.search(query, limit))
+            .unwrap_or_default()
+    }
+
+    pub fn index_page(&self, url: &str, title: &str, content: &str, visit_time: chrono::DateTime<chrono::Utc>) {
+        if let Some(ref idx) = self.local_index {
+            idx.index_page(url, title, content, visit_time);
+        }
+    }
+
+    pub fn delete_from_index(&self, url: &str) {
+        if let Some(ref idx) = self.local_index {
+            idx.delete_page(url);
+        }
+    }
+
     fn cache_key(&self, query: &str, page: usize) -> String {
         let backends = self
             .config

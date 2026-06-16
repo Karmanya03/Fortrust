@@ -115,6 +115,12 @@ pub fn paint_search_icon(painter: &Painter, center: Pos2, size: f32, color: Colo
     draw_path(painter, &[s(r, 9.5, 9.5), s(r, 12.0, 12.0)], color, 1.6);
 }
 
+pub fn paint_search_pages_icon(painter: &Painter, rect: Rect, color: Color32) {
+    let r = center_rect(rect, Vec2::new(14.0, 14.0));
+    painter.circle_stroke(s(r, 5.0, 5.0), 3.8, Stroke::new(1.5, color));
+    draw_path(painter, &[s(r, 8.0, 8.0), s(r, 12.0, 12.0)], color, 1.5);
+}
+
 #[allow(dead_code)]
 pub fn paint_shield_icon(painter: &Painter, center: Pos2, size: f32, color: Color32) {
     let r = Rect::from_center_size(center, Vec2::new(size, size));

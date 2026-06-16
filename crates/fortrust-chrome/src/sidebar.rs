@@ -26,6 +26,7 @@ pub enum SidebarSection {
     #[default]
     Setup,
     Feeds,
+    Search,
     AI,
     Downloads,
     Bookmarks,
@@ -38,6 +39,7 @@ impl SidebarSection {
         match self {
             Self::Setup => "Sidebar Setup",
             Self::Feeds => "Feeds",
+            Self::Search => "Search Pages",
             Self::AI => "AI Assistant",
             Self::Downloads => "Downloads",
             Self::Bookmarks => "Bookmarks",
@@ -174,6 +176,13 @@ impl SidebarState {
         icons::paint_feeds_icon(ui.painter(), icon_rect, if is_open && self.section == SidebarSection::Feeds { active_color } else { icon_color });
 
         y += 2.0;
+        if Self::rail_btn(ui, theme, rail_left, &mut y, is_open && self.section == SidebarSection::Search) {
+            self.handle_click(SidebarSection::Search, anim);
+        }
+        let icon_rect = Rect::from_min_size(Pos2::new(rail_left + 3.0, y - 24.0), Vec2::new(24.0, 24.0));
+        icons::paint_search_pages_icon(ui.painter(), icon_rect, if is_open && self.section == SidebarSection::Search { active_color } else { icon_color });
+
+        y += 2.0;
         if Self::rail_btn(ui, theme, rail_left, &mut y, is_open && self.section == SidebarSection::AI) {
             self.handle_click(SidebarSection::AI, anim);
         }
@@ -240,7 +249,7 @@ impl SidebarState {
     }
 
     #[allow(clippy::too_many_arguments)]
-    pub fn render_overlay(&mut self, ui: &mut egui::Ui, theme: &FortrustTheme, anim: &mut SidebarAnimation, config: &mut BrowserConfig, storage: Option<&StorageDatabase>, downloads: &[crate::download::DownloadEntry], workspaces: &mut WorkspaceManager) -> Option<String> {
+    pub fn render_overlay(&mut self, ui: &mut egui::Ui, theme: &FortrustTheme, anim: &mut SidebarAnimation, config: &mut BrowserConfig, storage: Option<&StorageDatabase>, downloads: &[crate::download::DownloadEntry], workspaces: &mut WorkspaceManager, local_search_query: &mut String, local_search_results: &[fortrust_search::local_index::IndexedDocument]) -> Option<String> {
         let offset = anim.current_offset();
         if offset < 1.0 { return None; }
 
@@ -354,6 +363,15 @@ impl SidebarState {
                         self.downloads_enabled = icon_check_row_ui(ui, theme, "Downloads", self.downloads_enabled, sx, sw, icons::paint_downloads_icon);
                         self.extensions_enabled = icon_check_row_ui(ui, theme, "Extensions", self.extensions_enabled, sx, sw, icons::paint_puzzle_icon);
                         self.settings_enabled = icon_check_row_ui(ui, theme, "Settings", self.settings_enabled, sx, sw, icons::paint_gear_icon);
+                        let settings_nav_rect = Rect::from_min_size(Pos2::new(sx, ui.cursor().min.y - 4.0), Vec2::new(sw, 20.0));
+                        if ui.rect_contains_pointer(settings_nav_rect) {
+                            ui.painter().rect_filled(settings_nav_rect, CornerRadius::same(4), Color32::from_white_alpha(4));
+                        }
+                        ui.painter().text(Pos2::new(sx + 22.0, settings_nav_rect.center().y), egui::Align2::LEFT_CENTER, "Open full settings page", egui::FontId::proportional(11.0), theme.accent_primary);
+                        if ui.allocate_rect(settings_nav_rect, egui::Sense::click()).clicked() {
+                            ui.memory_mut(|mem| mem.data.insert_temp::<String>(egui::Id::new("sidebar_navigate"), "fortrust://settings".to_owned()));
+                        }
+                        ui.allocate_space(Vec2::new(sw, 24.0));
 
                         section_label_ui(ui, theme, "Sidebar Extensions", sx, sw);
                         add_ext_btn_ui(ui, theme, sx, sw);
@@ -362,7 +380,13 @@ impl SidebarState {
                         self.show_sidebar = toggle_row_ui(ui, theme, "Show sidebar", self.show_sidebar, sx, sw);
                         self.auto_hide = toggle_row_ui(ui, theme, "Automatically hide sidebar", self.auto_hide, sx, sw);
                         self.notifications_enabled = toggle_row_ui(ui, theme, "Enable notifications for messengers", self.notifications_enabled, sx, sw);
-                        None
+                        ui.memory_mut(|mem| {
+                            let val = mem.data.get_temp::<String>(egui::Id::new("sidebar_navigate"));
+                            if val.is_some() {
+                                mem.data.remove::<String>(egui::Id::new("sidebar_navigate"));
+                            }
+                            val
+                        })
                     }
                     SidebarSection::Feeds => {
                         section_label_ui(ui, theme, "Feed Sources", sx, sw);
@@ -372,6 +396,50 @@ impl SidebarState {
                         ui.painter().text(Pos2::new(sx, ui.cursor().min.y + 4.0), egui::Align2::LEFT_TOP, "No feeds configured", egui::FontId::proportional(12.0), theme.text_muted);
                         ui.allocate_space(Vec2::new(sw, 24.0));
                         None
+                    }
+                    SidebarSection::Search => {
+                        let mut clicked_url: Option<String> = None;
+                        let input_rect = Rect::from_min_size(Pos2::new(sx, ui.cursor().min.y), Vec2::new(sw, 26.0));
+                        ui.painter().rect_filled(input_rect, CornerRadius::same(6), Color32::from_rgba_unmultiplied(255, 255, 255, 10));
+                        let _ = ui.new_child(egui::UiBuilder::new().max_rect(input_rect).layout(egui::Layout::left_to_right(egui::Align::Center)))
+                            .add(egui::TextEdit::singleline(local_search_query)
+                                .hint_text("Search indexed pages...")
+                                .frame(false)
+                                .desired_width(sw - 12.0)
+                                .font(egui::FontId::proportional(11.0))
+                                .text_color(theme.text_secondary));
+                        ui.allocate_space(Vec2::new(sw, 30.0));
+
+                        for doc in local_search_results {
+                            let y = ui.cursor().min.y;
+                            let rect = Rect::from_min_size(Pos2::new(sx, y), Vec2::new(sw, 52.0));
+                            let hovered = ui.rect_contains_pointer(rect);
+                            if hovered {
+                                ui.painter().rect_filled(rect, CornerRadius::same(4), Color32::from_white_alpha(6));
+                            }
+                            let icon_rect = Rect::from_min_size(Pos2::new(sx + 2.0, y + 5.0), Vec2::new(14.0, 14.0));
+                            icons::paint_search_pages_icon(ui.painter(), icon_rect, if hovered { theme.text_primary } else { theme.text_secondary });
+                            let display_t = if doc.title.len() > 30 { format!("{}...", &doc.title[..27]) } else { doc.title.clone() };
+                            ui.painter().text(Pos2::new(sx + 22.0, y + 2.0), egui::Align2::LEFT_TOP, &display_t, egui::FontId::proportional(12.0), theme.text_secondary);
+                            let url_display = if doc.url.len() > 36 { format!("{}...", &doc.url[..33]) } else { doc.url.clone() };
+                            ui.painter().text(Pos2::new(sx + 22.0, y + 16.0), egui::Align2::LEFT_TOP, &url_display, egui::FontId::proportional(9.5), theme.text_muted);
+                            let snippet = if doc.content_snippet.len() > 60 { format!("{}...", &doc.content_snippet[..57]) } else { doc.content_snippet.clone() };
+                            ui.painter().text(Pos2::new(sx + 22.0, y + 30.0), egui::Align2::LEFT_TOP, &snippet, egui::FontId::proportional(9.5), Color32::from_rgba_unmultiplied(150, 150, 150, 255));
+                            if ui.allocate_rect(rect, egui::Sense::click()).clicked() {
+                                clicked_url = Some(doc.url.clone());
+                            }
+                            ui.allocate_space(Vec2::new(sw, 56.0));
+                        }
+                        if local_search_results.is_empty() && !local_search_query.is_empty() {
+                            let cy = ui.cursor().min.y;
+                            ui.painter().text(Pos2::new(sx, cy + 4.0), egui::Align2::LEFT_TOP, "No matching pages found in the local index.", egui::FontId::proportional(12.0), theme.text_muted);
+                            ui.allocate_space(Vec2::new(sw, 30.0));
+                        } else if local_search_results.is_empty() {
+                            let cy = ui.cursor().min.y;
+                            ui.painter().text(Pos2::new(sx, cy + 4.0), egui::Align2::LEFT_TOP, "Type a query above to search your visited pages.", egui::FontId::proportional(12.0), theme.text_muted);
+                            ui.allocate_space(Vec2::new(sw, 30.0));
+                        }
+                        clicked_url
                     }
                     SidebarSection::AI => {
                         section_label_ui(ui, theme, "AI Providers", sx, sw);
@@ -565,7 +633,27 @@ impl SidebarState {
                         None
                     }
                     SidebarSection::History => {
-                        let history: Vec<fortrust_storage::HistoryEntry> = storage.and_then(|s| s.history.recently_visited(100).ok()).unwrap_or_default();
+                        let search_query = ui.memory_mut(|mem| {
+                            mem.data.get_temp::<String>(egui::Id::new("sidebar_history_search"))
+                                .unwrap_or_default()
+                        });
+                        let mut new_query = search_query.clone();
+                        let input_rect = Rect::from_min_size(Pos2::new(sx, ui.cursor().min.y), Vec2::new(sw, 26.0));
+                        ui.painter().rect_filled(input_rect, CornerRadius::same(6), Color32::from_rgba_unmultiplied(255, 255, 255, 10));
+                        let _ = ui.new_child(egui::UiBuilder::new().max_rect(input_rect).layout(egui::Layout::left_to_right(egui::Align::Center)))
+                            .add(egui::TextEdit::singleline(&mut new_query)
+                                .hint_text("Search history...")
+                                .frame(false)
+                                .desired_width(sw - 12.0)
+                                .font(egui::FontId::proportional(11.0))
+                                .text_color(theme.text_secondary));
+                        ui.allocate_space(Vec2::new(sw, 30.0));
+                        ui.memory_mut(|mem| {
+                            mem.data.insert_temp::<String>(egui::Id::new("sidebar_history_search"), new_query.clone());
+                        });
+
+                        let hist_query = fortrust_storage::HistoryQuery::new(new_query.trim()).with_limit(100);
+                        let history: Vec<fortrust_storage::HistoryEntry> = storage.and_then(|s| s.history.search(&hist_query).ok()).unwrap_or_default();
                         let mut clicked_url: Option<String> = None;
                         for entry in &history {
                             let y = ui.cursor().min.y;

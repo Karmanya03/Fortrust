@@ -911,6 +911,7 @@ impl Canvas2D {
         }
     }
 
+    #[allow(clippy::too_many_arguments)]
     fn paint_text_with_shadow(&mut self, text: &str, x: f32, y: f32, _color: [u8; 4], font_size: f32, scale: f32, font_family: &str) {
         let (op, has_shadow, shad, spread, sox, soy, ga) = {
             let s = self.state();
@@ -1117,6 +1118,7 @@ impl Canvas2D {
         self.path.push(PathOp::Arc(cx, cy, r, start_angle, end_angle, anticlockwise));
     }
 
+    #[allow(clippy::too_many_arguments)]
     pub fn ellipse(&mut self, cx: f32, cy: f32, rx: f32, ry: f32, rotation: f32, start_angle: f32, end_angle: f32, anticlockwise: bool) {
         if rx <= 0.0 || ry <= 0.0 { return; }
         if self.subpath_empty {
@@ -1626,6 +1628,7 @@ impl Canvas2D {
         }
     }
 
+    #[allow(clippy::too_many_arguments)]
     fn draw_cap(pixels: &mut [u8], w: usize, h: usize, cx: f32, cy: f32, _angle: f32, half: f32, rgba: [u8; 4], cap: LineCap, op: CompositeOp, clip: &[bool], width: usize) {
         match cap {
             LineCap::Round => {
@@ -1779,6 +1782,7 @@ impl Canvas2D {
         }
     }
 
+    #[allow(clippy::too_many_arguments)]
     fn draw_thick_line(
         pixels: &mut [u8], w: usize, h: usize,
         x1: f32, y1: f32, x2: f32, y2: f32,
@@ -1840,6 +1844,7 @@ impl Canvas2D {
         }
     }
 
+    #[allow(clippy::too_many_arguments)]
     fn draw_join(
         pixels: &mut [u8], w: usize, h: usize,
         jx: f32, jy: f32, ux1: f32, uy1: f32, ux2: f32, uy2: f32,

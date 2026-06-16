@@ -1523,8 +1523,8 @@ impl SimpleSelector {
                 base = &rest[bracket_end + 1..];
                 let attr = if let Some(eq_pos) = attr_raw.find('=') {
                     let name = attr_raw[..eq_pos].trim();
-                    if name.ends_with('~') {
-                        let actual_name = name[..name.len() - 1].trim();
+                    if let Some(stripped) = name.strip_suffix('~') {
+                        let actual_name = stripped.trim();
                         let val = attr_raw[eq_pos + 1..].trim().trim_matches('"').trim_matches('\'');
                         AttrSelector {
                             name: CompactString::from(actual_name),

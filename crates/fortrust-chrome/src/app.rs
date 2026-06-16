@@ -83,6 +83,11 @@ pub struct FortrustApp {
     suggest_last_text: String,
     suggest_pending_id: Option<u64>,
 
+    // Local search state
+    local_search_query: String,
+    local_search_results: Vec<fortrust_search::local_index::IndexedDocument>,
+    local_search_pending_id: Option<u64>,
+
     // Animation tick state
     anim_tick_pending_id: Option<u64>,
     last_anim_tick: std::time::Instant,
@@ -126,6 +131,7 @@ struct TabPageState {
     renderer_frame: Option<egui::TextureHandle>,
     search_query: Option<String>,
     search_results: Option<Vec<SearchResult>>,
+    search_page: usize,
     favicon_data: Option<Vec<u8>>,
     scroll_x: f64,
     scroll_y: f64,
@@ -184,7 +190,7 @@ impl TabPageState {
         self.search_results = None;
     }
 
-    fn begin_search(&mut self, url: String, query: String, request_id: u64) {
+    fn begin_search(&mut self, url: String, query: String, page: usize, request_id: u64) {
         self.page = None;
         self.load_error = None;
         self.loading_url = Some(url);
@@ -192,6 +198,7 @@ impl TabPageState {
         self.renderer_frame = None;
         self.search_query = Some(query);
         self.search_results = None;
+        self.search_page = page;
     }
 
     fn finish_load(&mut self, request_id: u64, page: EnginePage) -> bool {
@@ -215,13 +222,14 @@ impl TabPageState {
         true
     }
 
-    fn finish_search(&mut self, request_id: u64, results: Vec<SearchResult>) -> bool {
+    fn finish_search(&mut self, request_id: u64, page: usize, results: Vec<SearchResult>) -> bool {
         if self.request_id != Some(request_id) { return false; }
         self.page = None;
         self.load_error = None;
         self.loading_url = None;
         self.request_id = None;
         self.renderer_frame = None;
+        self.search_page = page;
         self.search_results = Some(results);
         true
     }
@@ -259,24 +267,30 @@ struct TabRendererEntry {
     child: std::process::Child,
 }
 
+#[allow(dead_code)]
 enum EngineCommand {
     Load { request_id: u64, url: String, viewport: Viewport, cosmetic_css: Vec<String>, fingerprint_guard: Option<FingerprintGuard> },
-    Search { request_id: u64, query: String },
+    Search { request_id: u64, query: String, page: usize },
     Suggest { request_id: u64, query: String },
     AnimationTick { request_id: u64, dt: f32 },
+    IndexPage { request_id: u64, url: String, title: String, content: String },
+    SearchLocal { request_id: u64, query: String, limit: usize },
 }
 
+#[allow(dead_code)]
 enum EngineEvent {
     Loaded { request_id: u64, page: Box<EnginePage> },
-    SearchLoaded { request_id: u64, query: String, results: Vec<SearchResult> },
+    SearchLoaded { request_id: u64, query: String, page: usize, results: Vec<SearchResult> },
     SuggestLoaded { request_id: u64, suggestions: Vec<String> },
     AnimationFrame { request_id: u64, page: Option<Box<EnginePage>> },
     Failed { request_id: u64, url: String, error: String },
     RendererMsg { tab_id: TabId, msg: fortrust_ipc::RendererToBrowser },
+    Indexed { request_id: u64, url: String },
+    SearchLocalLoaded { request_id: u64, query: String, results: Vec<fortrust_search::local_index::IndexedDocument> },
 }
 
 impl EngineWorker {
-    fn spawn(privacy: PrivacyConfig, local_storage: Option<fortrust_storage::LocalStorageStore>) -> Self {
+    fn spawn(privacy: PrivacyConfig, local_storage: Option<fortrust_storage::LocalStorageStore>, search_dir: Option<std::path::PathBuf>) -> Self {
         let (command_sender, command_receiver) = mpsc::channel();
         let (event_sender, event_receiver) = mpsc::channel();
         let event_sender_for_worker = event_sender.clone();
@@ -321,7 +335,12 @@ impl EngineWorker {
             } else {
                 engine_builder
             };
-            let search = runtime.block_on(FortrustSearch::new(SearchConfig::default()));
+
+            let local_index = search_dir.map(|dir| {
+                let idx_path = dir.join("search_index");
+                fortrust_search::local_index::LocalSearchIndex::open_or_create(idx_path)
+            });
+            let search = runtime.block_on(FortrustSearch::with_local_index(SearchConfig::default(), local_index));
 
             while let Ok(command) = command_receiver.recv() {
                 match command {
@@ -334,11 +353,12 @@ impl EngineWorker {
                         };
                         let _ = event_sender.send(event);
                     }
-                    EngineCommand::Search { request_id, query } => {
-                        let results = runtime.block_on(search.search(&query, 1));
+                    EngineCommand::Search { request_id, query, page } => {
+                        let results = runtime.block_on(search.search(&query, page));
                         let _ = event_sender.send(EngineEvent::SearchLoaded {
                             request_id,
                             query,
+                            page,
                             results,
                         });
                     }
@@ -354,6 +374,18 @@ impl EngineWorker {
                         let _ = event_sender.send(EngineEvent::AnimationFrame {
                             request_id,
                             page: page.map(Box::new),
+                        });
+                    }
+                    EngineCommand::IndexPage { request_id, url, title, content } => {
+                        search.index_page(&url, &title, &content, chrono::Utc::now());
+                        let _ = event_sender.send(EngineEvent::Indexed { request_id, url });
+                    }
+                    EngineCommand::SearchLocal { request_id, query, limit } => {
+                        let results = search.search_local(&query, limit);
+                        let _ = event_sender.send(EngineEvent::SearchLocalLoaded {
+                            request_id,
+                            query,
+                            results,
                         });
                     }
                 }
@@ -428,10 +460,17 @@ impl EngineWorker {
         }
     }
 
-    fn search(&mut self, query: String) -> u64 {
+    fn search(&mut self, query: String, page: usize) -> u64 {
         let request_id = self.next_request_id;
         self.next_request_id = self.next_request_id.saturating_add(1);
-        let _ = self.sender.send(EngineCommand::Search { request_id, query });
+        let _ = self.sender.send(EngineCommand::Search { request_id, query, page });
+        request_id
+    }
+
+    fn search_local(&mut self, query: String, limit: usize) -> u64 {
+        let request_id = self.next_request_id;
+        self.next_request_id = self.next_request_id.saturating_add(1);
+        let _ = self.sender.send(EngineCommand::SearchLocal { request_id, query, limit });
         request_id
     }
 }
@@ -751,7 +790,7 @@ fn drain_failed_worker(
             EngineCommand::Load { request_id, url, .. } => {
                 let _ = event_sender.send(EngineEvent::Failed { request_id, url, error: error.clone() });
             }
-            EngineCommand::Search { request_id, query } => {
+            EngineCommand::Search { request_id, query, .. } => {
                 let _ = event_sender.send(EngineEvent::Failed {
                     request_id,
                     url: private_search_url(&query),
@@ -768,6 +807,16 @@ fn drain_failed_worker(
                 let _ = event_sender.send(EngineEvent::AnimationFrame {
                     request_id,
                     page: None,
+                });
+            }
+            EngineCommand::IndexPage { request_id, url, .. } => {
+                let _ = event_sender.send(EngineEvent::Indexed { request_id, url });
+            }
+            EngineCommand::SearchLocal { request_id, query, .. } => {
+                let _ = event_sender.send(EngineEvent::SearchLocalLoaded {
+                    request_id,
+                    query,
+                    results: Vec::new(),
                 });
             }
         }
@@ -808,11 +857,13 @@ impl FortrustApp {
         // Extract a LocalStorageStore from the durable database for JS persistence.
         let ls_store = storage.as_ref().and_then(|s| s.local_storage_store().ok());
 
+        let search_dir = Self::fortrust_data_dir().map(std::path::PathBuf::from);
+
         let mut app = Self {
             privacy: PrivacyEngine::new(config.privacy.clone()),
             privacy_filter,
             internal_engine: TrustEngine::offline(),
-            engine_worker: EngineWorker::spawn(config.privacy.clone(), ls_store),
+            engine_worker: EngineWorker::spawn(config.privacy.clone(), ls_store, search_dir),
             storage,
             config: config.clone(),
             tabs,
@@ -852,6 +903,10 @@ impl FortrustApp {
             suggest_debounce_start: None,
             suggest_last_text: String::new(),
             suggest_pending_id: None,
+
+            local_search_query: String::new(),
+            local_search_results: Vec::new(),
+            local_search_pending_id: None,
 
             anim_tick_pending_id: None,
             last_anim_tick: std::time::Instant::now(),
@@ -1101,7 +1156,8 @@ impl FortrustApp {
     fn rebuild_privacy_pipeline(&mut self) {
         self.privacy = PrivacyEngine::new(self.config.privacy.clone());
         let ls = self.local_storage_store();
-        self.engine_worker = EngineWorker::spawn(self.config.privacy.clone(), ls);
+        let search_dir = Self::fortrust_data_dir().map(std::path::PathBuf::from);
+        self.engine_worker = EngineWorker::spawn(self.config.privacy.clone(), ls, search_dir);
     }
 
     /// Handle an AI quick action triggered from the sidebar.
@@ -1158,16 +1214,23 @@ impl FortrustApp {
         }
     }
 
-    fn open_storage() -> Option<StorageDatabase> {
+    fn fortrust_data_dir() -> Option<String> {
         let base = if cfg!(target_os = "windows") {
             std::env::var("APPDATA").ok().map(|p| format!("{p}\\Fortrust"))
         } else {
             std::env::var("HOME").ok().map(|p| format!("{p}/.local/share/fortrust"))
         };
+        if let Some(ref dir) = base {
+            let _ = std::fs::create_dir_all(dir);
+        }
+        base
+    }
+
+    fn open_storage() -> Option<StorageDatabase> {
+        let base = Self::fortrust_data_dir();
         match base {
             Some(dir) => {
                 let path = format!("{dir}\\storage.redb");
-                let _ = std::fs::create_dir_all(&dir);
                 Some(StorageDatabase::open_or_default(path))
             }
             None => { tracing::warn!("No data directory found"); None }
@@ -1282,10 +1345,10 @@ impl FortrustApp {
             HistoryMode::Replace => state.replace_history(url.clone()),
         }
 
-        if let Some(query) = search_query_from_url(&url) {
-            let request_id = self.engine_worker.search(query.clone());
+        if let Some((query, page)) = search_query_from_url(&url) {
+            let request_id = self.engine_worker.search(query.clone(), page);
             self.request_owner.insert(request_id, tab_id);
-            self.tab_state_mut(tab_id).begin_search(url, query, request_id);
+            self.tab_state_mut(tab_id).begin_search(url, query, page, request_id);
             return;
         }
 
@@ -1335,14 +1398,14 @@ impl FortrustApp {
     }
 
     fn stop_loading(&mut self) {
-        if let Some(tab_id) = self.active_tab_id() {
-            if let Some(state) = self.tab_pages.get_mut(&tab_id) {
-                if let Some(req_id) = state.request_id.take() {
-                    self.request_owner.remove(&req_id);
-                }
-                state.loading_url = None;
-                state.request_id = None;
+        if let Some(tab_id) = self.active_tab_id()
+            && let Some(state) = self.tab_pages.get_mut(&tab_id)
+        {
+            if let Some(req_id) = state.request_id.take() {
+                self.request_owner.remove(&req_id);
             }
+            state.loading_url = None;
+            state.request_id = None;
         }
     }
 
@@ -1401,18 +1464,32 @@ impl FortrustApp {
                         + (page.security.display_commands as f32 * 0.01);
                     let title = page.title.clone();
                     let url = page.url.clone();
+                    let text_content = page.rendered.text_content.clone();
                     let accepted = self.tab_state_mut(tab_id).finish_load(request_id, page);
                     if accepted {
                         self.tabs.navigate_tab(tab_id, url.clone(), title.clone());
                         if self.active_tab_id() == Some(tab_id) { self.omnibox.text = url.clone(); }
-                        if !url.starts_with("fortrust://") && !url.starts_with("about:")
-                            && let Some(ref storage) = self.storage
-                        {
-                            let entry = HistoryEntry {
-                                url: url.clone(), title, visit_time: Utc::now(),
-                                visit_count: 1, typed_count: 0, is_bookmarked: false,
-                            };
-                            let _ = storage.history.store(&entry);
+                        let is_indexable = !url.starts_with("fortrust://") && !url.starts_with("about:")
+                            && !url.starts_with("https://duckduckgo.com/");
+                        if is_indexable {
+                            // Index the page content for local full-text search
+                            let index_req_id = self.engine_worker.next_request_id;
+                            self.engine_worker.next_request_id = index_req_id.saturating_add(1);
+                            let _ = self.engine_worker.sender.send(EngineCommand::IndexPage {
+                                request_id: index_req_id,
+                                url: url.clone(),
+                                title: title.clone(),
+                                content: text_content,
+                            });
+
+                            // Store in history
+                            if let Some(ref storage) = self.storage {
+                                let entry = HistoryEntry {
+                                    url: url.clone(), title, visit_time: Utc::now(),
+                                    visit_count: 1, typed_count: 0, is_bookmarked: false,
+                                };
+                                let _ = storage.history.store(&entry);
+                            }
                         }
                         self.total_memory_mb = memory_estimate;
 
@@ -1423,12 +1500,12 @@ impl FortrustApp {
                         }
                     }
                 }
-                EngineEvent::SearchLoaded { request_id, query, results } => {
+                EngineEvent::SearchLoaded { request_id, query, page, results } => {
                     let Some(tab_id) = self.request_owner.remove(&request_id) else { continue; };
                     let count = results.len();
-                    let accepted = self.tab_state_mut(tab_id).finish_search(request_id, results);
+                    let accepted = self.tab_state_mut(tab_id).finish_search(request_id, page, results);
                     if accepted {
-                        let url = private_search_url(&query);
+                        let url = private_search_url_with_page(&query, page);
                         self.tabs.navigate_tab(tab_id, url.clone(), format!("Search: {query}"));
                         if self.active_tab_id() == Some(tab_id) { self.omnibox.text = url; }
                         self.total_memory_mb = (count as f32 * 0.04).max(0.15);
@@ -1471,6 +1548,15 @@ impl FortrustApp {
                 }
                 EngineEvent::RendererMsg { tab_id, msg } => {
                     self.apply_renderer_message(ctx, tab_id, msg);
+                }
+                EngineEvent::Indexed { .. } => {}
+                EngineEvent::SearchLocalLoaded { request_id, query, results } => {
+                    if self.local_search_pending_id == Some(request_id) {
+                        self.local_search_results = results;
+                        self.local_search_pending_id = None;
+                        // Keep the query in sync
+                        self.local_search_query = query;
+                    }
                 }
             }
         }
@@ -2015,8 +2101,13 @@ impl FortrustApp {
                 let old_theme = self.config.ui.theme.clone();
                 let old_privacy = self.config.privacy.clone();
                 let downloads_entries = self.download_manager.all_downloads();
-                if let Some(url) = self.sidebar_state.render_overlay(ui, &self.theme, &mut self.sidebar_anim, &mut self.config, self.storage.as_ref(), &downloads_entries, &mut self.workspaces) {
+                let prev_query = self.local_search_query.clone();
+                if let Some(url) = self.sidebar_state.render_overlay(ui, &self.theme, &mut self.sidebar_anim, &mut self.config, self.storage.as_ref(), &downloads_entries, &mut self.workspaces, &mut self.local_search_query, &self.local_search_results) {
                     navigate = Some(url);
+                }
+                // Trigger local search when query changes
+                if self.local_search_query != prev_query && !self.local_search_query.is_empty() && self.local_search_pending_id.is_none() {
+                    self.local_search_pending_id = Some(self.engine_worker.search_local(self.local_search_query.clone(), 20));
                 }
                 // Process pending download actions from sidebar
                 if let Some((dl_id, action)) = self.sidebar_state.pending_download_cmd.take() {
@@ -2067,12 +2158,16 @@ impl FortrustApp {
         let query = self.tab_pages
             .get(&tab_id)
             .and_then(|state| state.search_query.clone())
-            .or_else(|| search_query_from_url(url))
+            .or_else(|| search_query_from_url(url).map(|(q, _)| q))
             .unwrap_or_default();
         let is_loading = self.tab_pages
             .get(&tab_id)
             .and_then(|state| state.loading_url.as_deref())
             == Some(url);
+        let current_page = self.tab_pages
+            .get(&tab_id)
+            .map(|state| state.search_page)
+            .unwrap_or(1);
         let results = self.tab_pages
             .get(&tab_id)
             .and_then(|state| state.search_results.clone());
@@ -2285,6 +2380,53 @@ impl FortrustApp {
                     ui.add_space(10.0);
                 }
             });
+
+        // Pagination bar
+        content_ui.add_space(12.0);
+        let page_bar_rect = Rect::from_min_size(
+            content_ui.cursor().min,
+            Vec2::new(content_w, 36.0),
+        );
+        let page_center_x = page_bar_rect.center().x;
+
+        // Previous button
+        if current_page > 1 {
+            let prev_rect = Rect::from_min_size(
+                Pos2::new(page_center_x - 90.0, page_bar_rect.min.y),
+                Vec2::new(72.0, 28.0),
+            );
+            let prev_resp = content_ui.interact(prev_rect, content_ui.id().with("search_prev"), egui::Sense::click());
+            let prev_hovered = prev_resp.hovered();
+            content_ui.painter().rect_filled(prev_rect, 6.0, if prev_hovered { self.theme.glass_hover } else { self.theme.glass_bg });
+            content_ui.painter().rect_stroke(prev_rect, 6.0, Stroke::new(1.0, self.theme.glass_border), egui::StrokeKind::Inside);
+            content_ui.painter().text(prev_rect.center(), egui::Align2::CENTER_CENTER, "Previous", egui::FontId::proportional(12.0), if prev_hovered { self.theme.text_primary } else { self.theme.text_secondary });
+            if prev_resp.clicked() {
+                navigate = Some(private_search_url_with_page(&query, current_page - 1));
+            }
+        }
+
+        // Page number indicator
+        content_ui.painter().text(
+            Pos2::new(page_center_x, page_bar_rect.center().y),
+            egui::Align2::CENTER_CENTER,
+            format!("Page {current_page}"),
+            egui::FontId::proportional(12.0),
+            self.theme.text_muted,
+        );
+
+        // Next button
+        let next_rect = Rect::from_min_size(
+            Pos2::new(page_center_x + 18.0, page_bar_rect.min.y),
+            Vec2::new(72.0, 28.0),
+        );
+        let next_resp = content_ui.interact(next_rect, content_ui.id().with("search_next"), egui::Sense::click());
+        let next_hovered = next_resp.hovered();
+        content_ui.painter().rect_filled(next_rect, 6.0, if next_hovered { self.theme.glass_hover } else { self.theme.glass_bg });
+        content_ui.painter().rect_stroke(next_rect, 6.0, Stroke::new(1.0, self.theme.glass_border), egui::StrokeKind::Inside);
+        content_ui.painter().text(next_rect.center(), egui::Align2::CENTER_CENTER, "Next", egui::FontId::proportional(12.0), if next_hovered { self.theme.text_primary } else { self.theme.text_secondary });
+        if next_resp.clicked() {
+            navigate = Some(private_search_url_with_page(&query, current_page + 1));
+        }
 
         navigate
     }
@@ -2848,7 +2990,7 @@ fn looks_like_host_candidate(input: &str) -> bool {
 }
 
 fn title_from_url(url: &str) -> String {
-    if let Some(query) = search_query_from_url(url) {
+    if let Some((query, _)) = search_query_from_url(url) {
         return format!("Search: {query}").chars().take(32).collect();
     }
 
@@ -2863,15 +3005,28 @@ fn private_search_url(query: &str) -> String {
     format!("fortrust://search?q={}", urlencoding::encode(query.trim()))
 }
 
-fn search_query_from_url(url: &str) -> Option<String> {
+fn search_query_from_url(url: &str) -> Option<(String, usize)> {
     if !url.starts_with("fortrust://search") {
         return None;
     }
     let parsed = url::Url::parse(url).ok()?;
-    parsed
+    let query = parsed
         .query_pairs()
         .find_map(|(key, value)| (key == "q").then(|| value.trim().to_owned()))
-        .filter(|query| !query.is_empty())
+        .filter(|query| !query.is_empty())?;
+    let page: usize = parsed
+        .query_pairs()
+        .find_map(|(key, value)| (key == "page").then(|| value.parse::<usize>().ok()).flatten())
+        .unwrap_or(1);
+    Some((query, page))
+}
+
+fn private_search_url_with_page(query: &str, page: usize) -> String {
+    if page <= 1 {
+        private_search_url(query)
+    } else {
+        format!("fortrust://search?q={}&page={}", urlencoding::encode(query.trim()), page)
+    }
 }
 
 fn search_backend_label(backend: &fortrust_search::SearchBackend) -> &'static str {

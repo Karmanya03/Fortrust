@@ -678,7 +678,7 @@ impl TrustEngine {
                 .enable_all()
                 .build()
                 .ok()?;
-            Some(rt.block_on(async { network.fetch(request).await }).ok()?)
+            rt.block_on(async { network.fetch(request).await }).ok()
         })
         .join()
         .ok()??;
@@ -1557,10 +1557,52 @@ fn internal_html(url: &str) -> String {
             "Fortrust Settings".to_owned(),
             format!(
                 r#"<div class="card">
-  <h1>&#9881;&#65039; Settings</h1>
-  <h2>Browser configuration</h2>
-  <p>Settings are managed through the sidebar privacy panel.</p>
+  <h1>&#9881;&#65039; Fortrust Settings</h1>
+  <h2>Browser configuration overview</h2>
+  <p>All settings can be changed through the sidebar privacy panel (click the icon rail on the left).</p>
   <span class="badge">{TRUST_ENGINE_NAME}</span>
+  <span class="badge">Privacy-first</span>
+</div>
+<div class="card" style="margin-top: 16px;">
+  <h2>Features</h2>
+  <table style="width: 100%; border-collapse: collapse; font-size: 13px;">
+    <tr><td style="padding: 6px 0; color: #8b949e;">Ad Blocking</td><td style="text-align: right;">&#9989; Built-in</td></tr>
+    <tr><td style="padding: 6px 0; color: #8b949e;">Tracker Blocking</td><td style="text-align: right;">&#9989; Built-in</td></tr>
+    <tr><td style="padding: 6px 0; color: #8b949e;">HTTPS Upgrades</td><td style="text-align: right;">&#9989; Enabled</td></tr>
+    <tr><td style="padding: 6px 0; color: #8b949e;">Fingerprint Protection</td><td style="text-align: right;">&#9989; Active</td></tr>
+    <tr><td style="padding: 6px 0; color: #8b949e;">GPC / DNT Headers</td><td style="text-align: right;">&#9989; Sent</td></tr>
+    <tr><td style="padding: 6px 0; color: #8b949e;">Third-party Cookie Block</td><td style="text-align: right;">&#9989; Enabled</td></tr>
+    <tr><td style="padding: 6px 0; color: #8b949e;">Local Full-Text Search</td><td style="text-align: right;">&#9989; Tantivy index</td></tr>
+    <tr><td style="padding: 6px 0; color: #8b949e;">Workspaces</td><td style="text-align: right;">&#9989; Container tabs</td></tr>
+  </table>
+</div>
+<div class="card">
+  <h2>Rendering Pipeline</h2>
+  <table style="width: 100%; border-collapse: collapse; font-size: 13px;">
+    <tr><td style="padding: 6px 0; color: #8b949e;">HTML Parser</td><td style="text-align: right;">html5ever (spec-compliant)</td></tr>
+    <tr><td style="padding: 6px 0; color: #8b949e;">CSS Engine</td><td style="text-align: right;">cssparser + selectors 0.25</td></tr>
+    <tr><td style="padding: 6px 0; color: #8b949e;">Layout Engine</td><td style="text-align: right;">Block/inline/flex/table</td></tr>
+    <tr><td style="padding: 6px 0; color: #8b949e;">Text Rendering</td><td style="text-align: right;">cosmic-text + swash</td></tr>
+    <tr><td style="padding: 6px 0; color: #8b949e;">GUI Framework</td><td style="text-align: right;">egui + wgpu (GPU-accelerated)</td></tr>
+    <tr><td style="padding: 6px 0; color: #8b949e;">JavaScript</td><td style="text-align: right;">Boa 0.20 (sandboxed)</td></tr>
+  </table>
+</div>
+<div class="card">
+  <h2>Storage</h2>
+  <table style="width: 100%; border-collapse: collapse; font-size: 13px;">
+    <tr><td style="padding: 6px 0; color: #8b949e;">Database</td><td style="text-align: right;">redb (embedded key-value)</td></tr>
+    <tr><td style="padding: 6px 0; color: #8b949e;">Search Index</td><td style="text-align: right;">tantivy (full-text)</td></tr>
+    <tr><td style="padding: 6px 0; color: #8b949e;">History</td><td style="text-align: right;">Time-indexed browsing history</td></tr>
+    <tr><td style="padding: 6px 0; color: #8b949e;">Bookmarks</td><td style="text-align: right;">Persisted bookmark store</td></tr>
+    <tr><td style="padding: 6px 0; color: #8b949e;">Cookies</td><td style="text-align: right;">First-party isolated cookies</td></tr>
+  </table>
+</div>
+<div class="card">
+  <h2>Search Backends</h2>
+  <p style="font-size: 13px; line-height: 1.7;">
+    DuckDuckGo &#8226; Stract &#8226; Wikipedia &#8226; Brave Search &#8226; Mojeek &#8226; SearXNG
+  </p>
+  <p style="font-size: 12px; margin-top: 6px;">Results are aggregated client-side with no intermediate server.</p>
 </div>"#
             ),
         )

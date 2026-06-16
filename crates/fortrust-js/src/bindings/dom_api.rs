@@ -1207,18 +1207,16 @@ fn build_canvas_2d_context(ctx: &mut Context, canvas_ptr: usize) -> JsResult<JsV
             if let Some(val) = args.first() {
                 if let Some(obj) = val.as_object() {
                     // Check for gradient id
-                    if let Ok(id_val) = obj.get(js_string!("__gradient_id"), ctx) {
-                        if let Some(id) = id_val.as_number() {
+                    if let Ok(id_val) = obj.get(js_string!("__gradient_id"), ctx)
+                        && let Some(id) = id_val.as_number() {
                             let mut map = CANVAS_CONTEXTS.lock().unwrap();
                             if let Some(c) = map.get_mut(&cp) { c.set_fill_style_gradient(id as u64); }
-                        }
                     }
                     // Check for pattern id
-                    if let Ok(id_val) = obj.get(js_string!("__pattern_id"), ctx) {
-                        if let Some(id) = id_val.as_number() {
+                    if let Ok(id_val) = obj.get(js_string!("__pattern_id"), ctx)
+                        && let Some(id) = id_val.as_number() {
                             let mut map = CANVAS_CONTEXTS.lock().unwrap();
                             if let Some(c) = map.get_mut(&cp) { c.set_fill_style_pattern(id as u64); }
-                        }
                     }
                 } else {
                     let s = val.to_string(ctx).map(|s| s.to_std_string_escaped()).unwrap_or_default();
@@ -1241,17 +1239,15 @@ fn build_canvas_2d_context(ctx: &mut Context, canvas_ptr: usize) -> JsResult<JsV
         let f = unsafe { NativeFunction::from_closure(move |_this, args, ctx| {
             if let Some(val) = args.first() {
                 if let Some(obj) = val.as_object() {
-                    if let Ok(id_val) = obj.get(js_string!("__gradient_id"), ctx) {
-                        if let Some(id) = id_val.as_number() {
+                    if let Ok(id_val) = obj.get(js_string!("__gradient_id"), ctx)
+                        && let Some(id) = id_val.as_number() {
                             let mut map = CANVAS_CONTEXTS.lock().unwrap();
                             if let Some(c) = map.get_mut(&cp) { c.set_stroke_style_gradient(id as u64); }
-                        }
                     }
-                    if let Ok(id_val) = obj.get(js_string!("__pattern_id"), ctx) {
-                        if let Some(id) = id_val.as_number() {
+                    if let Ok(id_val) = obj.get(js_string!("__pattern_id"), ctx)
+                        && let Some(id) = id_val.as_number() {
                             let mut map = CANVAS_CONTEXTS.lock().unwrap();
                             if let Some(c) = map.get_mut(&cp) { c.set_stroke_style_pattern(id as u64); }
-                        }
                     }
                 } else {
                     let s = val.to_string(ctx).map(|s| s.to_std_string_escaped()).unwrap_or_default();
@@ -1702,10 +1698,9 @@ fn build_canvas_2d_context(ctx: &mut Context, canvas_ptr: usize) -> JsResult<JsV
                     .and_then(|v| v.as_number()).unwrap_or(0.0) as usize;
                 let mut dash = Vec::with_capacity(len_val);
                 for i in 0..len_val {
-                    if let Ok(v) = arr_val.get(i, ctx) {
-                        if let Some(n) = v.as_number() {
+                    if let Ok(v) = arr_val.get(i, ctx)
+                        && let Some(n) = v.as_number() {
                             dash.push(n as f32);
-                        }
                     }
                 }
                 let mut map = CANVAS_CONTEXTS.lock().unwrap();
