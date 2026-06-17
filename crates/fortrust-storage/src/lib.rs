@@ -1,12 +1,14 @@
 pub mod bookmarks;
 pub mod cookies;
 pub mod history;
+pub mod indexed_db;
 pub mod local_storage;
 pub mod settings;
 
 pub use bookmarks::{Bookmark, BookmarkDatabase, BookmarkFolder, BookmarkStore};
 pub use cookies::{CookieDatabase, CookieJar, CookieKey, CookiePolicy, CookieValue};
 pub use history::{HistoryDatabase, HistoryEntry, HistoryQuery, HistoryStore};
+pub use indexed_db::IndexedDbStore;
 pub use local_storage::LocalStorageStore;
 pub use settings::{SettingValue, SettingsDatabase, SettingsStore};
 

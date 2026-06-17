@@ -1,8 +1,13 @@
+pub mod base64;
 pub mod console;
+pub mod crypto;
 pub mod dom_api;
 pub mod fetch;
+pub mod indexed_db;
 pub mod location;
+pub mod microtask;
 pub mod navigator;
+pub mod performance;
 pub mod storage;
 pub mod timers;
 pub mod screen;

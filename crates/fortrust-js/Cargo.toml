@@ -26,3 +26,5 @@ url.workspace = true
 lazy_static = "1.4"
 base64 = { workspace = true }
 image = { version = "0.24", default-features = false, features = ["png"] }
+rand = { workspace = true }
+ring = { workspace = true }

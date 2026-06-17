@@ -457,26 +457,14 @@ fn validate_controls<'arena>(node: NodeRef<'arena>, errors: &mut Vec<ValidationE
     }
 }
 
-/// Simple glob-style pattern matching for HTML `pattern` attribute.
-/// Converts basic regex patterns (no groups, no backreferences).
+/// Match an HTML5 `pattern` attribute value against a string using proper regex.
+/// HTML5 patterns are automatically anchored (implicit `^` and `$`).
 fn simple_pattern_match(pattern: &str, value: &str) -> Result<bool, ()> {
-    // Build a simple regex from the HTML pattern
-    // HTML patterns are anchored: ^pattern$
-    let _regex_str = format!("^(?:{})$", pattern);
-    // Use a simple check: try to parse as regex
-    // For production, we'd use the `regex` crate, but to avoid adding a dependency,
-    // we do a basic comparison
-    if pattern == ".*" || pattern.is_empty() {
+    if pattern.is_empty() || pattern == ".*" {
         return Ok(true);
     }
-    // Very basic: check if pattern is a literal match or simple character class
-    // This is intentionally simplified — a real implementation would use regex crate
-    if !pattern.contains('[') && !pattern.contains('(') && !pattern.contains('|') && !pattern.contains('*') && !pattern.contains('+') && !pattern.contains('?') && !pattern.contains('\\') && !pattern.contains('{') {
-        // Literal pattern — must match exactly
-        return Ok(value == pattern);
-    }
-    // For complex patterns, accept the value (fail-open for now)
-    Ok(true)
+    let anchored = format!("^(?:{})$", pattern);
+    regex::Regex::new(&anchored).map(|re| re.is_match(value)).map_err(|_| ())
 }
 
 /// Basic email validation (checks for @ and a dot after @).

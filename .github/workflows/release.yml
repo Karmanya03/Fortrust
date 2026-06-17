@@ -2,68 +2,48 @@ name: Release
 
 on:
   push:
-    tags: [ "v*" ]
+    tags: ["v*"]
 
 env:
   CARGO_TERM_COLOR: always
 
 jobs:
   build:
-    name: Build ${{ matrix.name }}
+    name: Build ${{ matrix.target }}
     runs-on: ${{ matrix.os }}
     strategy:
       matrix:
         include:
-          - name: linux-x86_64
+          - target: x86_64-unknown-linux-gnu
             os: ubuntu-latest
-            target: x86_64-unknown-linux-gnu
-          - name: macos-x86_64
-            os: macos-13
-            target: x86_64-apple-darwin
-          - name: macos-arm64
+            artifact_name: fortrust-linux-x86_64
+          - target: x86_64-apple-darwin
             os: macos-latest
-            target: aarch64-apple-darwin
-          - name: windows-x86_64
+            artifact_name: fortrust-macos-x86_64
+          - target: aarch64-apple-darwin
+            os: macos-latest
+            artifact_name: fortrust-macos-aarch64
+          - target: x86_64-pc-windows-msvc
             os: windows-latest
-            target: x86_64-pc-windows-msvc
-
+            artifact_name: fortrust-windows-x86_64.exe
     steps:
-      - name: Checkout
-        uses: actions/checkout@v4
-
-      - name: Install system dependencies (Linux)
-        if: runner.os == 'Linux'
-        run: sudo apt-get update && sudo apt-get install -y libx11-dev libx11-xcb-dev libxkbcommon-dev libwayland-dev libxcb-dri2-0-dev libxcb-icccm4-dev libxcb-present-dev libxcb-composite0-dev libxcb-keysyms1-dev libxcb-xfixes0-dev libxcb-xinput-dev libxcb-randr0-dev libxcb-shm0-dev libxcb-xinerama0-dev libxcb-xkb-dev
-
-      - name: Set up Rust toolchain
-        uses: actions-rs/toolchain@v1
+      - uses: actions/checkout@v4
+      - uses: actions-rust-lang/setup-rust-toolchain@v1
         with:
-          profile: minimal
           toolchain: stable
           target: ${{ matrix.target }}
-
-      - name: Build release
-        run: cargo build --workspace --release --target ${{ matrix.target }}
-
-      - name: Create artifact directory
-        shell: bash
-        run: |
-          mkdir -p artifacts
-          if [ "${{ runner.os }}" = "Windows" ]; then
-            cp target/${{ matrix.target }}/release/fortrust.exe artifacts/
-            cp target/${{ matrix.target }}/release/renderer.exe artifacts/
-            cp target/${{ matrix.target }}/release/netproc.exe artifacts/
-          else
-            cp target/${{ matrix.target }}/release/fortrust artifacts/
-            cp target/${{ matrix.target }}/release/renderer artifacts/
-            cp target/${{ matrix.target }}/release/netproc artifacts/
-          fi
-
-      - name: Upload artifacts
-        uses: actions/upload-artifact@v4
+      - uses: actions/cache@v4
         with:
-          name: fortrust-${{ matrix.name }}
-          path: artifacts/*
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: ${{ runner.os }}-cargo-${{ hashFiles('**/Cargo.lock') }}-${{ matrix.target }}
+      - run: cargo build --release --target ${{ matrix.target }}
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.artifact_name }}
+          path: target/${{ matrix.target }}/release/fortrust${{ matrix.target == 'x86_64-pc-windows-msvc' && '.exe' || '' }}
 
   release:
     name: Create Release
@@ -72,13 +52,13 @@ jobs:
     permissions:
       contents: write
     steps:
-      - name: Download all artifacts
-        uses: actions/download-artifact@v4
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
         with:
-          path: artifacts
-
-      - name: Create GitHub Release
+          pattern: fortrust-*
+          merge-multiple: true
+      - name: Create Release
         uses: softprops/action-gh-release@v2
         with:
-          files: artifacts/**/*
+          files: fortrust-*
           generate_release_notes: true

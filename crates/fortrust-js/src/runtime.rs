@@ -13,7 +13,7 @@ use crate::bindings;
 use crate::event_loop::{EventLoop, TimerHandle};
 use fortrust_core::FingerprintGuard;
 use fortrust_dom::Document;
-use fortrust_storage::LocalStorageStore;
+use fortrust_storage::{IndexedDbStore, LocalStorageStore};
 
 pub type JsValue = BoaValue;
 
@@ -53,6 +53,7 @@ pub struct WebApiRegistry {
     timers_enabled: bool,
     fetch_enabled: bool,
     storage_enabled: bool,
+    indexed_db_enabled: bool,
     dom_bridge_enabled: bool,
     websocket_enabled: bool,
     allowed_origins: Vec<String>,
@@ -67,6 +68,7 @@ impl WebApiRegistry {
             timers_enabled: true,
             fetch_enabled: true,
             storage_enabled: true,
+            indexed_db_enabled: true,
             dom_bridge_enabled: true,
             websocket_enabled: true,
             allowed_origins: Vec::new(),
@@ -92,6 +94,11 @@ impl WebApiRegistry {
 
     pub fn with_storage(mut self, enabled: bool) -> Self {
         self.storage_enabled = enabled;
+        self
+    }
+
+    pub fn with_indexed_db(mut self, enabled: bool) -> Self {
+        self.indexed_db_enabled = enabled;
         self
     }
 
@@ -145,6 +152,7 @@ pub struct JsRuntime {
     network: Option<fortrust_net::NetworkClient>,
     arena: Option<&'static fortrust_dom::DomArena>,
     local_storage: Option<LocalStorageStore>,
+    indexed_db: Option<IndexedDbStore>,
     /// Per-workspace fingerprint guard for spoofed navigator/screen/canvas values.
     fingerprint_guard: Option<FingerprintGuard>,
 }
@@ -162,6 +170,7 @@ impl JsRuntime {
             network: None,
             arena: None,
             local_storage: None,
+            indexed_db: None,
             fingerprint_guard: None,
         }
     }
@@ -188,6 +197,11 @@ impl JsRuntime {
 
     pub fn with_local_storage(mut self, store: LocalStorageStore) -> Self {
         self.local_storage = Some(store);
+        self
+    }
+
+    pub fn with_indexed_db_store(mut self, store: IndexedDbStore) -> Self {
+        self.indexed_db = Some(store);
         self
     }
 
@@ -265,6 +279,19 @@ impl JsRuntime {
         if registry.websocket_enabled {
             bindings::websocket::register(&mut self.context)?;
         }
+
+        if registry.indexed_db_enabled {
+            if let Some(ref store) = self.indexed_db {
+                bindings::indexed_db::initialize(std::sync::Arc::new(store.clone()));
+            }
+            bindings::indexed_db::register(&mut self.context)?;
+        }
+
+        bindings::crypto::register(&mut self.context)?;
+        bindings::performance::register(&mut self.context)?;
+        bindings::base64::register(&mut self.context)?;
+        bindings::microtask::initialize(event_loop.task_queue());
+        bindings::microtask::register(&mut self.context)?;
 
         debug!("JS runtime initialized for origin: {}", origin);
         Ok(())
